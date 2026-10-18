@@ -363,13 +363,21 @@ jobs:
           # Bere "one or more" adresaru (tests/deko3d/shader_validation.cpp:
           # for (int i = 1; i < argc; ++i)), takze staci ten jediny, ktery se
           # skutecne zabundloval.
-          asset_dirs=()
+          #
+          # POZOR: cely tenhle workflow je POSIX sh -- zadna pole, zadne [[.
+          # Run 39137051454 skoncil v tomhle kroku exit 2 a bez jedine ::error::
+          # anotace, tedy na syntaxi, ne na zadnem z guardu: bash pole
+          # (asset_dirs=() a +=) nejsou v kontejnerovem shellu k dispozici.
+          # Cesty neobsahuji mezery, takze se dole expanduje bez uvozovek.
+          asset_dirs=
           for v in 4248 3668; do
             d="$CORES_DIR/NetherSX2-v2.2n-$v/assets"
-            [ -d "$d" ] && asset_dirs+=("$d")
+            if [ -d "$d" ]; then asset_dirs="$asset_dirs $d"; fi
           done
-          [ "${#asset_dirs[@]}" -gt 0 ] || { echo "::error::zadne assets k validaci shaderu"; exit 1; }
-          ./out/shader-tests/deko3d_shader_validation "${asset_dirs[@]}" \
+          echo "::notice::shader-test assets dirs:${asset_dirs:- ZADNE}"
+          [ -n "$asset_dirs" ] || { echo "::error::zadne assets k validaci shaderu"; exit 1; }
+          # shellcheck disable=SC2086
+          ./out/shader-tests/deko3d_shader_validation $asset_dirs \
             || { echo "::error::shader_validation selhal za behu"; exit 1; }
 
       - name: Emulator -- Vulkan (NVK)
