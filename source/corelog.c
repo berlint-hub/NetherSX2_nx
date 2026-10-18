@@ -61,7 +61,24 @@ extern so_module emu_mod;
 #define CORELOG_LIMIT  (2 * 1024 * 1024)
 #endif
 #define CORELOG_HARD   (CORELOG_LIMIT + 256 * 1024)
+// Chatter stops at CORELOG_HARD, but ERROR and above keep this much past it.
+// The cap used to block everything, death note included, so a session long
+// enough to fill the file lost exactly the line explaining why the process
+// died -- which is the only line the file exists for.
+#define CORELOG_TAIL   (64 * 1024)
 #define CORELOG_LINE   1024
+
+// A line at INFO or below whose exact text was already written within the last
+// few distinct lines is counted instead of written. The core emits some things
+// unconditionally at INFO during gameplay -- Timezone=-360 and SummerTime=0
+// alternate about 110 times a second -- and PCSX2's console sink flattens every
+// Log:: level to ANDROID_LOG_INFO, so priority cannot separate that from
+// anything worth keeping. Matching on exact text within a small window is
+// narrow enough to leave real repeated lines alone (the "# Initialize GS ..."
+// block recurs three times, but always more than four distinct lines apart)
+// without hardcoding strings that would break on the next core.
+#define CORELOG_REPEAT_WINDOW  4
+#define CORELOG_REPEAT_REPORT  500
 
 static const char *const corelog_priority[] = {
   "?", "?", "V", "D", "I", "W", "E", "F", "S"
@@ -72,6 +89,10 @@ static Mutex corelog_mutex;
 static FILE *corelog_file;
 static char  corelog_abort_text[512];
 static long  corelog_written;
+static char  corelog_recent[CORELOG_REPEAT_WINDOW][CORELOG_LINE];
+static int   corelog_recent_next;
+static long  corelog_repeats;
+static char  corelog_repeat_text[CORELOG_LINE];
 #ifndef NETHERSX2_VK_DIAGNOSTIC
 static int   corelog_chatter_stopped; // soft cap hit; only >= ERROR still writes
 #endif
@@ -81,12 +102,37 @@ static void
 corelog_emit_locked(int priority, const char *tag, const char *text) {
   const int important = (priority >= CORELOG_ERROR);
 
-  if (!corelog_file || corelog_written >= CORELOG_HARD)
+  if (!corelog_file)
+    return;
+  if (corelog_written >= CORELOG_HARD + (important ? CORELOG_TAIL : 0))
     return;
 #ifndef NETHERSX2_VK_DIAGNOSTIC
   if (!important && corelog_chatter_stopped)
     return;
 #endif
+
+  if (!important) {
+    int seen = 0;
+    for (int i = 0; i < CORELOG_REPEAT_WINDOW; i++)
+      if (corelog_recent[i][0] && !strcmp(corelog_recent[i], text)) { seen = 1; break; }
+    if (seen) {
+      // Counted, not written. The periodic report keeps a long flood visible
+      // in the file without letting it fill the card.
+      corelog_repeats++;
+      snprintf(corelog_repeat_text, sizeof corelog_repeat_text, "%s", text);
+      if (corelog_repeats % CORELOG_REPEAT_REPORT == 0)
+        fprintf(corelog_file, "-- %ld repeats suppressed, last: %s --\n",
+                corelog_repeats, corelog_repeat_text);
+      return;
+    }
+    if (corelog_repeats) {
+      fprintf(corelog_file, "-- %ld repeats suppressed, last: %s --\n",
+              corelog_repeats, corelog_repeat_text);
+      corelog_repeats = 0;
+    }
+    snprintf(corelog_recent[corelog_recent_next], CORELOG_LINE, "%s", text);
+    corelog_recent_next = (corelog_recent_next + 1) % CORELOG_REPEAT_WINDOW;
+  }
 
   struct timespec time;
   clock_gettime(CLOCK_MONOTONIC, &time);

@@ -505,6 +505,14 @@ jobs:
           pfd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core %d, mask" || true)
           pfp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core %d, mask" || true)
           echo "::notice::pinovani vlaken v obou: ThreadPinning ${pind}x (diag) / ${pinp}x (produkce), log-format ${pfd}x (diag) / ${pfp}x (produkce)"
+          # Sbalovani opakovani v corelogu. Jadro behem hry loguje Timezone=-360
+          # a SummerTime=0 stridave ~110x za sekundu; v diag buildu to zaplnilo
+          # 8 MiB za mene nez dvacet minut a pak prestalo psat uplne vsechno,
+          # death note nevyjimaje. Neni to za zadnym #ifdef, takze musi byt
+          # v obou binarkach.
+          repd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "repeats suppressed" || true)
+          repp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "repeats suppressed" || true)
+          echo "::notice::corelog sbalovani opakovani: ${repd}x (diag) / ${repp}x (produkce)"
           echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
           echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-total ${scd}x (diag) / ${scp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
           if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
@@ -529,6 +537,10 @@ jobs:
           fi
           if [ "$cpud" = "0" ] || [ "$cpup" = "0" ]; then
             echo "::error::synteticke soubory pro cpuinfo chybi v binarce (diag ${cpud}x / produkce ${cpup}x) -- /sys a /proc cesty by opet selhaly"
+            exit 1
+          fi
+          if [ "$repd" = "0" ] || [ "$repp" = "0" ]; then
+            echo "::error::corelog nesbaluje opakovani (diag ${repd}x / produkce ${repp}x) -- zaplava Timezone/SummerTime by v diag buildu do dvaceti minut odrizla i death note"
             exit 1
           fi
           if [ "$pind" = "0" ] || [ "$pinp" = "0" ] || [ "$pfd" = "0" ] || [ "$pfp" = "0" ]; then
