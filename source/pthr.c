@@ -222,8 +222,83 @@ void pthr_pin_bg_core(void) {
 // Horizon never preempts between equal priorities and libnx gives every thread
 // its creator's, so the core-3 tenants carry distinct ones. Failure is harmless:
 // the thread keeps the inherited priority.
+// Horizon never preempts between equal priorities and libnx hands every thread
+// its creator's, so co-tenants of one core need distinct ones. Lower number is
+// higher priority.
+#define EMU_THREAD_PRIO    30  // EE / MTGS / MTVU: above everything else
+#define SPU2_THREAD_PRIO   44  // between audio (43) and input (45)
+#define DRIVER_THREAD_PRIO 47  // below audio and input on the shared bg core
+
 void pthr_set_priority(int priority) {
   svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)priority);
+}
+
+// ---------------------------------------------------------------------------
+// threads of statically linked third-party code (Mesa/NVK)
+// ---------------------------------------------------------------------------
+
+// libnvk.a and libnvk_support.a are linked into this binary and create their own
+// worker threads for shader compilation and disk-cache work. They inherit the
+// process default affinity, which is every granted core, so a driver thread can
+// land on core 0 and interrupt the EE mid-frame. Core 3 is the only one with
+// spare capacity -- it carries the 48 kHz audio callback and input polling and
+// is otherwise idle -- so that is where they go, at a priority below both, so a
+// driver thread can never cost an audio slot.
+void pthr_pin_driver_core(void) {
+  mutexLock(&core_lock);
+  core_init_once();
+  const int bg = bg_core;
+  mutexUnlock(&core_lock);
+  if (bg < 0)
+    return;   // three-core grant: no spare core, leaving the default is better
+  if (R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, bg, 1u << bg))) {
+    pthr_set_priority(DRIVER_THREAD_PRIO);
+    // Bounded on purpose: Mesa creates a handful of workers, and the count is
+    // the evidence that --wrap actually caught them. The counter is raced by
+    // design -- the worst case is a couple of extra lines, which costs less
+    // than a lock on a path that runs during shader compilation.
+    static int logged;
+    if (logged < 8) {
+      logged++;
+      corelog_log(CORELOG_INFO, "Wrapper", "driver thread -> core %d, mask 0x%x, priority %d",
+                  bg, 1u << bg, DRIVER_THREAD_PRIO);
+    }
+  }
+}
+
+extern int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                                 void *(*start)(void *), void *arg);
+
+typedef struct { void *(*start)(void *); void *arg; } DriverStart;
+
+static void *driver_trampoline(void *p) {
+  DriverStart s = *(DriverStart *)p;
+  free(p);
+  pthr_pin_driver_core();
+  return s.start(s.arg);
+}
+
+// Linked in through -Wl,--wrap=pthread_create. Anything that is not one of our
+// own four creation sites arrives here, which in practice means Mesa/NVK.
+int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                          void *(*start)(void *), void *arg) {
+  DriverStart *s = malloc(sizeof *s);
+  if (!s)
+    return __real_pthread_create(thread, attr, start, arg);  // never fail a create
+  s->start = start;
+  s->arg   = arg;
+  const int rc = __real_pthread_create(thread, attr, driver_trampoline, s);
+  if (rc != 0)
+    free(s);
+  return rc;
+}
+
+// aaudio.c pins its mixer explicitly, main.c's emu_thread becomes the EE, and
+// the trampoline below assigns work cores to the core's threads once the core
+// names them through prctl(PR_SET_NAME). None of those want the driver pin.
+int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
+                     void *(*start)(void *), void *arg) {
+  return __real_pthread_create(thread, attr, start, arg);
 }
 
 // ---------------------------------------------------------------------------
@@ -272,11 +347,11 @@ void pthr_pin_by_name(const char *name) {
 
   int core; unsigned mask; int prio = -1;
   if (!strcmp(name, "CPU Thread")) {
-    core = ee; mask = 1u << ee;              // hottest thread, wants a warm cache
+    core = ee; mask = 1u << ee; prio = EMU_THREAD_PRIO;
   } else if (!strcmp(name, "GS")) {
-    core = gs; mask = (bg >= 0) ? (1u << gs) : wm;
+    core = gs; mask = (bg >= 0) ? (1u << gs) : wm; prio = EMU_THREAD_PRIO;
   } else if (!strcmp(name, "MTVU")) {
-    core = vu; mask = (bg >= 0) ? (1u << vu) : wm;
+    core = vu; mask = (bg >= 0) ? (1u << vu) : wm; prio = EMU_THREAD_PRIO;
   } else if (!strcmp(name, "SPU2")) {
     // The core's own SPU2 thread, distinct from the aaudio mixer callback that
     // pthr_pin_bg_core() already parks on the background core. Keeping the two
@@ -285,7 +360,7 @@ void pthr_pin_by_name(const char *name) {
     // priorities, so co-tenants of one core must differ.
     if (bg < 0)
       return;                                // no spare core: leave it in the pool
-    core = bg; mask = 1u << bg; prio = 44;
+    core = bg; mask = 1u << bg; prio = SPU2_THREAD_PRIO;
   } else {
     // CDVD / ISO Decompress / ImGuiFullscreen Texture Loader / anything else:
     // I/O and light, the round-robin already placed them well enough.
@@ -295,10 +370,14 @@ void pthr_pin_by_name(const char *name) {
   // Failure is harmless and worth a line rather than silence: the thread simply
   // keeps the affinity the trampoline gave it.
   if (R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, mask))) {
-    if (prio >= 0)
-      pthr_set_priority(prio);
-    corelog_log(CORELOG_INFO, "Wrapper", "thread \"%s\" -> core %d, mask 0x%x%s",
-                name, core, mask, prio >= 0 ? ", priority 44" : "");
+    // A rejected priority is worth seeing: it means EMU_THREAD_PRIO is outside
+    // the range Horizon allows this process, and the thread silently kept the
+    // inherited one.
+    const char *note = "";
+    if (prio >= 0 && R_FAILED(svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)prio)))
+      note = " (priority REJECTED)";
+    corelog_log(CORELOG_INFO, "Wrapper", "thread \"%s\" -> core %d, mask 0x%x, priority %d%s",
+                name, core, mask, prio, note);
   } else {
     corelog_log(CORELOG_WARN, "Wrapper",
                 "thread \"%s\": svcSetThreadCoreMask(core %d, mask 0x%x) failed",
@@ -392,7 +471,7 @@ int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr
   active_core_threads++;
   pthread_mutex_unlock(&thread_lock);
 
-  int ret = pthread_create(thread, &a, thread_trampoline, s);
+  int ret = pthr_create_self(thread, &a, thread_trampoline, s);
   pthread_attr_destroy(&a);
   if (ret != 0) {
     pthread_mutex_lock(&thread_lock);
@@ -418,7 +497,7 @@ int pthread_detach_soloader(pthread_t thread) {
 
   pthread_mutex_lock(&thread_lock);
   if (!detach_reaper_started) {
-    int ret = pthread_create(&detach_reaper, NULL, detach_reaper_main, NULL);
+    int ret = pthr_create_self(&detach_reaper, NULL, detach_reaper_main, NULL);
     if (ret != 0) {
       pthread_mutex_unlock(&thread_lock);
       free(item);

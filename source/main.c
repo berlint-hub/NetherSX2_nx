@@ -508,7 +508,7 @@ static void run_startup_sequence(void) {
 
   nl.applySettings(fake_env, NATIVE_CLASS);
 
-  pthread_create(&emu_thread, NULL, emu_thread_main, NULL);
+  pthread_create_self_marker: pthr_create_self(&emu_thread, NULL, emu_thread_main, NULL);
 
   svcSleepThread(250000000ull);
   nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,

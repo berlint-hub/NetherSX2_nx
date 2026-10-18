@@ -80,7 +80,23 @@ shortcut; launched from the album the grant is three cores, so they keep a
 migratable mask and a light thread can still move off a busy peer. **Settings >
 Thread pinning** turns this off (`Auto`), restoring the older round-robin that
 hands out cores in thread-creation order. Every decision is logged to
-`/switch/nethersx2/nethersx2-core.log` as `thread "GS" -> core 1, mask 0x2`.
+`/switch/nethersx2/nethersx2-core.log` as
+`thread "GS" -> core 1, mask 0x2, priority 30`. The three emulation threads run
+at priority 30, above everything else in the process, because Horizon never
+preempts between equal priorities and libnx hands each thread its creator's.
+
+Core 3 carries the 48 kHz audio callback (priority 43) and input polling (45),
+which leaves it mostly idle, so the threads that `libnvk.a` and
+`libnvk_support.a` create for themselves — shader compilation, disk cache — are
+moved there at priority 47, below both. They are statically linked into the
+emulator, so they inherit the process default affinity, which is every granted
+core; without this a driver thread can land on core 0 and interrupt the EE
+mid-frame. That is done with `-Wl,--wrap=pthread_create`: our own four creation
+sites call `pthr_create_self()` (which goes straight to `__real_pthread_create`)
+so they keep the affinity they arrange themselves, and everything else arriving
+at `__wrap_pthread_create` is third-party. Each moved thread logs
+`driver thread -> core 3, mask 0x8, priority 47`, capped at eight lines. On a
+three-core grant there is no spare core, so nothing is moved.
 
 **Settings > VU cycle steal** is a binary patch for games whose VU1 thread runs
 flat out, such as Gran Turismo 3 distance views. It repurposes the

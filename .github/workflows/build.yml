@@ -404,6 +404,17 @@ jobs:
             exit "$rc"
           fi
           echo "::notice::VK nro: $(ls -la NetherSX2_nx_vk.nro 2>/dev/null)"
+          # Primy dukaz, ze -Wl,--wrap=pthread_create skutecne zasahl: mapa linku
+          # musi obsahovat oba symboly. Bez toho by vlakna Mesy/NVK dedila
+          # vychozi afinitu na vsechna jadra a mohla pristat na EE.
+          mapf=NetherSX2_nx_vk.map
+          wrapn=$(grep -c '__wrap_pthread_create' "$mapf" 2>/dev/null || true)
+          realn=$(grep -c '__real_pthread_create' "$mapf" 2>/dev/null || true)
+          echo "::notice::--wrap=pthread_create v mape: __wrap_ ${wrapn}x, __real_ ${realn}x"
+          if [ "$wrapn" = "0" ] || [ "$realn" = "0" ]; then
+            echo "::error::--wrap=pthread_create se v $mapf neprojevil (__wrap_ ${wrapn}x / __real_ ${realn}x) -- driver vlakna by zustala na vsehoch jadrech"
+            exit 1
+          fi
 
       - name: Launcher (SDL2)
         run: |
@@ -505,6 +516,17 @@ jobs:
           pfd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core %d, mask" || true)
           pfp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core %d, mask" || true)
           echo "::notice::pinovani vlaken v obou: ThreadPinning ${pind}x (diag) / ${pinp}x (produkce), log-format ${pfd}x (diag) / ${pfp}x (produkce)"
+          # Priorita EMU_THREAD_PRIO a presun driver vlaken na background jadro.
+          # "mask 0x%x, priority" je novy tvar logu pthr_pin_by_name (puvodni byl
+          # "mask 0x%x%s"), takze jeho pritomnost dokazuje i tu zmenu.
+          prid=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "driver thread -> core" || true)
+          prip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "driver thread -> core" || true)
+          emup=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "mask 0x%x, priority" || true)
+          echo "::notice::driver-pin ${prid}x (diag) / ${prip}x (produkce), priorita-v-logu ${emup}x (produkce)"
+          if [ "$prid" = "0" ] || [ "$prip" = "0" ] || [ "$emup" = "0" ]; then
+            echo "::error::pthr_pin_driver_core() nebo EMU_THREAD_PRIO se nedostaly do binarky (driver-pin diag ${prid}x / prod ${prip}x, priorita ${emup}x)"
+            exit 1
+          fi
           # Sbalovani opakovani v corelogu. Jadro behem hry loguje Timezone=-360
           # a SummerTime=0 stridave ~110x za sekundu; v diag buildu to zaplnilo
           # 8 MiB za mene nez dvacet minut a pak prestalo psat uplne vsechno,

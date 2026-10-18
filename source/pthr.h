@@ -71,6 +71,15 @@ void pthr_pin_ee_core(void);
 // No-op when Wrapper/ThreadPinning is "auto", and for names with no role.
 void pthr_pin_by_name(const char *name);
 
+// Affinity for threads created by statically linked third-party code -- in
+// practice Mesa/NVK's. Reached only through __wrap_pthread_create.
+void pthr_pin_driver_core(void);
+
+// Our own creation sites use this so they bypass the wrap and keep whatever
+// affinity they arrange themselves. See pthr.c.
+int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
+                     void *(*start)(void *), void *arg);
+
 void pthr_ensure_fake_tls(void);
 
 #endif

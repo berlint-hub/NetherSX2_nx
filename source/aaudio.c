@@ -479,7 +479,7 @@ aaudio_result_t AAudioStream_requestStart(AAudioStream *s) {
   __atomic_store_n(&s->running, 1, __ATOMIC_RELEASE);
   // spawn via newlib pthreads directly (this is OUR thread, not core-spawned);
   // it pins itself to a bg core in playback_thread.
-  int rc = pthread_create(&s->thread, NULL, playback_thread, s);
+  int rc = pthr_create_self(&s->thread, NULL, playback_thread, s);
   if (rc != 0) {
     __atomic_store_n(&s->running, 0, __ATOMIC_RELEASE);
 

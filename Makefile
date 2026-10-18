@@ -100,7 +100,13 @@ CFLAGS	+=	$(INCLUDE)
 CXXFLAGS	:= $(CFLAGS) -std=gnu++20
 
 ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) $(LTOFLAGS) -Wl,-Map,$(notdir $*.map)
+# --wrap=pthread_create: libnvk.a a libnvk_support.a jsou linkovane primo do
+# teto binarky a tvori si vlastni worker vlakna (kompilace shaderu, disk cache).
+# Ta dedi vychozi afinitu procesu = vsechna pridelená jadra, takze mohou pristat
+# na EE a rusit ho. Pres wrap je pthr.c presouva na background jadro. Vsechna
+# nase vlastni volani pthread_create pouzivaji pthr_create_self() -> __real_,
+# takze wrap se tyka jen ciziho kodu. Overeno, ze --wrap prezije -flto.
+LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) $(LTOFLAGS) -Wl,--wrap=pthread_create -Wl,-Map,$(notdir $*.map)
 
 STORAGE_LIBS := $(TOPDIR)/launcher/dependencies/build/_deps/libsmb2-build/lib/libsmb2.a \
 				$(TOPDIR)/launcher/dependencies/build/_deps/libusbhsfs-build/liblibusbhsfs.a \
