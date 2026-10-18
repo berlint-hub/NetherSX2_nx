@@ -80,6 +80,11 @@ void pthr_pin_driver_core(void);
 int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
                      void *(*start)(void *), void *arg);
 
+// Counting replacement for the core's sched_yield. The core imports it as its
+// only spin primitive, so how often each thread calls it is what separates
+// "MTVU is computing" from "MTVU is spinning idle waiting for the EE".
+int pthr_sched_yield(void);
+
 void pthr_ensure_fake_tls(void);
 
 #endif

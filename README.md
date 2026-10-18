@@ -98,6 +98,16 @@ at `__wrap_pthread_create` is third-party. Each moved thread logs
 `driver thread -> core 3, mask 0x8, priority 47`, capped at eight lines. On a
 three-core grant there is no spare core, so nothing is moved.
 
+The diagnostic build also counts `sched_yield`, the only spin primitive the core
+imports. It reports per thread — `sched_yield: thread "MTVU" called it 10000x,
+process total 10000x` — at 100, 1000, 10000 calls and then every 100000, so
+the log timestamps give a rate. That is what separates "MTVU is computing" from
+"MTVU is spinning idle waiting for the EE to queue work", which the two look
+identical for as a core sitting at 100% and which call for opposite fixes. The
+per-thread count is in TLS and exact; the process total is a raced increment and
+can lose counts, which is fine for telling hundreds per second from hundreds of
+thousands and avoids a lock on the hottest path in the process.
+
 **Settings > VU cycle steal** is a binary patch for games whose VU1 thread runs
 flat out, such as Gran Turismo 3 distance views. It repurposes the
 `EECycleSkip` multiply inside `VU_Thread::ExecuteVU` — one instruction at

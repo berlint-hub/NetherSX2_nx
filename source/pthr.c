@@ -4,9 +4,11 @@
  * of the MIT license.  See the LICENSE file for details.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sched.h>
 #include <time.h>
 #include <switch.h>
 
@@ -302,6 +304,49 @@ int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
 }
 
 // ---------------------------------------------------------------------------
+// sched_yield counter: spinning thread vs. working thread
+// ---------------------------------------------------------------------------
+
+// The core imports exactly one spin primitive -- sched_yield -- next to the
+// real sleeping ones (pthread_cond_wait, sem_wait, nanosleep). That is the
+// hybrid wait MTVU uses: spin for a while, then sleep. So "core 2 is at 100%"
+// cannot by itself say whether VU1 is computing or idling waiting for the EE to
+// queue work, and the two call for opposite fixes. Counting the calls per
+// thread settles it; the log timestamps give the rate.
+//
+// Per-thread count lives in TLS and is therefore exact. The process total is a
+// plain increment raced by every thread, so it can lose counts -- acceptable
+// for a diagnostic that only has to distinguish hundreds per second from
+// hundreds of thousands, and it avoids putting a lock on the hottest path in
+// the process.
+static __thread char tls_self_name[16];
+static __thread unsigned long long tls_yield_count;
+static unsigned long long g_yield_total;
+
+#define PTHR_YIELD_REPORT_EVERY 100000ull
+
+// Report early as well as often: a thread that yields rarely would otherwise
+// produce its first line only after a very long time, and telling "barely
+// yields" from "spins flat out" is the whole point.
+static int yield_worth_reporting(unsigned long long n) {
+  return n == 100 || n == 1000 || n == 10000 || (n % PTHR_YIELD_REPORT_EVERY) == 0;
+}
+
+int pthr_sched_yield(void) {
+  const unsigned long long mine = ++tls_yield_count;
+  ++g_yield_total;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  if (yield_worth_reporting(mine))
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "sched_yield: thread \"%s\" called it %llux, process total %llux",
+                tls_self_name[0] ? tls_self_name : "(unnamed)", mine, g_yield_total);
+#else
+  (void)mine;
+#endif
+  return sched_yield();
+}
+
+// ---------------------------------------------------------------------------
 // role-based affinity, keyed on the thread names the core sets itself
 // ---------------------------------------------------------------------------
 
@@ -331,6 +376,11 @@ int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
 void pthr_pin_by_name(const char *name) {
   if (!name || !*name)
     return;
+  // Recorded before the "auto" test and before the role dispatch, so the
+  // sched_yield counter can name every thread the core bothers to name,
+  // including the ones with no role to pin (CDVD, ISO Decompress, the ImGui
+  // texture loader) and including runs with pinning switched off.
+  snprintf(tls_self_name, sizeof tls_self_name, "%s", name);
   // "auto" leaves the trampoline's round-robin assignment exactly as it is.
   if (!strcmp(prefs_get_string("Wrapper/ThreadPinning", "role"), "auto"))
     return;

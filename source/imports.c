@@ -507,7 +507,9 @@ DynLibFunction dynlib_functions[] = {
   { "rmdir", (uintptr_t)&rmdir },
   { "sched_get_priority_max", (uintptr_t)&sched_get_priority_max_fake },
   { "sched_setaffinity", (uintptr_t)&sched_setaffinity_fake },
-  { "sched_yield", (uintptr_t)&sched_yield },
+  // Counted, not passed straight through: the ratio of sched_yield calls to
+  // elapsed time per named thread is what says whether MTVU is spinning idle.
+  { "sched_yield", (uintptr_t)&pthr_sched_yield },
   { "select", (uintptr_t)&net_select },
   { "sem_destroy", (uintptr_t)&sem_destroy_fake },
   { "sem_init", (uintptr_t)&sem_init_fake },

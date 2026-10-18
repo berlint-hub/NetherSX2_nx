@@ -510,6 +510,13 @@ jobs:
           scp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sysconf(_SC_PHYS_PAGES): total=" || true)
           logd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core logging forced on" || true)
           logp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core logging forced on" || true)
+          # Pocitadlo sched_yield je za #ifdef NETHERSX2_VK_DIAGNOSTIC, takze
+          # v produkci musi byt 0x -- stejny tvar kontroly jako sysconf-total.
+          # Odpovida na otázku, jestli MTVU na 100 % skutecne pocita, nebo
+          # spinuje naprazdno: jadro importuje sched_yield jako jedinou spin
+          # primitivu, a pocet volani za sekundu na pojmenovane vlakno to rozlisi.
+          yld=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "sched_yield: thread" || true); yld=${yld:-0}
+          ylp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sched_yield: thread" || true); ylp=${ylp:-0}
           # shim_describe_address() a novy text corelog_format_address() jsou v
           # OBOU buildech (nejsou za #ifdef), takze musi byt v obou binarkach.
           # Produkcni nro totiz po teto zmene ma naprosto stejnou velikost jako
@@ -565,6 +572,7 @@ jobs:
           vsf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "VU cycle steal level" || true)
           echo "::notice::VU cycle steal: pref ${vsd}x (diag) / ${vsp}x (produkce), log-format ${vsf}x (produkce)"
           echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
+          echo "::notice::sched_yield counter: ${yld}x (diag, ma byt 1) / ${ylp}x (produkce, ma byt 0)"
           echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-total ${scd}x (diag) / ${scp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
           if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
             echo "::error::NETHERSX2_VK_DIAGNOSTIC se v diag buildu neprojevilo -- binarka by nelogovala"
@@ -592,6 +600,10 @@ jobs:
           fi
           if [ "$vsp" = "0" ] || [ "$vsd" = "0" ] || [ "$vsf" = "0" ]; then
             echo "::error::patch_vu_steal_4248() se nedostal do binarky (pref diag ${vsd}x / prod ${vsp}x, log-format ${vsf}x)"
+            exit 1
+          fi
+          if [ "$yld" = "0" ] || [ "$ylp" != "0" ]; then
+            echo "::error::sched_yield counter neni spravne za #ifdef: diag ${yld}x (ma byt aspon 1), produkce ${ylp}x (ma byt 0)"
             exit 1
           fi
           if [ "$repd" = "0" ] || [ "$repp" = "0" ]; then
