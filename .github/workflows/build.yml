@@ -494,6 +494,17 @@ jobs:
           # radek, protoze \n v tom retezci jsou opravdove konce radku.
           cpud=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "CPU implementer" || true)
           cpup=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "CPU implementer" || true)
+          # Pinovani vlaken podle role neni za zadnym #ifdef, takze musi byt
+          # v obou binarkach. Kontroluji se dva nezavisle retezce: klic
+          # preference a format logovaneho rozhodnuti. Produkcni nro ma po
+          # tehle zmene naprosto stejnou velikost jako pred ni (16 845 699 B),
+          # takze velikost tu opet nedokazuje nic -- ani rozdil, ani jeho
+          # absenci. Dokaz musi jit pres strings.
+          pind=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "Wrapper/ThreadPinning" || true)
+          pinp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/ThreadPinning" || true)
+          pfd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core %d, mask" || true)
+          pfp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core %d, mask" || true)
+          echo "::notice::pinovani vlaken v obou: ThreadPinning ${pind}x (diag) / ${pinp}x (produkce), log-format ${pfd}x (diag) / ${pfp}x (produkce)"
           echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
           echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-total ${scd}x (diag) / ${scp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
           if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
@@ -518,6 +529,10 @@ jobs:
           fi
           if [ "$cpud" = "0" ] || [ "$cpup" = "0" ]; then
             echo "::error::synteticke soubory pro cpuinfo chybi v binarce (diag ${cpud}x / produkce ${cpup}x) -- /sys a /proc cesty by opet selhaly"
+            exit 1
+          fi
+          if [ "$pind" = "0" ] || [ "$pinp" = "0" ] || [ "$pfd" = "0" ] || [ "$pfp" = "0" ]; then
+            echo "::error::pthr_pin_by_name() se nedostal do binarky (ThreadPinning diag ${pind}x / produkce ${pinp}x, log-format diag ${pfd}x / produkce ${pfp}x) -- prctl(PR_SET_NAME) by se opet zahazoval a GS s MTVU by sdilely jadro podle poradi vytvoreni"
             exit 1
           fi
           if [ "$scp" != "0" ] || [ "$logp" != "0" ]; then
