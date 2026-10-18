@@ -380,6 +380,7 @@ struct Opt {
 #define O_STATUSK(l,k)         { l, k, OT_STATUS, nullptr,0, 0,0,0, nullptr, 0, nullptr, nullptr, 1, nullptr }
 
 static const Choice C_fastmem[]  = { {"Off","off"}, {"On","hybrid"} };
+static const Choice C_pin[]      = { {"By thread role","role"}, {"Auto (creation order)","auto"} };
 static const Choice C_upscale[]  = { {"0.25x","0.25"},{"0.5x","0.5"},{"0.75x","0.75"},
                                      {"1x (native ~480p)","1"},{"1.25x","1.25"},{"1.5x","1.5"},{"1.75x","1.75"},
                                      {"2x (~720p)","2"},{"2.25x","2.25"},{"2.5x","2.5"},{"2.75x","2.75"},{"3x (~1080p)","3"},
@@ -479,6 +480,7 @@ static const Opt S_audio[] = {
 };
 static const Opt S_emu[] = {
   O_STATUSK("Allowed CPU cores", "cpu-cores"),
+  O_CHOICE("Thread pinning",   "Wrapper/ThreadPinning", C_pin, "role"),
   O_CHOICE("Fastmem",          "Wrapper/FastmemMode", C_fastmem, "hybrid"),
   O_CHOICE("System language",  "Wrapper/SystemLanguage", C_syslang, "auto"),
   O_CHOICE("EE cycle rate",    "EmuCore/Speedhacks/EECycleRate", C_eecr, "0"),
@@ -608,6 +610,8 @@ struct SettingHelpEntry {
 static const SettingHelpEntry SETTING_HELP[] = {
   {"cpu-cores", "Allowed CPU cores",
    "How many of the Switch's four CPU cores this process may use. Shortcuts created from the launcher run on all four and keep audio and input on core 3, away from the emulator; launching from the album applet leaves core 3 to the system."},
+  {"Wrapper/ThreadPinning", "CPU affinity",
+   "Pins emulator threads to cores by the role the core reports for each one: the EE thread alone on core 0, GS and MTVU each on their own core, and SPU2 together with audio and input on core 3. This needs a HOME Menu shortcut, because only that grants all four cores; launched from the album just three are available, so GS and MTVU share two and stay free to migrate instead of being pinned. Auto is the older behaviour, which hands out cores in thread creation order. Switch to it if a specific game runs worse with role pinning."},
   {"Wrapper/Language", "Launcher language",
    "Selects the language used by the SDL launcher. System follows the language configured on the Switch. Game names, paths, server messages and user-entered text are never translated."},
   {"EmuCore/GS/upscale_multiplier", "Resolution / performance",

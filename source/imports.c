@@ -206,7 +206,23 @@ static int clock_nanosleep_fake(clockid_t clk, int flags, const struct timespec 
 
 
 // Linux-only syscalls newlib/libnx doesn't provide -> benign stubs.
-static int prctl_fake(int option, ...) { (void)option; return 0; }
+// PR_SET_NAME is the exception worth acting on: the core names six of its
+// threads through it ("CPU Thread", "GS", "MTVU", "SPU2", "CDVD",
+// "ISO Decompress", "ImGuiFullscreen Texture Loader"), and those names are the
+// only way to tell them apart -- they all arrive through one pthread_create
+// trampoline otherwise. See pthr_pin_by_name().
+#define PR_SET_NAME_LINUX 15
+static int prctl_fake(int option, ...) {
+  if (option == PR_SET_NAME_LINUX) {
+    va_list ap;
+    va_start(ap, option);
+    const char *name = va_arg(ap, const char *);
+    va_end(ap);
+    if (name)
+      pthr_pin_by_name(name);
+  }
+  return 0;
+}
 static int fallocate_fake(int fd, int mode, off_t off, off_t len) {
   (void)mode; (void)off; // best-effort: just ensure the file is at least len
   return ftruncate(fd, off + len);

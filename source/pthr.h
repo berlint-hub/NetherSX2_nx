@@ -67,6 +67,10 @@ void pthr_set_priority(int priority);
 
 void pthr_pin_ee_core(void);
 
+// Role-based affinity keyed on the name the core hands to prctl(PR_SET_NAME).
+// No-op when Wrapper/ThreadPinning is "auto", and for names with no role.
+void pthr_pin_by_name(const char *name);
+
 void pthr_ensure_fake_tls(void);
 
 #endif

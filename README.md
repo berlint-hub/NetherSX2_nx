@@ -68,6 +68,20 @@ This will not run in applet/album mode — it needs the full memory of a game
 override. Launch it by holding **R** while opening an installed title, or use a
 forwarder.
 
+Threads are pinned by role. The core names its own threads through
+`prctl(PR_SET_NAME)` — `"CPU Thread"` (EE), `"GS"` (MTGS), `"MTVU"` (VU1),
+`"SPU2"`, `"CDVD"`, `"ISO Decompress"` and `"ImGuiFullscreen Texture Loader"` —
+and the wrapper turns those names into CPU affinity: EE alone on core 0, GS and
+MTVU each on their own core, and SPU2 together with the audio callback and input
+on core 3 at priority 44, between audio's 43 and input's 45, because Horizon
+never preempts between equal priorities. GS and MTVU are pinned *exclusively*
+only when four cores are granted, which means launching through a HOME Menu
+shortcut; launched from the album the grant is three cores, so they keep a
+migratable mask and a light thread can still move off a busy peer. **Settings >
+Thread pinning** turns this off (`Auto`), restoring the older round-robin that
+hands out cores in thread-creation order. Every decision is logged to
+`/switch/nethersx2/nethersx2-core.log` as `thread "GS" -> core 1, mask 0x2`.
+
 A PS2 BIOS dump is required and must come from your own console; the launcher
 warns at startup when `bios/` is empty.
 

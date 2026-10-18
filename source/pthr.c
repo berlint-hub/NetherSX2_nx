@@ -12,6 +12,8 @@
 
 #include "pthr.h"
 #include "util.h"
+#include "prefs.h"
+#include "corelog.h"
 
 // set in the trampoline when the game's renderThread_main starts; the GL
 // ownership layer lets this thread keep the real context across parks, so its
@@ -222,6 +224,86 @@ void pthr_pin_bg_core(void) {
 // the thread keeps the inherited priority.
 void pthr_set_priority(int priority) {
   svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)priority);
+}
+
+// ---------------------------------------------------------------------------
+// role-based affinity, keyed on the thread names the core sets itself
+// ---------------------------------------------------------------------------
+
+// The core names its own threads through prctl(PR_SET_NAME). Disassembly of
+// libemucore_tegrax1.so finds six call sites, every one passing option 15:
+//   0x4adf40 "GS"                          0x7a6590 "ISO Decompress"
+//   0x4b27e4 "MTVU"                        0x7f75b8 "ImGuiFullscreen Texture Loader"
+//   0x699464 generic helper (the route by  0x83ccbc "CPU Thread"
+//           which "CDVD"/"SPU2" arrive)
+// imports.c used to discard all of it in a blind stub. Those names are the only
+// handle on which thread is which: every one of them reaches us through the
+// same pthread_create trampoline, so creation order is all assign_work_core()
+// otherwise has to go on.
+//
+// Why names beat the round-robin: the round-robin hands out preferred cores in
+// creation order, and CDVD, the ISO decompressor and the ImGui texture loader
+// are all created BEFORE GS and MTVU. The two heaviest threads can therefore
+// end up preferring the same core while a light one holds the other.
+//
+// GS and MTVU get an EXCLUSIVE core only when a fourth core exists to absorb
+// the light threads. On the three-core album-applet grant (mask 0x7) the work
+// pool is just two cores, and pinning GS and MTVU to one each would leave CDVD,
+// the decompressor and the texture loader fighting whichever of the two is
+// busier with nowhere else to go. There they keep the migratable work_mask, so
+// a light worker can still move off a heavy peer -- the property the round-robin
+// was designed around in the first place.
+void pthr_pin_by_name(const char *name) {
+  if (!name || !*name)
+    return;
+  // "auto" leaves the trampoline's round-robin assignment exactly as it is.
+  if (!strcmp(prefs_get_string("Wrapper/ThreadPinning", "role"), "auto"))
+    return;
+
+  mutexLock(&core_lock);
+  core_init_once();
+  const int ee = ee_core, bg = bg_core;
+  const unsigned wm = work_mask;
+  int gs, vu;
+  if (work_count >= 2)      { gs = work_list[0]; vu = work_list[1]; }
+  else if (work_count == 1) { gs = work_list[0]; vu = work_list[0]; }
+  else                      { gs = ee;           vu = ee; }
+  mutexUnlock(&core_lock);
+
+  int core; unsigned mask; int prio = -1;
+  if (!strcmp(name, "CPU Thread")) {
+    core = ee; mask = 1u << ee;              // hottest thread, wants a warm cache
+  } else if (!strcmp(name, "GS")) {
+    core = gs; mask = (bg >= 0) ? (1u << gs) : wm;
+  } else if (!strcmp(name, "MTVU")) {
+    core = vu; mask = (bg >= 0) ? (1u << vu) : wm;
+  } else if (!strcmp(name, "SPU2")) {
+    // The core's own SPU2 thread, distinct from the aaudio mixer callback that
+    // pthr_pin_bg_core() already parks on the background core. Keeping the two
+    // together leaves that core to audio and input alone. Priority 44 sits
+    // between audio (43) and input (45) -- Horizon never preempts between equal
+    // priorities, so co-tenants of one core must differ.
+    if (bg < 0)
+      return;                                // no spare core: leave it in the pool
+    core = bg; mask = 1u << bg; prio = 44;
+  } else {
+    // CDVD / ISO Decompress / ImGuiFullscreen Texture Loader / anything else:
+    // I/O and light, the round-robin already placed them well enough.
+    return;
+  }
+
+  // Failure is harmless and worth a line rather than silence: the thread simply
+  // keeps the affinity the trampoline gave it.
+  if (R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, mask))) {
+    if (prio >= 0)
+      pthr_set_priority(prio);
+    corelog_log(CORELOG_INFO, "Wrapper", "thread \"%s\" -> core %d, mask 0x%x%s",
+                name, core, mask, prio >= 0 ? ", priority 44" : "");
+  } else {
+    corelog_log(CORELOG_WARN, "Wrapper",
+                "thread \"%s\": svcSetThreadCoreMask(core %d, mask 0x%x) failed",
+                name, core, mask);
+  }
 }
 
 // ---------------------------------------------------------------------------
