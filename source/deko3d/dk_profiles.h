@@ -22,23 +22,38 @@ inline constexpr uint32_t Host3668[]{
   0x7daba0,0x7daca0,0x7dad00,0x7dad80,0x7db170,0x7dad90,0x7dae60,0x7daee0,
   0x7daef0,0x7daf00,0x7daf10,0x7db1d0,0x7da800,0x7da9e0,0x7db370,0x7db430,
   0x7daaa0,0x7db270,0x7db2d0,0x7db360,0x2f3e70,0x7db6e0,0x7db890};
-// Both profiles below pin the BAKED (pre-patched) cores: every site in
-// g_patches_4248[] / g_patches_3668[] already holds the patched instruction, so
-// patch_game() is a safe no-op on them. Only the image hash differs from the
-// pristine APK core -- both GSDevice and HostDisplay vtables verify
-// slot-for-slot against the arrays above (4248: 29/29 and 31/31; 3668: 32/32
-// and 31/31), so every offset in these profiles still applies.
+// Profile4248 pins libemucore_tegrax1.so from TEST3: the STOCK NetherSX2
+// v2.2n-4248 core (Android clang 14.0.6 / NDK r25b, build-id 2b4fe70f, NEEDED
+// libaaudio+libEGL+liblog+libandroid+libjnigraphics) plus five length-
+// preserving Tegra X1 patches taken from mininxd/NetherSX2-patch:
+// scale-unclamp (drops the 0.5x GS multiplier floor), Full Texture Hash Cache
+// as the default in both the preferences and GSSettings::Load paths, and two
+// preset-reset sites turned into NOPs so applying a performance preset stops
+// wiping memory cards, achievements and control bindings.
 //
-// For 3668 the XGKickSkip sites at file offsets 3cfa98 and 3cfad8 are already
-// NOPs, which makes the EmuCore/Patches/XGKickSkip preference inert:
-// patch_xgkick_skip() finds neither pristine instruction and the skip stays
-// permanently enabled.
+// Unlike the BAKED blobs this profile used to pin, the sixteen sites in
+// g_patches_4248[] are PRISTINE here -- every one still holds the instruction
+// named in its .expect field -- so patch_game() is no longer a no-op: it
+// detects "v2.2n-4248" at the offset detect_core_version() looks for and
+// applies all of them at load time. That is the path this table was written
+// for; the baked cores merely had it applied ahead of time.
+//
+// Verified against the tegrax1 image: sha256 be64362a...c1b4f, GSDevice vtable
+// 29/29 slots and HostDisplay vtable 31/31 slots match the arrays above, and
+// none of the five Tegra patch sites collides with a profile offset or a vtable
+// slot. Its 338 dynamic imports are the same set the baked core had, all of
+// them resolved by source/imports.c, and it still imports AAudio (20 symbols,
+// no OpenSL ES), so source/aaudio.c is the audio path.
+//
+// Profile3668 is retained because dk_core.cpp selects between the two at
+// runtime, but no 3668 core ships: the product is Vulkan-only with a single
+// core. The XGKickSkip preference is 3668-only and therefore inert.
 //
 // Keep these comments OUTSIDE the CoreProfile{...} braces: verify_profiles() in
 // tools/check_deko3d_build.py reads the vtable addresses out of the brace body
 // and any hex literal in there would be parsed as an address.
 inline constexpr CoreProfile Profile4248{
-  "4248", "cda05f6b9136f5535ae33bc71fd3624f95b5fde7706259cadbdd90cecb6b531e",
+  "4248", "be64362a525e43e67d2816e60ef197e84b8c82fc2af1655c1504fecc40fc1b4f",
   0xb78a20,0xb7ed58,0x6156b0,0x64ff20,0xc6cb5c0,0xa39200,0xa43400,
   0x78,0x75,2,Device4248,29,Host4248,0x271ce80,0xa38080};
 inline constexpr CoreProfile Profile3668{

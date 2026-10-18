@@ -36,11 +36,20 @@ def verify_profiles(workspace, cores):
     # vtable body would be read as an address and silently shift every slot.
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
     text = re.sub(r"//[^\n]*", " ", text)
+    # The product ships a single core, so a version with no image on disk is
+    # normal: its profile stays in dk_profiles.h (dk_core.cpp selects between
+    # the two at runtime and must keep compiling) but there is nothing to
+    # verify. An empty set, on the other hand, means the inputs went missing.
+    verified = []
     for version in ("4248", "3668"):
+        core = cores / f"NetherSX2-v2.2n-{version}/lib/arm64-v8a/libemucore.so"
+        if not core.is_file():
+            print(f"Core {version}: not shipped, profile left unverified")
+            continue
         profile = re.search(rf"CoreProfile Profile{version}\{{(.*?)\}};", text, re.S)[1]
         expected_hash = re.findall(r'"([0-9a-f]{64})"', profile)[0]
         addresses = [int(value, 16) for value in re.findall(r"0x[0-9a-f]+", profile)]
-        data, pointer = core_tables(cores / f"NetherSX2-v2.2n-{version}/lib/arm64-v8a/libemucore.so")
+        data, pointer = core_tables(core)
         if hashlib.sha256(data).hexdigest() != expected_hash:
             raise ValueError(f"Unsupported core hash: {version}")
         for name, address in zip(("Device", "Host"), addresses):
@@ -49,7 +58,10 @@ def verify_profiles(workspace, cores):
             for slot, method in enumerate(expected):
                 if pointer(address + slot * 8) != method:
                     raise ValueError(f"{version} {name} vtable mismatch at slot {slot}")
+        verified.append(version)
         print(f"Core {version}: hash and every GSDevice/HostDisplay vtable entry verified")
+    if not verified:
+        raise ValueError(f"No core images found under {cores}")
 
 def verify_link(path):
     text = path.read_text()

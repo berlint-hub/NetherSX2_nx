@@ -13,23 +13,26 @@ if [[ -z "${CORES_DIR:-}" ]]; then
   if [[ -d "$APP/out/cores" ]]; then CORES_DIR="$APP/out/cores"; fi
 fi
 if [[ -n "${APK_4248:-}${APK_3668:-}" ]]; then
-  [[ -n "${APK_4248:-}" && -n "${APK_3668:-}" ]] || {
-    echo "Set both APK_4248 and APK_3668." >&2; exit 1;
+  # The product ships one core, so APK_4248 alone is a complete input set.
+  # APK_3668 stays accepted for a two-core tree but is no longer required.
+  [[ -n "${APK_4248:-}" ]] || {
+    echo "Set APK_4248 (APK_3668 alone would ship no core at all)." >&2; exit 1;
   }
   CORES_DIR="$APP/out/cores"
-  python3 "$APP/tools/prepare_build_inputs.py" --apk-4248 "$APK_4248" \
-    --apk-3668 "$APK_3668" --cores-dir "$CORES_DIR"
+  apk_args=(--apk-4248 "$APK_4248")
+  [[ -n "${APK_3668:-}" ]] && apk_args+=(--apk-3668 "$APK_3668")
+  python3 "$APP/tools/prepare_build_inputs.py" "${apk_args[@]}" --cores-dir "$CORES_DIR"
 fi
 if [[ -n "${MESA_SDK_ZIP:-}" ]]; then
   export MESA_SDK_ROOT="$APP/out/mesa-sdk"
   python3 "$APP/tools/prepare_build_inputs.py" --mesa-sdk "$MESA_SDK_ZIP" --sdk-dir "$MESA_SDK_ROOT"
 fi
 
+# Single core: 4248 only. A 3668 tree may still sit in CORES_DIR, but nothing
+# here requires it and nothing below bundles it.
 required=(
   "$CORES_DIR/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so"
   "$CORES_DIR/NetherSX2-v2.2n-4248/assets/GameIndex.yaml"
-  "$CORES_DIR/NetherSX2-v2.2n-3668/lib/arm64-v8a/libemucore.so"
-  "$CORES_DIR/NetherSX2-v2.2n-3668/assets/GameIndex.yaml"
 )
 if [[ -n "${MESA_SDK_ROOT:-}" ]]; then
   required+=(
@@ -103,7 +106,8 @@ make -j"$JOBS" RENDERER=VK BUILD=build-vk TARGET=NetherSX2_nx_vk
 echo "==== bundle cores + the Vulkan emulator into the launcher romfs ===="
 mkdir -p "$APP/launcher/romfs/cores" "$APP/launcher/romfs/emu"
 cp -f "$CORES_DIR/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so" "$APP/launcher/romfs/cores/emucore_4248.so"
-cp -f "$CORES_DIR/NetherSX2-v2.2n-3668/lib/arm64-v8a/libemucore.so" "$APP/launcher/romfs/cores/emucore_3668.so"
+# Single core: drop a stale 3668 image an older two-core bundle left in romfs.
+rm -f "$APP/launcher/romfs/cores/emucore_3668.so"
 cp -f "$APP/NetherSX2_nx_vk.nro" "$APP/launcher/romfs/emu/NetherSX2_nx_vk.nro"
 # Remove stale binaries an older multi-renderer bundle left in the romfs, so a
 # rebuilt bundle cannot ship an emulator the launcher no longer offers.

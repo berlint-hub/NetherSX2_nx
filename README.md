@@ -10,9 +10,10 @@ It loads the original Android emulator core `libemucore.so`,
 patches it, and runs it inside a minimal Android-like
 environment natively.
 
-Everything ships as a **single `NetherSX2.nro`**: it bundles both emulator cores
-(Patched `4248` + Classic `3668`), the Vulkan/NVK emulator and each build's data
-files, and extracts the ones you pick to the SD card at launch. An SDL cover-art
+Everything ships as a **single `NetherSX2.nro`**: it bundles one emulator core
+(NetherSX2 v2.2n-`4248` with the Tegra X1 patches), the Vulkan/NVK emulator and
+that build's data files, and extracts them to the SD card at launch. There is no
+core-version setting — the bundle carries exactly one core. An SDL cover-art
 launcher chooses the game and per-game settings, then chainloads the emulator.
 
 Vulkan (NVK) is the only graphics backend in the shipped bundle, so there is no
@@ -183,20 +184,36 @@ accepted as a fallback; it exports the public entry points itself, so the
 
 `NXVK_EXPECTED_SHA256` in the Makefile pins the tarball this tree was validated
 against, and CI fails if `berlint-hub/TEST3` serves anything else — the same
-protection the cores get from `source/deko3d/dk_profiles.h`. TEST3 is cloned at
-its branch head at build time, so without a pin the driver can change between
-two builds of one repo commit; it did once, silently switching branch, commit
-and build run. Test a new driver with `make NXVK_EXPECTED_SHA256=<sha>`, and
-move the pin in the Makefile only after it has been verified on hardware.
+protection the core gets from `source/deko3d/dk_profiles.h`. CI clones a pinned
+ref (`TEST3_REF` in `.github/workflows/build.yml`, currently
+`arena/8b264db8-test3`), but a branch can still move or be force-pushed, so
+without a hash the driver can change between two builds of one repo commit. It
+did, twice: the tarball moved `arena/92b2b9eb-nxvk` → `arena/068e6f2f-nxvk` and
+then back to `arena/92b2b9eb-nxvk` at a newer commit, each time changing the
+build run and toolchain image too. Test a new driver with
+`make NXVK_EXPECTED_SHA256=<sha>`, and move the pin in the Makefile only after
+it has been verified on hardware.
 
-Extract the 4248 and 3668 APKs into sibling folders named
-`NetherSX2-v2.2n-4248` and `NetherSX2-v2.2n-3668`, or set `CORES_DIR` to the
-folder containing them. Alternatively, extract the supplied inputs without
-installing the Mesa SDK into the toolchain:
+The core is `4248/arm64-v8a/libemucore_tegrax1.so` from that ref: the stock
+NetherSX2 v2.2n-4248 image plus five length-preserving Tegra X1 patches from
+[mininxd/NetherSX2-patch](https://github.com/mininxd/NetherSX2-patch) — the 0.5×
+GS multiplier floor removed, Full Texture Hash Cache on by default in both the
+preferences and `GSSettings::Load` paths, and two preset-reset sites NOPed so
+applying a performance preset no longer wipes memory cards, achievements and
+control bindings. Its sixteen port-patch sites are still pristine, so
+`patch_game()` in `source/hooks/patches.c` applies them at load time — the path
+that table was written for, since the previously shipped "baked" cores had them
+pre-applied and made it a no-op.
+
+Extract the 4248 APK into a folder named `NetherSX2-v2.2n-4248`, or set
+`CORES_DIR` to the folder containing it. `--apk-3668` is still accepted for a
+two-core tree but is no longer required, and nothing bundles a 3668 image.
+Alternatively, extract the supplied inputs without installing the Mesa SDK into
+the toolchain:
 
 ```sh
 python3 tools/prepare_build_inputs.py --apk-4248 /path/to/NetherSX2-v2.2n-4248.apk \
-  --apk-3668 /path/to/NetherSX2-v2.2n-3668.apk --mesa-sdk /path/to/mesa-sdk.zip
+  --mesa-sdk /path/to/mesa-sdk.zip
 export MESA_SDK_ROOT="$PWD/out/mesa-sdk"
 ```
 

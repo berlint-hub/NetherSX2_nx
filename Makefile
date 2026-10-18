@@ -43,14 +43,17 @@ MESA_SDK_ROOT ?=
 # override it when the package is only reachable another way.
 NXVK_PKG_CONFIG ?= $(PREFIX)pkg-config
 # sha256 of the nxvk-vulkan-tegra-x1.tar.gz this tree was validated against.
-# TEST3 holds the blob and CI clones its main branch at build time, so without a
+# TEST3 holds the blob and CI clones a pinned ref at build time, so without a
 # pin the driver can be swapped under a build silently -- which is exactly what
-# happened once: the tarball changed branch (arena/92b2b9eb-nxvk ->
-# arena/068e6f2f-nxvk), commit and build run between two runs of the same repo
-# commit. The cores are pinned the same way against source/deko3d/dk_profiles.h,
-# and CI fails loudly on both. Update this together with a hardware-validated
-# build, not before. Override with NXVK_EXPECTED_SHA256= to test a new driver.
-NXVK_EXPECTED_SHA256 ?= 938bdecbb3ee12a81768aa9d52dae7ba9a610445a3f9830d754b9a2df1d8d22f
+# happened, twice: the tarball moved arena/92b2b9eb-nxvk -> arena/068e6f2f-nxvk
+# and then back to arena/92b2b9eb-nxvk at a newer commit, each time changing
+# build run and toolchain image too. The cores are pinned the same way against
+# source/deko3d/dk_profiles.h, and CI fails loudly on both. Update this together
+# with a hardware-validated build, not before. Override with
+# NXVK_EXPECTED_SHA256= to test a new driver.
+# Pinned package: TEST3 branch arena/8b264db8-test3, nxvk commit
+# 38fbe01360448c5cb6bb7554c5480a398888f202, Mesa 26.2.2, build run 38966643931.
+NXVK_EXPECTED_SHA256 ?= dae2897b939a8a7d578f7b02cc35b64bcbfa159ec7dbc3205b26e51bf7e6492b
 ifneq ($(strip $(MESA_SDK_ROOT)),)
 ifneq ($(RENDERER),DK)
 DEFINES += -DUSE_UNIFIED_MESA

@@ -379,7 +379,6 @@ struct Opt {
 #define O_STATUS(l)            { l, nullptr, OT_STATUS, nullptr,0, 0,0,0, nullptr, 0, nullptr, nullptr, 1, nullptr }
 #define O_STATUSK(l,k)         { l, k, OT_STATUS, nullptr,0, 0,0,0, nullptr, 0, nullptr, nullptr, 1, nullptr }
 
-static const Choice C_build[]    = { {"Patched (4248)","4248"}, {"Classic (3668)","3668"} };
 static const Choice C_fastmem[]  = { {"Off","off"}, {"On","hybrid"} };
 static const Choice C_upscale[]  = { {"0.25x","0.25"},{"0.5x","0.5"},{"0.75x","0.75"},
                                      {"1x (native ~480p)","1"},{"1.25x","1.25"},{"1.5x","1.5"},{"1.75x","1.75"},
@@ -480,7 +479,6 @@ static const Opt S_audio[] = {
 };
 static const Opt S_emu[] = {
   O_STATUSK("Allowed CPU cores", "cpu-cores"),
-  O_CHOICE("Core version",     "Wrapper/CoreBuild", C_build, "4248"),
   O_CHOICE("Fastmem",          "Wrapper/FastmemMode", C_fastmem, "hybrid"),
   O_CHOICE("System language",  "Wrapper/SystemLanguage", C_syslang, "auto"),
   O_CHOICE("EE cycle rate",    "EmuCore/Speedhacks/EECycleRate", C_eecr, "0"),
@@ -696,8 +694,6 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"SPU2/Output/OutputLatency", "Audio latency / stability",
    "Sets additional buffering in the Switch output path. Reduce it for lower audio delay, or raise it if sound underruns and crackles persist."},
 
-  {"Wrapper/CoreBuild", "Compatibility core",
-   "Selects which bundled NetherSX2 Android core is loaded. Patched 4248 is the normal choice; Classic 3668 is retained for games or behavior that are more compatible with the older core."},
   {"Wrapper/FastmemMode", "CPU performance",
    "Uses fast mapped access for emulated PS2 memory while retaining NetherSX2_nx's self-modifying-code invalidation. It is a major CPU optimization. Disabling it keeps the safe slower memory path for troubleshooting."},
   {"Wrapper/SystemLanguage", "PS2 firmware",
@@ -7902,8 +7898,14 @@ int main(int argc, char **argv){
     removeLegacySmcSettings(effective);
     removeLegacyCheatGate(effective);
     applyGlobalRetroAchievementsSettings(effective);
-    std::string build=storeGet(effective,"Wrapper/CoreBuild","4248");
-    if(build!="4248"&&build!="3668") build="4248";
+    // Single-core bundle: only emucore_4248.so is in the romfs, so the stored
+    // preference is coerced rather than honoured -- an nethersx2.ini left over
+    // from a two-core build can still say 3668, and resolving that would ask
+    // for romfs:/cores/emucore_3668.so, which is no longer bundled. Written
+    // back so the core and the launcher agree on what is loaded. Same shape as
+    // the renderer coercion right below.
+    std::string build="4248";
+    storeSet(effective,"Wrapper/CoreBuild","4248");
     // Vulkan-only build: the bundle ships just NetherSX2_nx_vk.nro. Any renderer
     // an older launcher stored (12 NVC0, 13 Zink, 15 Deko3D) is coerced to
     // Vulkan, otherwise the launch below would resolve to an .nro that is not in
