@@ -12,6 +12,7 @@
 #include "../hooks.h"
 #include "../so_util.h"
 #include "../prefs.h"
+#include "../corelog.h"
 
 extern so_module emu_mod; // libemucore.so (defined in main.c)
 
@@ -267,6 +268,68 @@ static void detect_core_version(void) {
     g_core_version = CORE_VER_V22N_3668;
 }
 
+// VU Cycle Steal (MTVU path), 4248-only. One-word repurpose of the EECycleSkip
+// multiply inside VU_Thread::ExecuteVU:
+//
+//   0x4b2500: 0x1B0A7D08 = MUL w8, w8, w10
+//     w8  = min(average VU1 cycles, 3000)  -- MOVZ #3000 at 0x4b24f0,
+//                                             CMP  #3000 at 0x4b24f8,
+//                                             CSEL lo    at 0x4b24fc
+//     w10 = the EECycleSkip byte           -- LDRB [x21,#5] at 0x4b24e4
+//     fed by an inlined Get_vuCycles: LDAR pair at 0x4b24c0/c4, ADD chain to
+//     0x4b24d8, LSR #2 at 0x4b24dc.
+//
+//   level 1 (0x53017D08 = LSR w8, w8, #1): the cycle counters gain cycles >> 1
+//   level 2 (0x2A0803E8 = MOV w8, w8):    the counters gain the full cycles
+//
+// The two downstream ADD/STR pairs credit the stolen amount -- cpuRegs.cycle at
+// 0x4b2504-0c and VU0.cycle at 0x4b2510-1c -- so the EE believes less time
+// passed than the VU actually burned. w8 is dead afterwards (0x4b2528 rewrites
+// it with LDRB w8,[x21]), so replacing the multiply is safe.
+//
+// Found by SIGNATURE, not by copying an offset: the equivalent patch in the
+// sibling TEST-2 tree sits at 0x4A3320, but that tree builds against a
+// different 12 094 744 B core and 0x4A3320 holds ADD x1,sp,#8 in ours
+// (12 162 984 B). Scanning this image for MUL w8,w8,w10 (0x1B0A7D08) yields 26
+// hits and exactly one has MOVZ #3000 / CMP #3000 / LDRB [x21,#5] within reach,
+// so the site is unambiguous.
+//
+// While active this REPLACES EECycleSkip, because that multiply IS the skip --
+// so EE cycle skip must be Off. MTVU only: this is VU_Thread::ExecuteVU, the
+// threaded path, and it needs EmuCore/Speedhacks/vuThread on. Applied at core
+// load, so changing the menu needs a game restart. It is an accuracy hack: the
+// EE and VU1 disagree about elapsed time, which is the whole point.
+#define VU_STEAL_4248_ADDR   0x4b2500u
+#define VU_STEAL_4248_EXPECT 0x1B0A7D08u
+#define VU_STEAL_4248_LVL1   0x53017D08u
+#define VU_STEAL_4248_LVL2   0x2A0803E8u
+
+static void patch_vu_steal_4248(void) {
+  if (g_core_version != CORE_VER_V22N_4248)
+    return;
+  const int level = prefs_get_int("EmuCore/Speedhacks/vuCycleSteal", 0);
+  if (level < 1 || level > 2)
+    return;
+  if (!in_range(VU_STEAL_4248_ADDR, 4))
+    return;
+  volatile uint32_t *p =
+      (volatile uint32_t *)((uintptr_t)emu_mod.load_base + VU_STEAL_4248_ADDR);
+  // Logged both ways on purpose: a silent no-op here would look exactly like
+  // "the setting does nothing", and the only way to tell a wrong offset from a
+  // wrong level is to see the word that was actually there.
+  if (*p != VU_STEAL_4248_EXPECT) {
+    corelog_log(CORELOG_WARN, "Wrapper",
+                "VU cycle steal: core+0x%x holds 0x%08x, expected 0x%08x -- NOT applied",
+                VU_STEAL_4248_ADDR, *p, VU_STEAL_4248_EXPECT);
+    return;
+  }
+  *p = (level == 1) ? VU_STEAL_4248_LVL1 : VU_STEAL_4248_LVL2;
+  corelog_log(CORELOG_INFO, "Wrapper",
+              "VU cycle steal level %d applied at core+0x%x (0x%08x -> 0x%08x); "
+              "keep EE cycle skip Off",
+              level, VU_STEAL_4248_ADDR, VU_STEAL_4248_EXPECT, *p);
+}
+
 void patch_game(void) {
   detect_core_version();
 
@@ -298,6 +361,7 @@ void patch_game(void) {
 
   patch_xgkick_skip();
   patch_quick_menu_layout();
+  patch_vu_steal_4248();
 
   if (!in_range((uint32_t)g_reqstop_slot, 8))
     return;

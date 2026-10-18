@@ -513,6 +513,13 @@ jobs:
           repd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "repeats suppressed" || true)
           repp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "repeats suppressed" || true)
           echo "::notice::corelog sbalovani opakovani: ${repd}x (diag) / ${repp}x (produkce)"
+          # VU cycle steal: klic preference v oboji binarce (cte ho wrapper) a
+          # format logu, ktery dokazuje, ze patch_vu_steal_4248() zustal
+          # zkompilovany a neni jen mrtvy kod za podminkou.
+          vsd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "vuCycleSteal" || true)
+          vsp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "vuCycleSteal" || true)
+          vsf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "VU cycle steal level" || true)
+          echo "::notice::VU cycle steal: pref ${vsd}x (diag) / ${vsp}x (produkce), log-format ${vsf}x (produkce)"
           echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
           echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-total ${scd}x (diag) / ${scp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
           if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
@@ -537,6 +544,10 @@ jobs:
           fi
           if [ "$cpud" = "0" ] || [ "$cpup" = "0" ]; then
             echo "::error::synteticke soubory pro cpuinfo chybi v binarce (diag ${cpud}x / produkce ${cpup}x) -- /sys a /proc cesty by opet selhaly"
+            exit 1
+          fi
+          if [ "$vsp" = "0" ] || [ "$vsd" = "0" ] || [ "$vsf" = "0" ]; then
+            echo "::error::patch_vu_steal_4248() se nedostal do binarky (pref diag ${vsd}x / prod ${vsp}x, log-format ${vsf}x)"
             exit 1
           fi
           if [ "$repd" = "0" ] || [ "$repp" = "0" ]; then

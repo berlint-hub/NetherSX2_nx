@@ -82,6 +82,20 @@ Thread pinning** turns this off (`Auto`), restoring the older round-robin that
 hands out cores in thread-creation order. Every decision is logged to
 `/switch/nethersx2/nethersx2-core.log` as `thread "GS" -> core 1, mask 0x2`.
 
+**Settings > VU cycle steal** is a binary patch for games whose VU1 thread runs
+flat out, such as Gran Turismo 3 distance views. It repurposes the
+`EECycleSkip` multiply inside `VU_Thread::ExecuteVU` — one instruction at
+`core+0x4b2500`, `MUL w8, w8, w10` — so the cycles VU1 burned are credited to
+the EE clock instead of being multiplied by the skip factor: level 1 credits
+half of them (`LSR w8, w8, #1`), level 2 all of them (`MOV w8, w8`). It needs
+MTVU on, replaces EE cycle skip (keep that Off), applies at core load so it
+needs a game restart, and only the 4248 core is supported. The site was found
+by instruction signature, not by copying an offset from another build: scanning
+this image for `MUL w8, w8, w10` gives 26 hits and exactly one has
+`MOVZ #3000` / `CMP #3000` / `LDRB [x21,#5]` within reach. `patch_game()`
+verifies the original word before writing and logs a warning instead of
+patching if it does not match, so a wrong core image is a no-op, not corruption.
+
 A PS2 BIOS dump is required and must come from your own console; the launcher
 warns at startup when `bios/` is empty.
 

@@ -405,6 +405,7 @@ static const Choice C_interp[]   = { {"Nearest","0"}, {"Linear","1"}, {"Cubic","
 static const Choice C_sync[]     = { {"TimeStretch","0"}, {"Async","1"}, {"None","2"} };
 static const Choice C_eecr[]     = { {"50%","-3"}, {"60%","-2"}, {"75%","-1"}, {"100%","0"}, {"130%","1"}, {"180%","2"}, {"300%","3"} };
 static const Choice C_eecs[]     = { {"Off","0"}, {"Mild","1"}, {"Moderate","2"}, {"Maximum","3"} };
+static const Choice C_vusteal[]  = { {"Off","0"}, {"Level 1 (half)","1"}, {"Level 2 (full)","2"} };
 static const Choice C_rounding[] = { {"Nearest","0"}, {"Negative","1"}, {"Positive","2"}, {"Chop / Zero","3"} };
 static const Choice C_eeClamp[]  = { {"None","0"}, {"Normal","1"}, {"Extra + Preserve Sign","2"}, {"Full","3"} };
 static const Choice C_vuClamp[]  = { {"None","0"}, {"Normal","1"}, {"Extra","2"}, {"Extra + Preserve Sign","3"} };
@@ -485,6 +486,7 @@ static const Opt S_emu[] = {
   O_CHOICE("System language",  "Wrapper/SystemLanguage", C_syslang, "auto"),
   O_CHOICE("EE cycle rate",    "EmuCore/Speedhacks/EECycleRate", C_eecr, "0"),
   O_CHOICE("EE cycle skip",    "EmuCore/Speedhacks/EECycleSkip", C_eecs, "0"),
+  O_CHOICE("VU cycle steal",   "EmuCore/Speedhacks/vuCycleSteal", C_vusteal, "0"),
   O_CHOICE("Fast boot",        "Wrapper/FastBoot", C_bool, "true"),
   O_CHOICE("MTVU (multi-VU)",  "EmuCore/Speedhacks/vuThread", C_bool, "true"),
   O_CHOICE("Instant VU1",      "EmuCore/Speedhacks/vu1Instant", C_bool, "true"),
@@ -706,6 +708,8 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Underclocks or overclocks the emulated Emotion Engine. Lower values can reduce host CPU load but may lower a game's internal frame rate or break timing. Higher values greatly increase CPU requirements."},
   {"EmuCore/Speedhacks/EECycleSkip", "CPU timing hack",
    "Makes the emulated Emotion Engine skip work cycles. It helps a small set of demanding games, but usually harms performance, pacing, or compatibility. Keep it Off unless a game specifically benefits."},
+  {"EmuCore/Speedhacks/vuCycleSteal", "VU timing hack",
+   "Credits the cycles VU1 burned to the Emotion Engine clock, so a frame advances before the VU has really caught up. This is the lever for games whose VU1 thread runs flat out, such as Gran Turismo 3 distance views. Level 1 credits half the VU cycles, Level 2 credits all of them. Needs MTVU (multi-VU) enabled, because it patches the threaded VU path only, and it takes over the job of EE cycle skip, so leave that Off. The patch is applied when the core loads, so changing it needs a game restart. It is an accuracy hack: the EE and VU1 disagree about elapsed time on purpose, which can break pacing, animation or rendering in some games. Only the 4248 core is supported."},
   {"Wrapper/FastBoot", "Boot behavior",
    "Skips the PS2 BIOS boot animation and starts the selected game directly. Disable it when a title or BIOS function requires a full boot."},
   {"EmuCore/Speedhacks/vuThread", "CPU threading",
