@@ -109,13 +109,29 @@ def verify_bundle(nro, workspace, cores):
     # are still buildable from the Makefile, but they are no longer bundled, so
     # requiring them here would fail every bundle built after the switch.
     expected = {"emu/NetherSX2_nx_vk.nro": workspace / "NetherSX2_nx_vk.nro"}
+    # Single-core product: verify whichever cores were actually supplied. The
+    # check runs in both directions -- a core that is missing from the inputs
+    # must also be missing from the romfs, otherwise a stale emucore_*.so left
+    # behind by an earlier two-core build would ship unexamined, 12 MB of dead
+    # weight the launcher can no longer select.
+    bundled = []
     for version in ("4248", "3668"):
-        expected[f"cores/emucore_{version}.so"] = cores / f"NetherSX2-v2.2n-{version}/lib/arm64-v8a/libemucore.so"
-        expected[f"res/{version}/shaders/opengl/tfx_fs.glsl"] = cores / f"NetherSX2-v2.2n-{version}/assets/shaders/opengl/tfx_fs.glsl"
+        core = cores / f"NetherSX2-v2.2n-{version}/lib/arm64-v8a/libemucore.so"
+        if not core.is_file():
+            if f"cores/emucore_{version}.so" in files:
+                raise ValueError(
+                    f"Bundle carries cores/emucore_{version}.so but no {version} core was supplied")
+            continue
+        bundled.append(version)
+        expected[f"cores/emucore_{version}.so"] = core
+        expected[f"res/{version}/shaders/opengl/tfx_fs.glsl"] = \
+            cores / f"NetherSX2-v2.2n-{version}/assets/shaders/opengl/tfx_fs.glsl"
+    if not bundled:
+        raise ValueError(f"No core images found under {cores}")
     for name, source in expected.items():
         if name not in files or hashlib.sha256(files[name]).digest() != hashlib.sha256(source.read_bytes()).digest():
             raise ValueError(f"Missing or outdated bundled artifact: {name}")
-    print(f"{nro.name}: both cores, the Vulkan (NVK) NRO and per-core GS shader resources verified")
+    print(f"{nro.name}: core {'+'.join(bundled)}, the Vulkan (NVK) NRO and per-core GS shader resources verified")
 
 def main():
     workspace = Path(__file__).resolve().parent.parent
