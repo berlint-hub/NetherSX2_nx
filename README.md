@@ -162,13 +162,39 @@ work at all, all of them in the POSIX shim rather than in the emulator:
   installs a 256 KiB buffer for reads and a 64 KiB one for writes; the smaller
   write buffer bounds how much unflushed data a hard kill can lose.
 
-LSFG 2x Frame Generation is available in **Settings > Frame Generation**.
-You must provide your own `Lossless.dll` at `/switch/nethersx2/lsfg/Lossless.dll`.
-LSFG must be enabled before launching a game so its shader session can be
-prepared. Frame Generation starts **Off** in every game and must be enabled
-manually from **L + R + Plus > Frame Generation**. Skip Duplicate Frames is
-automatically enabled for prepared LSFG sessions so only unique game frames
-are interpolated.
+Frame Generation is available in **Settings > Frame Generation**. You must
+provide your own `Lossless.dll` at `/switch/nethersx2/lsfg/Lossless.dll`. LSFG
+must be enabled before launching a game so its shader session can be prepared.
+Frame Generation starts **Off** in every game and must be enabled manually from
+**L + R + Plus > Frame Generation**. Skip Duplicate Frames is automatically
+enabled for prepared LSFG sessions so only unique game frames are interpolated.
+
+**Mode** decides the schedule:
+
+- **Auto (2x below 33 FPS)** interpolates every frame, but only while the source
+  runs below ~33 FPS, and passes video through untouched above that — twice
+  50 FPS is 100 and the panel is 60 Hz, so there would be nothing to show.
+- **Fractional (target rate)** interpolates on only *some* frames so the output
+  lands on **Target output rate** instead of always doubling. A game at 40 FPS
+  aiming for 60 gets one generated frame every two; a game at 47 aiming for 50
+  gets one every seventeen. Output can never exceed twice the source rate,
+  because one interpolation per source frame is all the bridge produces. The
+  cost is one frame of latency plus the GPU work of each generated frame.
+
+Fractional needs the bridge to see *every* source frame even when it does not
+interpolate, because it interpolates between the previous source frame and the
+current one: a frame it never saw would leave the previous-frame slot stale and
+the next interpolation would span the whole gap and land in the wrong place on
+the timeline. So non-interpolated presents go through `lsfg_nx_present_capture()`,
+which copies the frame into the ping-pong slot and presents it unchanged — an
+image copy, far cheaper than interpolation. The source rate is measured during
+that capture-only warm-up (16 presents) and then frozen, because once the
+display saturates its FIFO back-pressure reads as a slower source, which would
+raise the ratio and generate more: positive feedback.
+
+**Flow resolution** offers Eighth (0.125) as well as Quarter and Half; the
+bridge clamps the value to 0.125–0.5, so Eighth is the cheapest optical-flow
+pass it accepts.
 
 ### Diagnostics
 

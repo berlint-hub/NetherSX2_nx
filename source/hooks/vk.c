@@ -168,6 +168,13 @@ static unsigned lsfg_source_samples;
 static unsigned lsfg_high_fps_slow_samples;
 static int lsfg_previous_requested;
 static int lsfg_rate_decision = -1; /* -1: measuring, 0: generate, 1: passthrough */
+/* Fractional generation: interpolate on only some presents so the output rate
+ * lands on a target instead of always doubling. Kept as plain numbers so the
+ * schedule can be exercised outside the emulator. */
+static int    lsfg_fractional_ready;   /* source estimate frozen */
+static double lsfg_frozen_source_fps;  /* measured before any generation */
+static double lsfg_gen_phase;          /* accumulator in [0,1) */
+static int    lsfg_native_gap;         /* a present the bridge never saw */
 
 static PFN_vkCreateDevice real_create_device;
 static PFN_vkGetDeviceQueue real_get_device_queue;
@@ -190,6 +197,48 @@ static int lsfg_requested(void) {
   return __atomic_load_n(&lsfg_enabled_requested, __ATOMIC_ACQUIRE);
 }
 
+/* Pure so it can be tested without a GPU: given the frozen source rate and the
+ * wanted output rate, decide whether this present gets interpolated.
+ *
+ * The bridge emits two display frames when it interpolates and one when it only
+ * captures, so an output rate of ratio x source needs interpolation on
+ * (ratio - 1) of presents. ratio is clamped to [1,2]: 2x is everything one
+ * interpolation per source frame can produce, and below 1x the source is
+ * already at or above the target so there is nothing to add.
+ *
+ * After any present that went down the native path the previous-frame slot is
+ * stale, so the first present back is always capture-only. That costs one frame
+ * of re-warm instead of one visibly misplaced generated frame. */
+static int lsfg_fractional_schedule(double source_fps, double target_fps,
+                                    double *phase, int *native_gap) {
+  if (*native_gap) { *native_gap = 0; return 0; }
+  if (!(source_fps > 0.0) || !(target_fps > 0.0))
+    return 0;
+  double ratio = target_fps / source_fps;
+  if (ratio < 1.0) ratio = 1.0;
+  if (ratio > 2.0) ratio = 2.0;
+  *phase += ratio - 1.0;
+  if (*phase >= 1.0) { *phase -= 1.0; return 1; }
+  return 0;
+}
+
+static double lsfg_measured_source_fps(void) {
+  if (lsfg_source_samples < 8 || !(lsfg_source_interval_ns > 0.0))
+    return 0.0;                    /* not enough history to trust yet */
+  return 1e9 / lsfg_source_interval_ns;
+}
+
+static int lsfg_mode_is_fractional(void) {
+  return !strcmp(prefs_get_string("Wrapper/LSFGMode", "auto"), "fractional");
+}
+
+static double lsfg_target_fps_pref(void) {
+  int target = prefs_get_int("Wrapper/LSFGTargetFPS", 60);
+  if (target < 30) target = 30;
+  if (target > 120) target = 120;
+  return (double)target;
+}
+
 int vk_lsfg_is_available(void) {
   return __atomic_load_n(&lsfg_runtime_available, __ATOMIC_ACQUIRE);
 }
@@ -199,7 +248,19 @@ int vk_lsfg_is_enabled(void) {
 }
 
 int vk_lsfg_is_high_fps_passthrough(void) {
-  return lsfg_requested() && lsfg_rate_decision == 1;
+  if (!lsfg_requested())
+    return 0;
+  /* In fractional mode there is no wholesale passthrough state: a source at or
+   * above the target simply never earns a generated frame. Report that, so the
+   * quick menu still says the same true thing it said before. */
+  if (lsfg_mode_is_fractional())
+    return lsfg_fractional_ready &&
+           lsfg_frozen_source_fps >= lsfg_target_fps_pref();
+  return lsfg_rate_decision == 1;
+}
+
+int vk_lsfg_is_fractional(void) {
+  return lsfg_requested() && lsfg_mode_is_fractional();
 }
 
 void vk_lsfg_request_enabled(int enabled) {
@@ -324,6 +385,10 @@ static void reset_tracked_swapchain(void) {
   lsfg_high_fps_slow_samples = 0;
   lsfg_previous_requested = 0;
   lsfg_rate_decision = -1;
+  lsfg_fractional_ready = 0;
+  lsfg_frozen_source_fps = 0.0;
+  lsfg_gen_phase = 0.0;
+  lsfg_native_gap = 0;
   __atomic_store_n(&lsfg_runtime_available, 0, __ATOMIC_RELEASE);
 }
 
@@ -798,9 +863,27 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   const int requested = lsfg_requested();
   uint64_t source_interval = 0;
 
-  /* FIFO back-pressure invalidates source timing after generation starts. */
-  if (!requested || lsfg_rate_decision != 0)
+  const int fractional = requested && lsfg_mode_is_fractional();
+  const double target_fps = lsfg_target_fps_pref();
+
+  /* FIFO back-pressure invalidates source timing after generation starts: the
+   * display saturates, the second present blocks, and the next source present
+   * arrives late, so the interval reads as a slower source. In fractional mode
+   * that would be positive feedback -- slower reading, higher ratio, more
+   * generation -- so the estimate is taken from capture-only presents (which
+   * are true one-in-one-out source presents) and then frozen. */
+  if (fractional) {
+    if (!lsfg_fractional_ready) {
+      source_interval = lsfg_observe_source_present();
+      if (lsfg_source_samples >= 16) {
+        lsfg_frozen_source_fps = lsfg_measured_source_fps();
+        lsfg_fractional_ready = lsfg_frozen_source_fps > 0.0;
+        lsfg_gen_phase = 0.0;
+      }
+    }
+  } else if (!requested || lsfg_rate_decision != 0) {
     source_interval = lsfg_observe_source_present();
+  }
 
   if (requested != lsfg_previous_requested) {
     if (requested) {
@@ -825,7 +908,10 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   if (requested && lsfg_rate_decision < 0 && lsfg_source_samples >= 8)
     lsfg_rate_decision = lsfg_source_is_high_rate() ? 1 : 0;
 
-  if (requested && lsfg_rate_decision == 1) {
+  /* Fractional mode ignores the 33 FPS gate entirely: the schedule decides per
+   * present how much generation the measured source rate can absorb, so a fast
+   * source interpolates less often instead of being passed through wholesale. */
+  if (!fractional && requested && lsfg_rate_decision == 1) {
     /* Engage LSFG after a sustained transition from 50/60 to 25/30 FPS. */
     if (source_interval >= UINT64_C(31500000))
       ++lsfg_high_fps_slow_samples;
@@ -837,9 +923,14 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
     lsfg_high_fps_slow_samples = 0;
   }
 
-  /* Keep native presentation active until source-rate classification completes. */
-  if (requested && lsfg_rate_decision < 0)
+  /* Keep native presentation active until source-rate classification completes.
+   * Fractional mode has no such wait: it routes every present through the bridge
+   * from the start, capture-only while measuring, so the ping-pong source slot
+   * is already warm when the first interpolation is earned. */
+  if (!fractional && requested && lsfg_rate_decision < 0) {
+    if (requested) lsfg_native_gap = 1;
     return vkQueuePresentKHR_native(q, pi);
+  }
 
   if (pi && pi->swapchainCount == 1 && pi->pSwapchains &&
       pi->pSwapchains[0] == tracked_swapchain &&
@@ -847,10 +938,18 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
     if (!tracked_swapchain_lsfg_compatible || !lsfg_try_create(q))
       return VK_ERROR_INITIALIZATION_FAILED;
     VkResult result = VK_ERROR_INITIALIZATION_FAILED;
-    if (lsfg_nx_present(lsfg_runtime, q, pi, &result)) {
+    const int generate = !fractional ||
+        lsfg_fractional_schedule(lsfg_frozen_source_fps, target_fps,
+                                 &lsfg_gen_phase, &lsfg_native_gap);
+    const int consumed = generate
+        ? lsfg_nx_present(lsfg_runtime, q, pi, &result)
+        : lsfg_nx_present_capture(lsfg_runtime, q, pi, &result);
+    if (consumed) {
 #ifdef NETHERSX2_VK_DIAGNOSTIC
       if (vk_present_count <= 4 || result != VK_SUCCESS)
-        vk_diag_note("lsfg present call=%d result=%d", vk_present_count, result);
+        vk_diag_note("lsfg present call=%d result=%d generate=%d src=%.1ffps target=%.0ffps",
+                     vk_present_count, result, generate, lsfg_frozen_source_fps,
+                     target_fps);
 #endif
       return result;
     }
@@ -859,6 +958,7 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
 #endif
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  if (requested) lsfg_native_gap = 1;
   return vkQueuePresentKHR_native(q, pi);
 }
 

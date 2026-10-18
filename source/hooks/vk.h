@@ -33,6 +33,8 @@ extern volatile int vk_present_count;
 int vk_lsfg_is_available(void);
 int vk_lsfg_is_enabled(void);
 int vk_lsfg_is_high_fps_passthrough(void);
+/* True when Wrapper/LSFGMode is "fractional" and LSFG is enabled. */
+int vk_lsfg_is_fractional(void);
 void vk_lsfg_request_enabled(int enabled);
 
 #ifdef NETHERSX2_VK_DIAGNOSTIC

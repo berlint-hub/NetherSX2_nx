@@ -120,7 +120,7 @@ struct LsfgNxRuntime {
         return candidate == swapchain;
     }
 
-    VkResult present(VkQueue queue, const VkPresentInfoKHR& info) {
+    VkResult present(VkQueue queue, const VkPresentInfoKHR& info, bool generate) {
         if (queue != vulkan->queue())
             throw std::runtime_error("present queue differs from borrowed LSFG queue");
         if (info.swapchainCount != 1 || info.pSwapchains[0] != swapchain)
@@ -146,7 +146,11 @@ struct LsfgNxRuntime {
         recordCapture(slot.frame, swapchainImages.at(originalImageIndex), sourceImage,
             sourceInitialized.at(sourceIndex));
 
-        if (realFrameIndex == 0) {
+        /* Capture-only: the first frame has nothing to interpolate against yet,
+         * and fractional generation asks for this path on every present it does
+         * not double. Either way the source slot is refreshed, the frame is
+         * presented untouched, and realFrameIndex keeps the ping-pong in step. */
+        if (!generate || realFrameIndex == 0) {
             slot.frame.end(*vulkan);
             slot.frame.submit(*vulkan,
                 std::move(applicationWaits), VK_NULL_HANDLE, 0,
@@ -331,8 +335,10 @@ extern "C" void lsfg_nx_destroy(LsfgNxRuntime *runtime) {
     delete runtime;
 }
 
-extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
-        const VkPresentInfoKHR *presentInfo, VkResult *result) {
+namespace {
+
+bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
+        const VkPresentInfoKHR *presentInfo, VkResult *result, bool generate) {
     if (!runtime || !presentInfo || !result ||
             presentInfo->swapchainCount != 1 || !presentInfo->pSwapchains ||
             !presentInfo->pImageIndices ||
@@ -340,13 +346,25 @@ extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
         return false;
 
     try {
-        *result = runtime->present(queue, *presentInfo);
+        *result = runtime->present(queue, *presentInfo, generate);
         return true;
     } catch (...) {
     }
 
     *result = VK_ERROR_INITIALIZATION_FAILED;
     return true;
+}
+
+} // namespace
+
+extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
+        const VkPresentInfoKHR *presentInfo, VkResult *result) {
+    return presentCommon(runtime, queue, presentInfo, result, true);
+}
+
+extern "C" bool lsfg_nx_present_capture(LsfgNxRuntime *runtime, VkQueue queue,
+        const VkPresentInfoKHR *presentInfo, VkResult *result) {
+    return presentCommon(runtime, queue, presentInfo, result, false);
 }
 
 #endif /* USE_VULKAN */

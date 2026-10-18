@@ -51,6 +51,19 @@ void lsfg_nx_destroy(LsfgNxRuntime *runtime);
 bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
                      const VkPresentInfoKHR *present_info, VkResult *result);
 
+/*
+ * Capture the source frame into the bridge's ping-pong slot and present it
+ * unchanged: no interpolation, one output frame instead of two.
+ *
+ * Fractional generation skips interpolation on most presents, but it must not
+ * skip the capture. The bridge interpolates between the previous source slot
+ * and the current frame, so a present it never saw leaves that slot holding a
+ * frame from several presents ago, and the next interpolation would span the
+ * whole gap and place the generated frame in the wrong slot of the timeline.
+ */
+bool lsfg_nx_present_capture(LsfgNxRuntime *runtime, VkQueue queue,
+                             const VkPresentInfoKHR *present_info, VkResult *result);
+
 #ifdef __cplusplus
 }
 #endif

@@ -552,6 +552,17 @@ jobs:
           prip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "driver thread -> core" || true)
           emup=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "mask 0x%x, priority" || true)
           echo "::notice::driver-pin ${prid}x (diag) / ${prip}x (produkce), priorita-v-logu ${emup}x (produkce)"
+          # Frakcni frame generation: klice preference cte vk.c, takze musi byt
+          # v oboji binarce. Bez nich by lsfg_fractional_schedule() nikdy nedostal
+          # cilovou frekvenci a rezim by se nedal zapnout.
+          fgmd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "Wrapper/LSFGMode" || true); fgmd=${fgmd:-0}
+          fgmp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/LSFGMode" || true); fgmp=${fgmp:-0}
+          fgt=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/LSFGTargetFPS" || true); fgt=${fgt:-0}
+          echo "::notice::frakcni frame gen: LSFGMode ${fgmd}x (diag) / ${fgmp}x (produkce), LSFGTargetFPS ${fgt}x (produkce)"
+          if [ "$fgmd" = "0" ] || [ "$fgmp" = "0" ] || [ "$fgt" = "0" ]; then
+            echo "::error::frakcni frame generation se nedostala do binarky (LSFGMode diag ${fgmd}x / prod ${fgmp}x, LSFGTargetFPS ${fgt}x)"
+            exit 1
+          fi
           if [ "$prid" = "0" ] || [ "$prip" = "0" ] || [ "$emup" = "0" ]; then
             echo "::error::pthr_pin_driver_core() nebo EMU_THREAD_PRIO se nedostaly do binarky (driver-pin diag ${prid}x / prod ${prip}x, priorita ${emup}x)"
             exit 1

@@ -973,7 +973,8 @@ static void quick_menu_draw_main(void) {
         text_append(text, sizeof(text), "%s%s: %s\n", marker, labels[i],
                     !g_quick_menu_lsfg_enabled ? "Off" :
                     (vk_lsfg_is_high_fps_passthrough() ?
-                        "On (native FPS protected)" : "On"));
+                        "On (native FPS protected)" :
+                        (vk_lsfg_is_fractional() ? "On (fractional)" : "On")));
     }
 #endif
     else if (i == QUICK_ITEM_ACHIEVEMENTS) {

@@ -386,7 +386,9 @@ static const Choice C_upscale[]  = { {"0.25x","0.25"},{"0.5x","0.5"},{"0.75x","0
                                      {"2x (~720p)","2"},{"2.25x","2.25"},{"2.5x","2.5"},{"2.75x","2.75"},{"3x (~1080p)","3"},
                                      {"4x (~1440p)","4"},{"5x (~1800p)","5"},{"6x (4K ~2160p)","6"} };
 static const Choice C_bool[]     = { {"Off","false"}, {"On","true"} };
-static const Choice C_lsfgFlow[] = { {"Quarter (recommended)","0.25"}, {"Half","0.5"} };
+static const Choice C_lsfgFlow[] = { {"Quarter (recommended)","0.25"}, {"Half","0.5"}, {"Eighth (fastest)","0.125"} };
+static const Choice C_lsfgMode[] = { {"Auto (2x below 33 FPS)","auto"}, {"Fractional (target rate)","fractional"} };
+static const Choice C_lsfgTarget[]= { {"40 Hz","40"}, {"50 Hz","50"}, {"60 Hz","60"} };
 static const Choice C_aspect[]   = { {"4:3","4:3"}, {"16:9","16:9"}, {"Stretch","Stretch"}, {"Auto","Auto 4:3/3:2"} };
 static const Choice C_fmvasp[]   = { {"Off","Off"}, {"4:3","4:3"}, {"16:9","16:9"} };
 static const Choice C_vsync[]    = { {"Off","0"}, {"On","1"}, {"Adaptive","2"} };
@@ -467,7 +469,13 @@ static const Opt S_enhance[] = {
   O_CHOICE("HW download mode", "EmuCore/GS/HWDownloadMode", C_hwdl, "0"),
 };
 static const Opt S_framegen[] = {
-  O_CHOICE("LSFG 2x", "Wrapper/LSFGEnabled", C_bool, "false"),
+  O_CHOICE("Frame generation", "Wrapper/LSFGEnabled", C_bool, "false"),
+  /* Both gated on LSFGEnabled like their siblings rather than on LSFGMode:
+   * optEnabled() reads a gate key with iniGet(key, ""), so an absent
+   * Wrapper/LSFGMode would compare against "auto" as "" and show the target
+   * row in the default mode anyway. Same shape as Flow resolution below. */
+  O_CHOICEG("Mode", "Wrapper/LSFGMode", C_lsfgMode, "auto", "Wrapper/LSFGEnabled", "false"),
+  O_CHOICEG("Target output rate", "Wrapper/LSFGTargetFPS", C_lsfgTarget, "60", "Wrapper/LSFGEnabled", "false"),
   O_CHOICEG("Flow resolution", "Wrapper/LSFGFlowScale", C_lsfgFlow, "0.25", "Wrapper/LSFGEnabled", "false"),
   O_CHOICEG("Performance mode", "Wrapper/LSFGPerformance", C_bool, "true", "Wrapper/LSFGEnabled", "false"),
   O_STATUS("Lossless.dll"),
@@ -710,6 +718,10 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Makes the emulated Emotion Engine skip work cycles. It helps a small set of demanding games, but usually harms performance, pacing, or compatibility. Keep it Off unless a game specifically benefits."},
   {"EmuCore/Speedhacks/vuCycleSteal", "VU timing hack",
    "Credits the cycles VU1 burned to the Emotion Engine clock, so a frame advances before the VU has really caught up. This is the lever for games whose VU1 thread runs flat out, such as Gran Turismo 3 distance views. Level 1 credits half the VU cycles, Level 2 credits all of them. Needs MTVU (multi-VU) enabled, because it patches the threaded VU path only, and it takes over the job of EE cycle skip, so leave that Off. The patch is applied when the core loads, so changing it needs a game restart. It is an accuracy hack: the EE and VU1 disagree about elapsed time on purpose, which can break pacing, animation or rendering in some games. Only the 4248 core is supported."},
+  {"Wrapper/LSFGMode", "Generation schedule",
+   "Auto doubles every frame, but only while the game runs below about 33 FPS, and passes the video through untouched above that, because twice 50 FPS is 100 and the panel is 60 Hz. Fractional instead interpolates on only some frames so the output lands on the target rate: a game at 40 FPS aiming for 60 gets one generated frame every two, a game at 47 aiming for 50 gets one every seventeen. It therefore works at any source rate up to the target, at the cost of one frame of latency plus the GPU work of each generated frame. Output can never exceed twice the source rate, since one interpolation per source frame is all the bridge produces. The source rate is measured before any generation and then frozen, because once the display saturates its back-pressure reads as a slower source, which would raise the ratio and generate more -- positive feedback."},
+  {"Wrapper/LSFGTargetFPS", "Output rate",
+   "The rate Fractional mode aims for. 50 Hz matches PAL games, 60 Hz matches the panel. Ignored in Auto mode. A game already at or above the target generates nothing and simply passes through."},
   {"Wrapper/FastBoot", "Boot behavior",
    "Skips the PS2 BIOS boot animation and starts the selected game directly. Disable it when a title or BIOS function requires a full boot."},
   {"EmuCore/Speedhacks/vuThread", "CPU threading",
