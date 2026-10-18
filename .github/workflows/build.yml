@@ -424,10 +424,17 @@ jobs:
             exit 1
           fi
           wrapn=$(grep -c '__wrap_pthread_create' "$mapf" || true); wrapn=${wrapn:-0}
-          realn=$(grep -c '__real_pthread_create' "$mapf" || true); realn=${realn:-0}
-          echo "::notice::--wrap=pthread_create v $mapf: __wrap_ ${wrapn}x, __real_ ${realn}x"
-          if [ "$wrapn" = "0" ] || [ "$realn" = "0" ]; then
-            echo "::error::--wrap=pthread_create se v mape neprojevil (__wrap_ ${wrapn}x / __real_ ${realn}x) -- driver vlakna by zustala na vsech jadrech"
+          echo "::notice::--wrap=pthread_create v $mapf: __wrap_pthread_create ${wrapn}x"
+          # __real_pthread_create vlastni zaznam v mape NEMA a mit ho nebude: ld
+          # ho resi jako alias na pthread_create. Run 39161853609 na tom spadl
+          # (__wrap_ 1x / __real_ 0x), ackoli wrap fungoval spravne. Dukaz, ze
+          # se alias resolvoval, je samotny uspesny link -- bez --wrap by pthr.c
+          # odkazoval nedefinovany symbol a link by spadl na undefined reference
+          # (overeno lokalne). Vypisuju tedy radky z mapy, ne pocet __real_.
+          grep -E 'pthread_create' "$mapf" | head -3 \
+            | sed 's/%/%25/g; s/^/::notice::  mapa: /' || true
+          if [ "$wrapn" = "0" ]; then
+            echo "::error::__wrap_pthread_create v $mapf chybi -- driver vlakna by zustala na vsech jadrech"
             exit 1
           fi
 
