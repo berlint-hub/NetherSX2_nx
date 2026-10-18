@@ -308,8 +308,15 @@ static void patch_vu_steal_4248(void) {
   if (g_core_version != CORE_VER_V22N_4248)
     return;
   const int level = prefs_get_int("EmuCore/Speedhacks/vuCycleSteal", 0);
-  if (level < 1 || level > 2)
+  if (level < 1 || level > 2) {
+    /* Say so instead of staying silent. An absent line in a hardware log is
+     * ambiguous between "switched off" and "the site did not match", and
+     * TEST3's analysis of exactly such a log lists the active vuCycleSteal
+     * value among the things it could not determine. */
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "VU cycle steal: off (EmuCore/Speedhacks/vuCycleSteal=%d)", level);
     return;
+  }
   if (!in_range(VU_STEAL_4248_ADDR, 4))
     return;
   volatile uint32_t *p =

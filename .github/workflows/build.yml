@@ -559,6 +559,20 @@ jobs:
           fgmp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/LSFGMode" || true); fgmp=${fgmp:-0}
           fgt=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/LSFGTargetFPS" || true); fgt=${fgt:-0}
           echo "::notice::frakcni frame gen: LSFGMode ${fgmd}x (diag) / ${fgmp}x (produkce), LSFGTargetFPS ${fgt}x (produkce)"
+          # Frame-timing souhrn je jen v diag buildu ( cele je to za #ifdef ),
+          # takze v produkci musi byt 0x -- stejny tvar jako sched_yield counter.
+          # TEST3 docs/logs/gt3-nvk-diag-notes.md §5 rika, ze bez frame time a
+          # FPS v logu nejde vyhodnotit zadny A/B test CPU knobu.
+          pfd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "presents / " || true); pfd=${pfd:-0}
+          pfp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "presents / " || true); pfp=${pfp:-0}
+          # Stav VU cycle steal se loguje vzdy, i kdyz je vypnuty, aby v logu ze
+          # zarizeni nebylo "chybi radka" == "vypnuto, nebo site nesedl?".
+          vso=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "VU cycle steal: off" || true); vso=${vso:-0}
+          echo "::notice::frame timing ${pfd}x (diag, ma byt 1) / ${pfp}x (produkce, ma byt 0), VU-steal-off ${vso}x (produkce, ma byt 1)"
+          if [ "$pfd" = "0" ] || [ "$pfp" != "0" ] || [ "$vso" = "0" ]; then
+            echo "::error::frame-timing souhrn nebo log stavu VU steal neni spravne (timing diag ${pfd}x / prod ${pfp}x, VU-steal-off ${vso}x)"
+            exit 1
+          fi
           if [ "$fgmd" = "0" ] || [ "$fgmp" = "0" ] || [ "$fgt" = "0" ]; then
             echo "::error::frakcni frame generation se nedostala do binarky (LSFGMode diag ${fgmd}x / prod ${fgmp}x, LSFGTargetFPS ${fgt}x)"
             exit 1
