@@ -14,6 +14,16 @@ TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE	:=	NetherSX2
 APP_AUTHOR	:=	naga
 APP_VERSION	:=	1.4.0
+# Identity of THIS build. APP_VERSION is the same string in every build, so a
+# hardware log cannot be attributed to a commit without it -- TEST3's analysis of
+# the GT3 log lists build confirmation among the things it could not determine
+# (docs/logs/gt3-nvk-diag-notes.md S5). Derived here so local builds are labelled
+# too; CI overrides it to add the workflow run number.
+GIT_SHA		:=	$(shell git rev-parse --short HEAD 2>/dev/null)
+GIT_ID		:=	$(if $(GIT_SHA),$(GIT_SHA),nogit)
+# -dirty only means something inside a repo, so it is gated on the sha resolving.
+GIT_DIRTY	:=	$(if $(GIT_SHA),$(shell git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty),)
+NETHERSX2_BUILD_ID ?= $(GIT_ID)$(GIT_DIRTY)
 BUILD		?=	build-$(RENDERER)
 SOURCES		:=	source source/hooks source/switch
 DATA		:=	data
@@ -30,6 +40,10 @@ LTOFLAGS := -flto=auto -fuse-linker-plugin
 # __SWITCH__ for libnx; NETHERSX2 gates the port-specific shim branches.
 DEFINES	:=	-D__SWITCH__ -DNETHERSX2 -DCURL_STATICLIB \
 			-DNETHERSX2_VERSION='"$(APP_VERSION)"'
+# Appended on its own line rather than continued onto the one above: that line
+# has no trailing backslash, and adding one would silently swallow whatever
+# follows it. Must stay above CFLAGS, which is := and expands this immediately.
+DEFINES += -DNETHERSX2_BUILD_ID='"$(NETHERSX2_BUILD_ID)"'
 
 ifneq ($(strip $(NETHERSX2_VK_DIAGNOSTIC)),)
 DEFINES += -DNETHERSX2_VK_DIAGNOSTIC

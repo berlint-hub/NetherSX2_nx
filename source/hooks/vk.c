@@ -83,7 +83,8 @@ vk_diag_reset(void) {
   vk_diag_file = fopen(DATA_ROOT "/nethersx2-vulkan.log", "w");
   if (vk_diag_file) {
     setvbuf(vk_diag_file, NULL, _IOLBF, 0);
-    fprintf(vk_diag_file, "NetherSX2 Vulkan diagnostic %s\n", NETHERSX2_VERSION);
+    fprintf(vk_diag_file, "NetherSX2 Vulkan diagnostic %s (build %s)\n",
+            NETHERSX2_VERSION, NETHERSX2_BUILD_ID);
     fflush(vk_diag_file);
     fsync(fileno(vk_diag_file));
   }
@@ -193,98 +194,6 @@ static unsigned vk_diag_acquire_calls;
 static unsigned vk_diag_swapchain_image_calls;
 #endif
 
-#ifdef NETHERSX2_VK_DIAGNOSTIC
-/* Periodic frame-timing summary.
- *
- * TEST3's analysis of a GT3 hardware log (docs/logs/gt3-nvk-diag-notes.md §5)
- * concludes that the CPU knobs cannot be A/B tested at all without frame timing
- * in the log: it carries no FPS and no frame time anywhere, so every comparison
- * of MTVU / Instant VU1 / VU cycle steal ends up being judged by feel. Measured
- * here rather than read from the core because this shim sees every presentation
- * exactly once, which is the number that actually reaches the screen.
- *
- * Intervals above PERF_MAX_INTERVAL_NS are counted as stalls and kept out of
- * the distribution, so a ten-second menu pause or a swapchain transition does
- * not masquerade as the worst frame of the session. */
-#define PERF_RING            512u
-#define PERF_REPORT_PRESENTS 300u
-#define PERF_MIN_INTERVAL_NS UINT64_C(1000000)    /* 1 ms   */
-#define PERF_MAX_INTERVAL_NS UINT64_C(500000000)  /* 500 ms */
-
-static uint64_t perf_ring[PERF_RING];
-static unsigned perf_ring_count;
-static unsigned perf_window_presents;
-static uint64_t perf_window_start_ns;
-static uint64_t perf_prev_ns;
-static unsigned perf_stalls;
-static unsigned long long perf_generated;
-
-/* Insertion-sort a copy and average the worst `count` entries -- the 1% low
- * expressed as a frame time. Pure and bounded (n <= PERF_RING) so the
- * percentile can be checked without a GPU. */
-static double perf_worst_mean_ns(uint64_t *v, unsigned n, unsigned count) {
-  if (!n || !count) return 0.0;
-  for (unsigned i = 1; i < n; ++i) {
-    const uint64_t key = v[i];
-    unsigned j = i;
-    while (j && v[j - 1] > key) { v[j] = v[j - 1]; --j; }
-    v[j] = key;
-  }
-  if (count > n) count = n;
-  uint64_t sum = 0;
-  for (unsigned i = n - count; i < n; ++i) sum += v[i];
-  return (double)sum / (double)count;
-}
-
-static void perf_report(uint64_t now) {
-  const uint64_t elapsed = (now > perf_window_start_ns) ? now - perf_window_start_ns : 0;
-  const double seconds = (double)elapsed / 1e9;
-  const double avg_fps = (seconds > 0.0) ? (double)perf_window_presents / seconds : 0.0;
-
-  uint64_t scratch[PERF_RING];
-  unsigned n = 0;
-  uint64_t worst = 0;
-  for (unsigned i = 0; i < perf_ring_count; ++i) {
-    const uint64_t v = perf_ring[i];
-    if (v < PERF_MIN_INTERVAL_NS) continue;
-    if (v > worst) worst = v;
-    scratch[n++] = v;
-  }
-  unsigned tail = n / 100;
-  if (n && !tail) tail = 1;
-  const double worst_mean = perf_worst_mean_ns(scratch, n, tail);
-
-  vk_diag_note("perf: %u presents / %.3f s = %.2f fps | worst %.1f ms | 1%% low %.2f fps"
-               " | stalls %u | lsfg %s src=%.1f target=%.0f gen=%llu",
-               perf_window_presents, seconds, avg_fps,
-               (double)worst / 1e6, worst_mean > 0.0 ? 1e9 / worst_mean : 0.0,
-               perf_stalls,
-               !lsfg_requested() ? "off"
-                   : (lsfg_mode_is_fractional() ? "fractional" : "auto"),
-               lsfg_frozen_source_fps, lsfg_target_fps_pref(), perf_generated);
-
-  perf_window_presents = 0;
-  perf_ring_count = 0;
-  perf_stalls = 0;
-  perf_generated = 0;
-  perf_window_start_ns = 0;
-  perf_prev_ns = now;
-}
-
-static void perf_observe_present(void) {
-  const uint64_t now = lsfg_monotonic_ns();
-  ++perf_window_presents;
-  if (!now) return;
-  if (!perf_window_start_ns) perf_window_start_ns = now;
-  if (perf_prev_ns && now > perf_prev_ns) {
-    const uint64_t interval = now - perf_prev_ns;
-    if (interval > PERF_MAX_INTERVAL_NS) ++perf_stalls;
-    else if (perf_ring_count < PERF_RING) perf_ring[perf_ring_count++] = interval;
-  }
-  perf_prev_ns = now;
-  if (perf_window_presents >= PERF_REPORT_PRESENTS) perf_report(now);
-}
-#endif /* NETHERSX2_VK_DIAGNOSTIC */
 
 static int lsfg_requested(void) {
   return __atomic_load_n(&lsfg_enabled_requested, __ATOMIC_ACQUIRE);
@@ -433,6 +342,8 @@ static int extension_enabled(const VkDeviceCreateInfo *create_info,
   return 0;
 }
 
+
+
 static VkResult find_lsfg_main_queue_family(
     VkPhysicalDevice physical_device,
     const VkDeviceCreateInfo *create_info,
@@ -490,6 +401,99 @@ static uint64_t lsfg_monotonic_ns(void) {
   if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return 0;
   return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
 }
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+/* Periodic frame-timing summary.
+ *
+ * TEST3's analysis of a GT3 hardware log (docs/logs/gt3-nvk-diag-notes.md §5)
+ * concludes that the CPU knobs cannot be A/B tested at all without frame timing
+ * in the log: it carries no FPS and no frame time anywhere, so every comparison
+ * of MTVU / Instant VU1 / VU cycle steal ends up being judged by feel. Measured
+ * here rather than read from the core because this shim sees every presentation
+ * exactly once, which is the number that actually reaches the screen.
+ *
+ * Intervals above PERF_MAX_INTERVAL_NS are counted as stalls and kept out of
+ * the distribution, so a ten-second menu pause or a swapchain transition does
+ * not masquerade as the worst frame of the session. */
+#define PERF_RING            512u
+#define PERF_REPORT_PRESENTS 300u
+#define PERF_MIN_INTERVAL_NS UINT64_C(1000000)    /* 1 ms   */
+#define PERF_MAX_INTERVAL_NS UINT64_C(500000000)  /* 500 ms */
+
+static uint64_t perf_ring[PERF_RING];
+static unsigned perf_ring_count;
+static unsigned perf_window_presents;
+static uint64_t perf_window_start_ns;
+static uint64_t perf_prev_ns;
+static unsigned perf_stalls;
+static unsigned long long perf_generated;
+
+/* Insertion-sort a copy and average the worst `count` entries -- the 1% low
+ * expressed as a frame time. Pure and bounded (n <= PERF_RING) so the
+ * percentile can be checked without a GPU. */
+static double perf_worst_mean_ns(uint64_t *v, unsigned n, unsigned count) {
+  if (!n || !count) return 0.0;
+  for (unsigned i = 1; i < n; ++i) {
+    const uint64_t key = v[i];
+    unsigned j = i;
+    while (j && v[j - 1] > key) { v[j] = v[j - 1]; --j; }
+    v[j] = key;
+  }
+  if (count > n) count = n;
+  uint64_t sum = 0;
+  for (unsigned i = n - count; i < n; ++i) sum += v[i];
+  return (double)sum / (double)count;
+}
+
+static void perf_report(uint64_t now) {
+  const uint64_t elapsed = (now > perf_window_start_ns) ? now - perf_window_start_ns : 0;
+  const double seconds = (double)elapsed / 1e9;
+  const double avg_fps = (seconds > 0.0) ? (double)perf_window_presents / seconds : 0.0;
+
+  uint64_t scratch[PERF_RING];
+  unsigned n = 0;
+  uint64_t worst = 0;
+  for (unsigned i = 0; i < perf_ring_count; ++i) {
+    const uint64_t v = perf_ring[i];
+    if (v < PERF_MIN_INTERVAL_NS) continue;
+    if (v > worst) worst = v;
+    scratch[n++] = v;
+  }
+  unsigned tail = n / 100;
+  if (n && !tail) tail = 1;
+  const double worst_mean = perf_worst_mean_ns(scratch, n, tail);
+
+  vk_diag_note("perf: %u presents / %.3f s = %.2f fps | worst %.1f ms | 1%% low %.2f fps"
+               " | stalls %u | lsfg %s src=%.1f target=%.0f gen=%llu",
+               perf_window_presents, seconds, avg_fps,
+               (double)worst / 1e6, worst_mean > 0.0 ? 1e9 / worst_mean : 0.0,
+               perf_stalls,
+               !lsfg_requested() ? "off"
+                   : (lsfg_mode_is_fractional() ? "fractional" : "auto"),
+               lsfg_frozen_source_fps, lsfg_target_fps_pref(), perf_generated);
+
+  perf_window_presents = 0;
+  perf_ring_count = 0;
+  perf_stalls = 0;
+  perf_generated = 0;
+  perf_window_start_ns = 0;
+  perf_prev_ns = now;
+}
+
+static void perf_observe_present(void) {
+  const uint64_t now = lsfg_monotonic_ns();
+  ++perf_window_presents;
+  if (!now) return;
+  if (!perf_window_start_ns) perf_window_start_ns = now;
+  if (perf_prev_ns && now > perf_prev_ns) {
+    const uint64_t interval = now - perf_prev_ns;
+    if (interval > PERF_MAX_INTERVAL_NS) ++perf_stalls;
+    else if (perf_ring_count < PERF_RING) perf_ring[perf_ring_count++] = interval;
+  }
+  perf_prev_ns = now;
+  if (perf_window_presents >= PERF_REPORT_PRESENTS) perf_report(now);
+}
+#endif /* NETHERSX2_VK_DIAGNOSTIC */
 
 static uint64_t lsfg_observe_source_present(void) {
   const uint64_t now = lsfg_monotonic_ns();

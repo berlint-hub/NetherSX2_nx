@@ -16,6 +16,13 @@
 
 extern so_module emu_mod; // libemucore.so (defined in main.c)
 
+#ifndef NETHERSX2_BUILD_ID
+/* tests/patches compiles this file straight from the host CMake target, without
+ * the Makefile's DEFINES. Without a fallback only the host-tests job breaks
+ * while the switch job stays green, which is the worst way to find out. */
+#define NETHERSX2_BUILD_ID "unknown"
+#endif
+
 #define INSN_NOP        0xd503201fu
 #define INSN_MOV_X9_XZR 0xaa1f03e9u
 #define INSN_MOV_X8_XZR 0xaa1f03e8u
@@ -339,6 +346,14 @@ static void patch_vu_steal_4248(void) {
 
 void patch_game(void) {
   detect_core_version();
+
+  // Logged before the UNKNOWN bail-out on purpose: an unrecognised core is
+  // exactly when it matters most to know which wrapper produced the log.
+  corelog_log(CORELOG_INFO, "Wrapper", "wrapper build %s, core %s",
+              NETHERSX2_BUILD_ID,
+              g_core_version == CORE_VER_V22N_4248 ? "v2.2n-4248"
+              : g_core_version == CORE_VER_V22N_3668 ? "v2.2n-3668"
+              : "UNKNOWN");
 
   if (g_core_version == CORE_VER_UNKNOWN)
     return;

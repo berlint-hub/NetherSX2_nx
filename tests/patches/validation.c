@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,10 +13,33 @@ so_module emu_mod;
 
 /* patches.c reports what it did through corelog, which needs libnx and cannot
  * be compiled for the host -- the real corelog.c is deliberately not part of
- * this target. The patch functions only use it for informational lines, so a
- * stub that drops them is faithful to what the tests exercise. */
+ * this target.
+ *
+ * The lines are captured rather than dropped. Some of them ARE the behaviour
+ * under test: a hardware log that omits the wrapper build id or the active
+ * vuCycleSteal value cannot be attributed to a commit or to a setting, which is
+ * precisely what TEST3's analysis of the GT3 log (docs/logs/gt3-nvk-diag-notes.md
+ * §5) lists as undeterminable. A discarding stub would let both silently
+ * regress, so these assertions are what keeps them in the binary. */
+#define CAP_MAX 256
+static char cap[CAP_MAX][192];
+static unsigned cap_n;
+
 void corelog_log(int priority, const char *tag, const char *format, ...) {
-  (void)priority; (void)tag; (void)format;
+  (void)priority; (void)tag;
+  if (cap_n >= CAP_MAX) return;
+  va_list ap;
+  va_start(ap, format);
+  vsnprintf(cap[cap_n], sizeof(cap[0]), format, ap);
+  va_end(ap);
+  ++cap_n;
+}
+
+static unsigned cap_count(const char *needle) {
+  unsigned n = 0;
+  for (unsigned i = 0; i < cap_n; ++i)
+    if (strstr(cap[i], needle)) ++n;
+  return n;
 }
 
 static const size_t image_size = 0xb80560;
@@ -45,6 +69,33 @@ static void check_pair(const char *name, uint32_t first, uint32_t second) {
     exit(EXIT_FAILURE);
   }
   checks++;
+}
+
+/* One patch_game() call against `version`, then assert `needle` was logged
+ * `want` times. `setup` runs after prepare() so it can set prefs and corrupt the
+ * image the way a real mismatch would. */
+typedef void (*log_setup_fn)(void);
+
+static void check_log(const char *name, const char *version, log_setup_fn setup,
+                      const char *needle, unsigned want) {
+  cap_n = 0;
+  prepare(version);
+  if (setup) setup();
+  patch_game();
+  const unsigned got = cap_count(needle);
+  if (got != want) {
+    fprintf(stderr, "log %s failed: \"%s\" seen %ux, expected %ux\n",
+            name, needle, got, want);
+    exit(EXIT_FAILURE);
+  }
+  checks++;
+}
+
+static void setup_vu_off(void) { prefs_set_int("EmuCore/Speedhacks/vuCycleSteal", 0); }
+static void setup_vu_l1(void)  { prefs_set_int("EmuCore/Speedhacks/vuCycleSteal", 1); }
+static void setup_vu_bad(void) {
+  prefs_set_int("EmuCore/Speedhacks/vuCycleSteal", 1);
+  *(uint32_t *)(image + 0x4b2500) = 0x910023E1;  // what TEST-2's offset holds
 }
 
 static void check_vu(const char *name, uint32_t expected) {
@@ -171,6 +222,25 @@ int main(void) {
   prefs_set_int("EmuCore/Speedhacks/vuCycleSteal", 1);
   emu_mod.load_size = 0x4b2503;
   check_vu("site out of range", 0x1B0A7D08);
+
+  // The lines a hardware log must contain for TEST3's §5 items 2 and 3: which
+  // build produced it, and which vuCycleSteal value was active.
+  check_log("build id logged on known core", "4248", NULL, "wrapper build ", 1);
+  check_log("build id names the core",       "4248", NULL, "core v2.2n-4248", 1);
+  check_log("3668 named",                    "3668", NULL, "core v2.2n-3668", 1);
+  // Before the UNKNOWN bail-out on purpose: an unrecognised core is exactly when
+  // it matters most to know which wrapper produced the log.
+  check_log("build id logged on UNKNOWN core", "", NULL, "wrapper build ", 1);
+  check_log("UNKNOWN core named",              "", NULL, "core UNKNOWN", 1);
+  // Off must be reported, not silent -- otherwise "no line" is ambiguous between
+  // "switched off" and "the site did not match".
+  check_log("VU steal off is reported",  "4248", setup_vu_off, "VU cycle steal: off", 1);
+  check_log("VU steal off shows value",  "4248", setup_vu_off, "vuCycleSteal=0", 1);
+  check_log("VU steal applied reported", "4248", setup_vu_l1,
+            "VU cycle steal level 1 applied", 1);
+  check_log("wrong word warns",          "4248", setup_vu_bad, "NOT applied", 1);
+  // The version gate returns first, so a 3668 core must not claim an off level.
+  check_log("no off line on 3668",       "3668", setup_vu_off, "VU cycle steal: off", 0);
 
   free(image);
   printf("%u core patch checks passed\n", checks);

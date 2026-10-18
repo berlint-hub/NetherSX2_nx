@@ -388,7 +388,12 @@ jobs:
           # max 10 na uroven, tak 8 chybovych radku + 1 slouceny tail.
           log=/tmp/vk.log
           set +e
-          make -j"$(nproc)" RENDERER=VK BUILD=build-vk TARGET=NetherSX2_nx_vk > "$log" 2>&1
+          # Build ID = commit + cislo behu, aby byl kazdy log ze zarizeni
+          # pripsatelny konkretnimu .nro (TEST3 diag-notes S5, item 2).
+          BID="$(git rev-parse --short HEAD)-run${GITHUB_RUN_ID}"
+          echo "::notice::build ID tohoto .nro: ${BID}"
+          make -j"$(nproc)" RENDERER=VK BUILD=build-vk TARGET=NetherSX2_nx_vk \
+            NETHERSX2_BUILD_ID="$BID" > "$log" 2>&1
           rc=$?
           set -e
           if [ "$rc" != 0 ]; then
@@ -477,7 +482,8 @@ jobs:
           log=/tmp/diag.log
           set +e
           make -j"$(nproc)" RENDERER=VK BUILD=build-vk-diag TARGET=NetherSX2_nx_vk_diag \
-            NETHERSX2_VK_DIAGNOSTIC=1 > "$log" 2>&1
+            NETHERSX2_VK_DIAGNOSTIC=1 \
+            NETHERSX2_BUILD_ID="$(git rev-parse --short HEAD)-run${GITHUB_RUN_ID}" > "$log" 2>&1
           rc=$?
           set -e
           if [ "$rc" != 0 ]; then
@@ -571,6 +577,17 @@ jobs:
           echo "::notice::frame timing ${pfd}x (diag, ma byt 1) / ${pfp}x (produkce, ma byt 0), VU-steal-off ${vso}x (produkce, ma byt 1)"
           if [ "$pfd" = "0" ] || [ "$pfp" != "0" ] || [ "$vso" = "0" ]; then
             echo "::error::frame-timing souhrn nebo log stavu VU steal neni spravne (timing diag ${pfd}x / prod ${pfp}x, VU-steal-off ${vso}x)"
+            exit 1
+          fi
+          # Build ID musi v binarce SKUTECNE byt -- jinak log ze zarizeni opet
+          # nelze pripsat commitu. Grep na "-run<cislo>" je silny test: dokazuje,
+          # ze hodnota prosla pres make az do .rodata, ne jen ze format existuje.
+          wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
+          bidf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c -- "-run$GITHUB_RUN_ID" || true); bidf=${bidf:-0}
+          bidd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c -- "-run$GITHUB_RUN_ID" || true); bidd=${bidd:-0}
+          echo "::notice::build ID v binarce: run-tag ${bidf}x (produkce) / ${bidd}x (diag), format ${wbf}x"
+          if [ "$wbf" = "0" ] || [ "$bidf" = "0" ] || [ "$bidd" = "0" ]; then
+            echo "::error::build ID se do .nro nedostal (format ${wbf}x, run-tag prod ${bidf}x / diag ${bidd}x) -- log ze zarizeni by nebyl pripsatelny commitu"
             exit 1
           fi
           if [ "$fgmd" = "0" ] || [ "$fgmp" = "0" ] || [ "$fgt" = "0" ]; then
