@@ -405,14 +405,29 @@ jobs:
           fi
           echo "::notice::VK nro: $(ls -la NetherSX2_nx_vk.nro 2>/dev/null)"
           # Primy dukaz, ze -Wl,--wrap=pthread_create skutecne zasahl: mapa linku
-          # musi obsahovat oba symboly. Bez toho by vlakna Mesy/NVK dedila
-          # vychozi afinitu na vsechna jadra a mohla pristat na EE.
-          mapf=NetherSX2_nx_vk.map
-          wrapn=$(grep -c '__wrap_pthread_create' "$mapf" 2>/dev/null || true)
-          realn=$(grep -c '__real_pthread_create' "$mapf" 2>/dev/null || true)
-          echo "::notice::--wrap=pthread_create v mape: __wrap_ ${wrapn}x, __real_ ${realn}x"
+          # musi obsahovat oba symboly.
+          #
+          # Makefile rekurzi do $(BUILD) a linkuje odtamtud (viz pravidlo
+          # "$(BUILD): $(MAKE) -C $(BUILD)"), takze mapa je v build-vk/, ne
+          # v koreni. Run 39161401915 hledal NetherSX2_nx_vk.map v koreni, grep
+          # na neexistujici soubor vypsal nic, promenna zustala PRazdna a test
+          # [ "$wrapn" = "0" ] na prazdny retezec nesedl -- assertion prosla
+          # vakantne. Proto se tady cesta hleda a nenalezeni je error.
+          # (Samotny uspesny link je taky dukaz: pthr.c odkazuje
+          # __real_pthread_create, ktery bez --wrap neexistuje.)
+          mapf=
+          for cand in build-vk/NetherSX2_nx_vk.map NetherSX2_nx_vk.map; do
+            if [ -f "$cand" ]; then mapf="$cand"; break; fi
+          done
+          if [ -z "$mapf" ]; then
+            echo "::error::mapa linku VK targetu se nenasla (hledano build-vk/NetherSX2_nx_vk.map a NetherSX2_nx_vk.map)"
+            exit 1
+          fi
+          wrapn=$(grep -c '__wrap_pthread_create' "$mapf" || true); wrapn=${wrapn:-0}
+          realn=$(grep -c '__real_pthread_create' "$mapf" || true); realn=${realn:-0}
+          echo "::notice::--wrap=pthread_create v $mapf: __wrap_ ${wrapn}x, __real_ ${realn}x"
           if [ "$wrapn" = "0" ] || [ "$realn" = "0" ]; then
-            echo "::error::--wrap=pthread_create se v $mapf neprojevil (__wrap_ ${wrapn}x / __real_ ${realn}x) -- driver vlakna by zustala na vsehoch jadrech"
+            echo "::error::--wrap=pthread_create se v mape neprojevil (__wrap_ ${wrapn}x / __real_ ${realn}x) -- driver vlakna by zustala na vsech jadrech"
             exit 1
           fi
 
