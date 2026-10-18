@@ -390,7 +390,15 @@ jobs:
           set +e
           # Build ID = commit + cislo behu, aby byl kazdy log ze zarizeni
           # pripsatelny konkretnimu .nro (TEST3 diag-notes S5, item 2).
-          BID="$(git rev-parse --short HEAD)-run${GITHUB_RUN_ID}"
+          # GITHUB_SHA, ne "git rev-parse": v kontejneru devkita64 git vypsal
+          # prazdny retezec (repo patri runner uid, prikaz bezi pod root, a
+          # 2>/dev/null to skrylo), takze build ID vysel jako "-run<cislo>" bez
+          # commitu. Env promenna od Actions funguje bez gitu. cut -c1-7 je
+          # POSIX; ${GITHUB_SHA:0:7} by byl bashismus a kontejner pouziva dash.
+          BID="$(echo "$GITHUB_SHA" | cut -c1-7)-run${GITHUB_RUN_ID}"
+          case "$BID" in
+            -run*) echo "::error::GITHUB_SHA je prazdny, build ID by byl ${BID} -- log ze zarizeni by nesel pripsat commitu"; exit 1 ;;
+          esac
           echo "::notice::build ID tohoto .nro: ${BID}"
           make -j"$(nproc)" RENDERER=VK BUILD=build-vk TARGET=NetherSX2_nx_vk \
             NETHERSX2_BUILD_ID="$BID" > "$log" 2>&1
@@ -483,7 +491,7 @@ jobs:
           set +e
           make -j"$(nproc)" RENDERER=VK BUILD=build-vk-diag TARGET=NetherSX2_nx_vk_diag \
             NETHERSX2_VK_DIAGNOSTIC=1 \
-            NETHERSX2_BUILD_ID="$(git rev-parse --short HEAD)-run${GITHUB_RUN_ID}" > "$log" 2>&1
+            NETHERSX2_BUILD_ID="$(echo "$GITHUB_SHA" | cut -c1-7)-run${GITHUB_RUN_ID}" > "$log" 2>&1
           rc=$?
           set -e
           if [ "$rc" != 0 ]; then
@@ -569,22 +577,28 @@ jobs:
           # takze v produkci musi byt 0x -- stejny tvar jako sched_yield counter.
           # TEST3 docs/logs/gt3-nvk-diag-notes.md §5 rika, ze bez frame time a
           # FPS v logu nejde vyhodnotit zadny A/B test CPU knobu.
-          pfd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "presents / " || true); pfd=${pfd:-0}
-          pfp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "presents / " || true); pfp=${pfp:-0}
+          # ftd/ftp, NE pfd/pfp: ta jmena uz v tomhle kroku drzi pocty "core %d,
+          # mask" pro assertion pthr_pin_by_name(), ktera je CTE az na konci kroku.
+          # Prepsani hodnotami frame-timingu (produkce je tu zamerne 0) spustilo
+          # exit 1 v cizi kontrole -- a ::error:: anotaci pak spolkla kapacita.
+          ftd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "presents / " || true); ftd=${ftd:-0}
+          ftp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "presents / " || true); ftp=${ftp:-0}
           # Stav VU cycle steal se loguje vzdy, i kdyz je vypnuty, aby v logu ze
           # zarizeni nebylo "chybi radka" == "vypnuto, nebo site nesedl?".
           vso=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "VU cycle steal: off" || true); vso=${vso:-0}
-          echo "::notice::frame timing ${pfd}x (diag, ma byt 1) / ${pfp}x (produkce, ma byt 0), VU-steal-off ${vso}x (produkce, ma byt 1)"
-          if [ "$pfd" = "0" ] || [ "$pfp" != "0" ] || [ "$vso" = "0" ]; then
-            echo "::error::frame-timing souhrn nebo log stavu VU steal neni spravne (timing diag ${pfd}x / prod ${pfp}x, VU-steal-off ${vso}x)"
+          echo "::notice::frame timing ${ftd}x (diag, ma byt 1) / ${ftp}x (produkce, ma byt 0), VU-steal-off ${vso}x (produkce, ma byt 1)"
+          if [ "$ftd" = "0" ] || [ "$ftp" != "0" ] || [ "$vso" = "0" ]; then
+            echo "::error::frame-timing souhrn nebo log stavu VU steal neni spravne (timing diag ${ftd}x / prod ${ftp}x, VU-steal-off ${vso}x)"
             exit 1
           fi
           # Build ID musi v binarce SKUTECNE byt -- jinak log ze zarizeni opet
           # nelze pripsat commitu. Grep na "-run<cislo>" je silny test: dokazuje,
           # ze hodnota prosla pres make az do .rodata, ne jen ze format existuje.
           wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
-          bidf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c -- "-run$GITHUB_RUN_ID" || true); bidf=${bidf:-0}
-          bidd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c -- "-run$GITHUB_RUN_ID" || true); bidd=${bidd:-0}
+          # [0-9a-f]{7} pred -run: dokazuje ze tam je i commit, ne jen cislo behu.
+          # Holý grep na "-run<cislo>" by prosel i s prazdnou sha.
+          bidf=$("$xstrings" NetherSX2_nx_vk.nro | grep -cE "[0-9a-f]{7}-run$GITHUB_RUN_ID" || true); bidf=${bidf:-0}
+          bidd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -cE "[0-9a-f]{7}-run$GITHUB_RUN_ID" || true); bidd=${bidd:-0}
           echo "::notice::build ID v binarce: run-tag ${bidf}x (produkce) / ${bidd}x (diag), format ${wbf}x"
           if [ "$wbf" = "0" ] || [ "$bidf" = "0" ] || [ "$bidd" = "0" ]; then
             echo "::error::build ID se do .nro nedostal (format ${wbf}x, run-tag prod ${bidf}x / diag ${bidd}x) -- log ze zarizeni by nebyl pripsatelny commitu"
