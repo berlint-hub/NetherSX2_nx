@@ -323,6 +323,10 @@ static __thread char tls_self_name[16];
 static __thread unsigned long long tls_yield_count;
 static unsigned long long g_yield_total;
 
+// Both belong under the diagnostic flag because the only caller does: the
+// counter still increments in production, but nothing reports it there, and a
+// static helper with no caller is dead code the compiler warns about.
+#ifdef NETHERSX2_VK_DIAGNOSTIC
 #define PTHR_YIELD_REPORT_EVERY 100000ull
 
 // Report early as well as often: a thread that yields rarely would otherwise
@@ -331,6 +335,7 @@ static unsigned long long g_yield_total;
 static int yield_worth_reporting(unsigned long long n) {
   return n == 100 || n == 1000 || n == 10000 || (n % PTHR_YIELD_REPORT_EVERY) == 0;
 }
+#endif
 
 int pthr_sched_yield(void) {
   const unsigned long long mine = ++tls_yield_count;
@@ -421,12 +426,17 @@ void pthr_pin_by_name(const char *name) {
     // decompressor actually ends up sitting next to a 95%-busy MTVU cannot be
     // told from a log that never mentions it, so read back the affinity the
     // trampoline left the thread with instead of guessing.
-    u64 have = 0;
-    s32 on = -1;
-    if (R_SUCCEEDED(svcGetThreadCoreMask(CUR_THREAD_HANDLE, &have, &on)))
+    // Argument order is the REVERSE of svcSetThreadCoreMask(handle, core, mask):
+    // the getter takes the outputs first. And what comes back is the thread's
+    // preferred core plus its affinity mask -- where it is allowed to run, not a
+    // sample of where it happened to be at this instant. The mask is the number
+    // that answers the question either way.
+    s32 pref = -1;
+    u64 aff = 0;
+    if (R_SUCCEEDED(svcGetThreadCoreMask(&pref, &aff, CUR_THREAD_HANDLE)))
       corelog_log(CORELOG_INFO, "Wrapper",
-                  "thread \"%s\" -> no dedicated role, running on core %d, pool mask 0x%x",
-                  name, (int)on, wm);
+                  "thread \"%s\" -> no dedicated role, preferred core %d, affinity 0x%llx, pool mask 0x%x",
+                  name, (int)pref, (unsigned long long)aff, wm);
     else
       corelog_log(CORELOG_INFO, "Wrapper",
                   "thread \"%s\" -> no dedicated role, pool mask 0x%x", name, wm);
