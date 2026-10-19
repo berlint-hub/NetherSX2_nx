@@ -639,6 +639,32 @@ jobs:
             echo "::error::perf cpu/fastmem radek: diag ${pcd}x / prod ${pcp}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
             exit 1
           fi
+          # Treti radek perf okna (jen diag): kam jde cas, ktery neni CPU cas.
+          # Log z GT3 ukazal 30.4 fps, kde zadny thread nebyl nad 55 % CPU --
+          # tedy cekani, ne pocitani. Bez techto citacu nejde rozlisit, jestli
+          # se ceka na GPU (fence / queue-idle), jestli se za behu kompiluji
+          # pipeliny, nebo jestli scena dela readbacky (copy2buf, ktere ridi
+          # EmuCore/GS/HWDownloadMode) a kopie misto texture barrier.
+          gbd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "perf: gpu blocked fence" || true); gbd=${gbd:-0}
+          gbp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "perf: gpu blocked fence" || true); gbp=${gbp:-0}
+          echo "::notice::perf gpu-blocked radek: ${gbd}x (diag, ma byt aspon 1) / ${gbp}x (produkce, ma byt 0)"
+          if [ "$gbd" = "0" ] || [ "$gbp" != "0" ]; then
+            echo "::error::perf gpu-blocked radek: diag ${gbd}x / prod ${gbp}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
+            exit 1
+          fi
+          # Adresni prostor, ve kterem proces skutecne nabootoval. Na otazku,
+          # jestli by pomohl sirsi (39bitovy) adresni prostor nebo forwarder
+          # s plnym application rezimem, musi odpovedet Horizon, ne predpoklad:
+          # 512 GiB je 39bitovy prostor aplikace, 64 GiB je 36bitovy a 2 GiB je
+          # 32bitovy prostor appletu, do ktereho by se ani nevesla jedina
+          # souvisla 4 GiB fastmem rezervace z libc_shim.c.
+          asd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "address space aslr=0x" || true); asd=${asd:-0}
+          asp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "address space aslr=0x" || true); asp=${asp:-0}
+          echo "::notice::log adresniho prostoru: ${asd}x (diag, ma byt aspon 1) / ${asp}x (produkce, ma byt 0)"
+          if [ "$asd" = "0" ] || [ "$asp" != "0" ]; then
+            echo "::error::log adresniho prostoru: diag ${asd}x / prod ${asp}x -- diag ho musi mit, produkce nesmi"
+            exit 1
+          fi
           wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
           # [0-9a-f]{7} pred -run: dokazuje ze tam je i commit, ne jen cislo behu.
           # Holý grep na "-run<cislo>" by prosel i s prazdnou sha.
@@ -750,6 +776,44 @@ jobs:
           echo "::notice::vychozi adresar her sdmc:/roms/ps2: ${gdp}x (produkce) / ${gdd}x (diag)"
           if [ "$gdp" = "0" ] || [ "$gdd" = "0" ]; then
             echo "::error::vychozi adresar her sdmc:/roms/ps2 v launcheru chybi (prod ${gdp}x / diag ${gdd}x) -- hrac by musel pri kazde instalaci znovu hledat svoje ISO"
+            exit 1
+          fi
+          # GS hardwarove hacky v menu. Scena vazana na GPU (noc v GT3: vrstvy
+          # aditivne michanych svetel) nema zadnou opravu na strane CPU, takze
+          # jedine zbyvajici paky jsou presunout praci z GPU nebo renderer
+          # donutit necekat na readbacky. Kazdy klic byl pred vystavenim overen
+          # proti stringum pinateho libemucore_tegrax1.so: jadro sedi mezi dvema
+          # upstream generacemi, takze napriklad UserHacks_AutoFlushLevel,
+          # UserHacks_CPUSpriteRenderLevel, UserHacks_DisableRenderFixes a
+          # UserHacks_DrawBuffering v nem nejsou a radka s takovym klicem by
+          # zapsala hodnotu, kterou jaderny getter nikdy necte.
+          # strings se pousti jednou na binarku, ne jednou na klic: .nro ma 47 MB
+          # a jedenact klicu x dve binarky by jinak bylo dvaadvacet prubehu.
+          "$xstrings" NetherSX2.nro > /tmp/nx_lprod.txt
+          "$xstrings" NetherSX2-diag.nro > /tmp/nx_ldiag.txt
+          hk_missing=""
+          for hk in EmuCore/GS/HWSpinCPUForReadbacks EmuCore/GS/HWSpinGPUForReadbacks \
+                    EmuCore/GS/UserHacks_CPUSpriteRenderBW EmuCore/GS/UserHacks_CPUCLUTRender \
+                    EmuCore/GS/UserHacks_CPU_FB_Conversion EmuCore/GS/UserHacks_Disable_Safe_Features \
+                    EmuCore/GS/UserHacks_DisableDepthSupport EmuCore/GS/UserHacks_DisablePartialInvalidation \
+                    EmuCore/GS/UserHacks_EstimateTextureRegion EmuCore/GS/UserHacks_SkipDraw_Start \
+                    EmuCore/GS/UserHacks_SkipDraw_End; do
+            hkc=$(grep -c "$hk" /tmp/nx_lprod.txt || true); hkc=${hkc:-0}
+            hkk=$(grep -c "$hk" /tmp/nx_ldiag.txt || true); hkk=${hkk:-0}
+            if [ "$hkc" = "0" ] || [ "$hkk" = "0" ]; then hk_missing="$hk_missing $hk"; fi
+          done
+          # Vysvetleni nove vychozi hodnoty HW download mode musi byt v binarce
+          # spolu s ni: bez nej by prepnuti z Accurate vypadalo jako nahoda a
+          # cisla, o ktera se opira, by se ztratila.
+          dmp=$(grep -c "default here is Unsynchronized rather than Accurate" /tmp/nx_lprod.txt || true); dmp=${dmp:-0}
+          dmd=$(grep -c "default here is Unsynchronized rather than Accurate" /tmp/nx_ldiag.txt || true); dmd=${dmd:-0}
+          echo "::notice::GS hardwarove hacky v menu: chybejici='${hk_missing:-zadne}', duvod vychoziho download mode ${dmp}x (produkce) / ${dmd}x (diag)"
+          if [ -n "$hk_missing" ]; then
+            echo "::error::GS hardwarove hacky se nedostaly do menu launcheru:${hk_missing} -- GPU-bound scena by se dala ladit jen rucni upravou INI"
+            exit 1
+          fi
+          if [ "$dmp" = "0" ] || [ "$dmd" = "0" ]; then
+            echo "::error::vysvetleni vychoziho HW download mode v helpu chybi (prod ${dmp}x / diag ${dmd}x)"
             exit 1
           fi
 

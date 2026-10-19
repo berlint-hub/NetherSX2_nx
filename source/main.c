@@ -2009,6 +2009,35 @@ int main(void) {
                prefs_get_string("Wrapper/FastmemMode", "hybrid"),
                prefs_get_bool("Wrapper/LSFGEnabled", false));
 #endif
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  /* Records the address space this process actually booted in, so the recurring
+   * question "would a wider address space (or an application-mode forwarder that
+   * grants one) help?" is answered from Horizon instead of from an assumption.
+   *
+   * AslrRegionSize is the whole virtual address range the process may hand out:
+   * 0x8000000000 (512 GiB) is the 39-bit space a real application gets,
+   * 0x1000000000 (64 GiB) is 36-bit, 0x80000000 (2 GiB) is the 32-bit space an
+   * applet is confined to. libc_shim.c reserves a single contiguous 4 GiB
+   * fastmem area (FASTMEM_AREA_SIZE), which cannot succeed at all in the 32-bit
+   * layout, so the running game already proves we are not in it -- this line
+   * says which of the other two, plus IsApplication (9.0.0+), which is the same
+   * fact from the other side: a HOME Menu shortcut rather than the album applet
+   * is also what grants all four cores and the larger memory grant. */
+  {
+    u64 aslr_addr = 0, aslr_size = 0, is_app = 0, mem_total = 0;
+    const Result rc_addr = svcGetInfo(&aslr_addr, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0);
+    const Result rc_size = svcGetInfo(&aslr_size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0);
+    const Result rc_app  = svcGetInfo(&is_app, InfoType_IsApplication, CUR_PROCESS_HANDLE, 0);
+    const Result rc_mem  = svcGetInfo(&mem_total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    vk_diag_note("address space aslr=0x%llx+0x%llx (%llu GiB, rc %d/%d)"
+                 " app=%llu (rc %d) mem=%llu MiB (rc %d)",
+                 (unsigned long long)aslr_addr, (unsigned long long)aslr_size,
+                 (unsigned long long)(aslr_size >> 30),
+                 (int)R_FAILED(rc_addr), (int)R_FAILED(rc_size),
+                 (unsigned long long)is_app, (int)R_FAILED(rc_app),
+                 (unsigned long long)(mem_total >> 20), (int)R_FAILED(rc_mem));
+  }
+#endif
 
   check_syscalls();
   check_data(g_core_so, g_disc_path);

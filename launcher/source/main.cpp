@@ -403,6 +403,15 @@ static const Choice C_crc[]      = { {"Auto","-1"}, {"None","0"}, {"Minimum","1"
 static const Choice C_preload[]  = { {"None","0"}, {"Partial","1"}, {"Full","2"} };
 static const Choice C_cas[]      = { {"Off","0"}, {"Sharpen only","1"}, {"Sharpen + upscale","2"} };
 static const Choice C_hwdl[]     = { {"Accurate","0"}, {"Disable readbacks","1"}, {"Unsynchronized","2"}, {"Disabled","3"} };
+/* Value lists for the core's GS hardware hacks. The two integer knobs are
+ * bound upstream as plain integers (SettingsWrapBitfield), and what the core
+ * stores is the level index, so the labels only have to keep upstream's order:
+ * 0 is off and every higher level moves more work off the GPU. */
+static const Choice C_cpusprite[] = { {"0 (off)","0"}, {"1 (64 px)","1"}, {"2 (128 px)","2"},
+                                      {"3 (192 px)","3"}, {"4 (256 px)","4"}, {"5 (320 px)","5"},
+                                      {"6 (384 px)","6"}, {"7 (448 px)","7"}, {"8 (512 px)","8"},
+                                      {"9 (576 px)","9"}, {"10 (640 px)","10"} };
+static const Choice C_clutrender[]= { {"Off","0"}, {"Normal","1"}, {"Aggressive","2"} };
 static const Choice C_interp[]   = { {"Nearest","0"}, {"Linear","1"}, {"Cubic","2"}, {"Hermite","3"}, {"Catmull-Rom","4"} };
 static const Choice C_sync[]     = { {"TimeStretch","0"}, {"Async","1"}, {"None","2"} };
 static const Choice C_eecr[]     = { {"50%","-3"}, {"60%","-2"}, {"75%","-1"}, {"100%","0"}, {"130%","1"}, {"180%","2"}, {"300%","3"} };
@@ -467,7 +476,31 @@ static const Opt S_enhance[] = {
   O_CHOICEG("Asynchronous texture loading", "EmuCore/GS/LoadTextureReplacementsAsync", C_bool, "true",
             "EmuCore/GS/LoadTextureReplacements", "false"),
   O_CHOICE("SW renderer FMV",  "EmuCore/GS/SoftwareRendererFMV", C_bool, "false"),
-  O_CHOICE("HW download mode", "EmuCore/GS/HWDownloadMode", C_hwdl, "0"),
+  /* Unsynchronized, not Accurate: see the SETTING_HELP entry, which records the
+   * Gran Turismo 3 logs this default was chosen from and why it is not a clean
+   * A/B result. */
+  O_CHOICE("HW download mode", "EmuCore/GS/HWDownloadMode", C_hwdl, "2"),
+  /* GS hardware hacks -- the core's own "manual HW fixes" family. A GPU-bound
+   * scene has no CPU-side fix, and these are the knobs that move work off the
+   * GPU or stop the renderer waiting on it. Every key below was checked against
+   * the strings of the pinned libemucore_tegrax1.so before being exposed: this
+   * core sits between two upstream generations, so it has UserHacks_AutoFlush
+   * but not UserHacks_AutoFlushLevel, UserHacks_CPUSpriteRenderBW but not
+   * UserHacks_CPUSpriteRenderLevel, and neither UserHacks_DisableRenderFixes,
+   * UserHacks_DrawBuffering nor DisableVertexShaderExpand. Only keys the binary
+   * actually contains appear here, each with the type upstream binds it as, so a
+   * row cannot write a value the core's getter cannot parse. */
+  O_CHOICE("Spin CPU on readbacks", "EmuCore/GS/HWSpinCPUForReadbacks", C_bool, "false"),
+  O_CHOICE("Spin GPU on readbacks", "EmuCore/GS/HWSpinGPUForReadbacks", C_bool, "false"),
+  O_CHOICE("CPU sprite render",     "EmuCore/GS/UserHacks_CPUSpriteRenderBW", C_cpusprite, "0"),
+  O_CHOICE("Software CLUT render",  "EmuCore/GS/UserHacks_CPUCLUTRender", C_clutrender, "0"),
+  O_CHOICE("CPU framebuffer conv",  "EmuCore/GS/UserHacks_CPU_FB_Conversion", C_bool, "false"),
+  O_CHOICE("Disable safe features", "EmuCore/GS/UserHacks_Disable_Safe_Features", C_bool, "false"),
+  O_CHOICE("Disable depth support", "EmuCore/GS/UserHacks_DisableDepthSupport", C_bool, "false"),
+  O_CHOICE("Disable partial invalidation", "EmuCore/GS/UserHacks_DisablePartialInvalidation", C_bool, "false"),
+  O_CHOICE("Estimate texture region", "EmuCore/GS/UserHacks_EstimateTextureRegion", C_bool, "false"),
+  O_RANGE ("Skip draw from",        "EmuCore/GS/UserHacks_SkipDraw_Start", 0, 100, 1, "0"),
+  O_RANGE ("Skip draw to",          "EmuCore/GS/UserHacks_SkipDraw_End",   0, 100, 1, "0"),
 };
 static const Opt S_framegen[] = {
   O_CHOICE("Frame generation", "Wrapper/LSFGEnabled", C_bool, "false"),
@@ -691,7 +724,29 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"EmuCore/GS/SoftwareRendererFMV", "Game-specific workaround",
    "Temporarily uses the software renderer for FMV sequences. It can fix videos that hardware rendering displays incorrectly, but costs substantial CPU time during those scenes."},
   {"EmuCore/GS/HWDownloadMode", "Accuracy / performance",
-   "Changes synchronization for data read back from the GPU. Accurate is safest. Less synchronized modes may improve demanding games but can break effects, videos, or other rendering that depends on GS downloads."},
+   "Changes synchronization for data read back from the GPU. Accurate is safest but makes every GS download a blocking round trip. The default here is Unsynchronized rather than Accurate: in the Gran Turismo 3 hardware logs the only runs that reached about 50 fps had this set away from Accurate, while a run stuck near 30 fps with no thread above 55 % CPU had it on Accurate. That is not a controlled A/B, the two runs were not the same scene, so treat it as the better starting point and not as a measured result. Less synchronized modes can break effects, videos, or other rendering that depends on GS downloads."},
+  {"EmuCore/GS/HWSpinCPUForReadbacks", "Readback latency",
+   "Keeps the CPU doing throwaway work instead of sleeping while a frame waits for data coming back from the GPU. Can shorten those stalls at a large cost in power and heat. This port is not tuned for battery life, so the trade is deliberate; the per-thread CPU counters in the diagnostic build show the extra load."},
+  {"EmuCore/GS/HWSpinGPUForReadbacks", "Readback latency",
+   "Submits throwaway work to the GPU while waiting for a readback so the GPU does not idle down. It needs VK_EXT_calibrated_timestamps to pace itself: without it the core logs 'Spin GPU During Readbacks is enabled, but calibrated timestamps are unavailable. This might be really slow.' If that line appears in nethersx2-core.log, turn this off again and keep the CPU spin."},
+  {"EmuCore/GS/UserHacks_CPUSpriteRenderBW", "GPU to CPU offload",
+   "Renders sprite primitives on the CPU instead of the GPU when the target they draw into is no wider than the selected level. 0 is off; PCSX2 labels the levels by that maximum width, 1 = 64 px up to 10 = 640 px, and the number written to the INI is the level. This is the lever for a scene that is GPU-bound while CPU cores still have headroom, which the per-thread CPU counters measure. Sprites drawn on the CPU can come out wrong."},
+  {"EmuCore/GS/UserHacks_CPUCLUTRender", "GPU to CPU offload",
+   "Detects a game drawing its own colour palette and performs that lookup in software instead of on the GPU. Normal catches the common cases, Aggressive catches more at a higher CPU cost. A misdetected palette shows up as wrong colours."},
+  {"EmuCore/GS/UserHacks_CPU_FB_Conversion", "GPU to CPU offload",
+   "Converts 4-bit and 8-bit framebuffers on the CPU instead of with GPU compute. Trades GPU time for CPU time, and can break effects that read the converted framebuffer."},
+  {"EmuCore/GS/UserHacks_Disable_Safe_Features", "Aggressive",
+   "Turns off several features the GS renderer keeps for correctness. Usually the largest single speed lever in this group and the one most likely to break rendering: expect wrong shadows, missing effects or corrupted textures. Leave it off unless a scene is GPU-bound and nothing above recovered it."},
+  {"EmuCore/GS/UserHacks_DisableDepthSupport", "Aggressive",
+   "Removes depth-buffer support from the texture cache, so depth contents are never converted or read back. Saves GPU bandwidth where a scene draws many depth-tested layers over each other, which is what a night track full of blended lights does. Anything that samples depth as a texture will be wrong."},
+  {"EmuCore/GS/UserHacks_DisablePartialInvalidation", "Aggressive",
+   "Discards a whole texture-cache entry on any overlap instead of only the overlapping region. Fewer and cheaper cache operations, at the cost of re-uploading textures more often and of stale data surviving longer."},
+  {"EmuCore/GS/UserHacks_EstimateTextureRegion", "Texture cache",
+   "Guesses a smaller texture region when a game does not set one, which reduces upload size and cache pressure. It is meant for games that leave the region unset; a wrong guess appears as missing or shifted texture data."},
+  {"EmuCore/GS/UserHacks_SkipDraw_Start", "Draw skipping",
+   "Draw calls numbered from this value up to 'Skip draw to' are skipped outright in every frame, counted from the first draw of the frame. Used to drop a fixed post-processing pass that costs more than it is worth. 0 with 0 skips nothing."},
+  {"EmuCore/GS/UserHacks_SkipDraw_End", "Draw skipping",
+   "Upper bound of the skip range; see 'Skip draw from'. Every game numbers its draws differently and one scene numbers them differently from the next, so the useful range has to be found by experiment. Too wide a range removes real geometry instead of just the effect."},
 
   {"Wrapper/LSFGEnabled", "Frame generation",
    "Makes LSFG 2x available for this launch. Frame generation starts Off in-game and must be enabled from the overlay. Native 50/60 FPS sources use protected passthrough. Requires a user-supplied Lossless.dll at /switch/nethersx2/lsfg/."},

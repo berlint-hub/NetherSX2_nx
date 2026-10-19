@@ -456,6 +456,187 @@ static double perf_worst_mean_ns(uint64_t *v, unsigned n, unsigned count) {
   return (double)sum / (double)count;
 }
 
+/* Which side of the CPU/GPU boundary a slow window sits on.
+ *
+ * The per-thread CPU counters on the second perf line say how much each thread
+ * ran. They cannot say what a thread that is NOT running was waiting for, and a
+ * GT3 hardware log landed exactly in that hole: 30.4 fps mean with no thread
+ * above 55 % CPU -- half the frame rate at less CPU work, which is waiting, not
+ * computing. These counters name the waits.
+ *
+ *   fence / queue-idle   wall time blocked inside a Vulkan wait, i.e. a thread
+ *                        parked on the GPU. Summed over threads, so the two
+ *                        percentages can together exceed 100 % when the GS and
+ *                        EE threads wait at the same time.
+ *   pipelines            vkCreateGraphicsPipelines count and wall time. A scene
+ *                        that still compiles pipelines while it runs hitches
+ *                        here rather than on the GPU, and no GS accuracy
+ *                        setting will change that.
+ *   cmds                 command-recording counts. Blending that has to read
+ *                        the render target it is drawing shows up either as
+ *                        barriers (texture-barrier path) or as copyimg/blit
+ *                        (target duplicated because that path is unavailable);
+ *                        GS downloads show up as copy2buf, which is what
+ *                        EmuCore/GS/HWDownloadMode governs.
+ *
+ * Diagnostic build only, like the rest of the perf report. Polls
+ * (vkWaitForFences with timeout 0) are counted but never timed: the core's
+ * CPU-spin readback path calls them in a tight loop, and two clock reads per
+ * iteration would cost more than the poll being measured.
+ *
+ * Unlike the older submit/acquire shims these do not fall back to the bare
+ * vkX symbol. The portlib link path (NETHERSX2_NVK_ICD_ONLY) ships an archive
+ * whose only entry point is vk_icdGetInstanceProcAddr, so a bare reference is
+ * an undefined symbol at link time. A probe is installed only when the driver
+ * returned non-NULL, which makes the NULL guards unreachable; they stay because
+ * handing the core a shim for a function the driver does not have would be
+ * worse than a branch that cannot run.
+ */
+static PFN_vkWaitForFences real_wait_for_fences;
+static PFN_vkQueueWaitIdle real_queue_wait_idle;
+static PFN_vkCreateGraphicsPipelines real_create_graphics_pipelines;
+static PFN_vkCmdPipelineBarrier real_cmd_pipeline_barrier;
+static PFN_vkCmdCopyImageToBuffer real_cmd_copy_image_to_buffer;
+static PFN_vkCmdCopyImage real_cmd_copy_image;
+static PFN_vkCmdBlitImage real_cmd_blit_image;
+
+static unsigned long long gpu_fence_calls, gpu_fence_ns, gpu_fence_polls;
+static unsigned long long gpu_idle_calls, gpu_idle_ns;
+static unsigned long long gpu_pipe_calls, gpu_pipe_ns;
+static unsigned long long gpu_barrier_calls, gpu_copy2buf_calls;
+static unsigned long long gpu_copyimg_calls, gpu_blit_calls;
+
+static void gpu_note_time(unsigned long long *calls, unsigned long long *ns,
+                          uint64_t t0, uint64_t t1) {
+  __atomic_fetch_add(calls, 1, __ATOMIC_RELAXED);
+  if (t1 > t0) __atomic_fetch_add(ns, t1 - t0, __ATOMIC_RELAXED);
+}
+
+static void gpu_note_count(unsigned long long *calls) {
+  __atomic_fetch_add(calls, 1, __ATOMIC_RELAXED);
+}
+
+static VkResult VKAPI_CALL
+vkWaitForFences_shim(VkDevice device, uint32_t fence_count, const VkFence *fences,
+                     VkBool32 wait_all, uint64_t timeout) {
+  if (!real_wait_for_fences) return VK_ERROR_INITIALIZATION_FAILED;
+  if (timeout == 0) {
+    gpu_note_count(&gpu_fence_polls);
+    return real_wait_for_fences(device, fence_count, fences, wait_all, timeout);
+  }
+  const uint64_t t0 = lsfg_monotonic_ns();
+  const VkResult r = real_wait_for_fences(device, fence_count, fences, wait_all, timeout);
+  gpu_note_time(&gpu_fence_calls, &gpu_fence_ns, t0, lsfg_monotonic_ns());
+  return r;
+}
+
+static VkResult VKAPI_CALL
+vkQueueWaitIdle_shim(VkQueue queue) {
+  if (!real_queue_wait_idle) return VK_ERROR_INITIALIZATION_FAILED;
+  const uint64_t t0 = lsfg_monotonic_ns();
+  const VkResult r = real_queue_wait_idle(queue);
+  gpu_note_time(&gpu_idle_calls, &gpu_idle_ns, t0, lsfg_monotonic_ns());
+  return r;
+}
+
+static VkResult VKAPI_CALL
+vkCreateGraphicsPipelines_shim(VkDevice device, VkPipelineCache cache,
+                               uint32_t count, const VkGraphicsPipelineCreateInfo *infos,
+                               const VkAllocationCallbacks *alloc, VkPipeline *out) {
+  if (!real_create_graphics_pipelines) return VK_ERROR_INITIALIZATION_FAILED;
+  const uint64_t t0 = lsfg_monotonic_ns();
+  const VkResult r = real_create_graphics_pipelines(device, cache, count, infos, alloc, out);
+  /* One call can carry several pipelines; count both so a batch of one and a
+   * batch of eight are distinguishable in the report. */
+  gpu_note_time(&gpu_pipe_calls, &gpu_pipe_ns, t0, lsfg_monotonic_ns());
+  if (count > 1) __atomic_fetch_add(&gpu_pipe_calls, count - 1, __ATOMIC_RELAXED);
+  return r;
+}
+
+static void VKAPI_CALL
+vkCmdPipelineBarrier_shim(VkCommandBuffer cb, VkPipelineStageFlags src, VkPipelineStageFlags dst,
+                          VkDependencyFlags flags, uint32_t mem_count, const VkMemoryBarrier *mem,
+                          uint32_t buf_count, const VkBufferMemoryBarrier *buf,
+                          uint32_t img_count, const VkImageMemoryBarrier *img) {
+  if (!real_cmd_pipeline_barrier) return;
+  gpu_note_count(&gpu_barrier_calls);
+  real_cmd_pipeline_barrier(cb, src, dst, flags, mem_count, mem, buf_count, buf, img_count, img);
+}
+
+static void VKAPI_CALL
+vkCmdCopyImageToBuffer_shim(VkCommandBuffer cb, VkImage src, VkImageLayout src_layout,
+                            VkBuffer dst, uint32_t region_count,
+                            const VkBufferImageCopy *regions) {
+  if (!real_cmd_copy_image_to_buffer) return;
+  gpu_note_count(&gpu_copy2buf_calls);
+  real_cmd_copy_image_to_buffer(cb, src, src_layout, dst, region_count, regions);
+}
+
+static void VKAPI_CALL
+vkCmdCopyImage_shim(VkCommandBuffer cb, VkImage src, VkImageLayout src_layout,
+                    VkImage dst, VkImageLayout dst_layout, uint32_t region_count,
+                    const VkImageCopy *regions) {
+  if (!real_cmd_copy_image) return;
+  gpu_note_count(&gpu_copyimg_calls);
+  real_cmd_copy_image(cb, src, src_layout, dst, dst_layout, region_count, regions);
+}
+
+static void VKAPI_CALL
+vkCmdBlitImage_shim(VkCommandBuffer cb, VkImage src, VkImageLayout src_layout,
+                    VkImage dst, VkImageLayout dst_layout, uint32_t region_count,
+                    const VkImageBlit *regions, VkFilter filter) {
+  if (!real_cmd_blit_image) return;
+  gpu_note_count(&gpu_blit_calls);
+  real_cmd_blit_image(cb, src, src_layout, dst, dst_layout, region_count, regions, filter);
+}
+
+/* Signature locks. A shim that only forwards its arguments would still compile
+ * with a narrower parameter type -- the forward just widens it -- and the ABI
+ * mismatch would only show up as corruption on hardware, which is how the
+ * svcGetThreadCoreMask argument-order mistake looked. Assigning each shim to
+ * its own PFN type makes that an incompatible-pointer-types error here. */
+__attribute__((used)) static const PFN_vkWaitForFences gpu_sig_fence = vkWaitForFences_shim;
+__attribute__((used)) static const PFN_vkQueueWaitIdle gpu_sig_idle = vkQueueWaitIdle_shim;
+__attribute__((used)) static const PFN_vkCreateGraphicsPipelines gpu_sig_pipe = vkCreateGraphicsPipelines_shim;
+__attribute__((used)) static const PFN_vkCmdPipelineBarrier gpu_sig_barrier = vkCmdPipelineBarrier_shim;
+__attribute__((used)) static const PFN_vkCmdCopyImageToBuffer gpu_sig_copy2buf = vkCmdCopyImageToBuffer_shim;
+__attribute__((used)) static const PFN_vkCmdCopyImage gpu_sig_copyimg = vkCmdCopyImage_shim;
+__attribute__((used)) static const PFN_vkCmdBlitImage gpu_sig_blit = vkCmdBlitImage_shim;
+
+/* One table instead of seven near-identical if-blocks in each of the two proc
+ * address hooks. The `real` slot is the address of the typed pointer above, so
+ * the driver's function is stored through a PFN_vkVoidFunction* and read back
+ * through its own type in the shim; both are pointers of the same size and
+ * alignment, and the cast is what keeps the table short. */
+typedef struct {
+  const char *name;
+  PFN_vkVoidFunction *real;
+  PFN_vkVoidFunction shim;
+} GpuProbe;
+
+static const GpuProbe gpu_probes[] = {
+  { "vkWaitForFences",           (PFN_vkVoidFunction *)&real_wait_for_fences,           (PFN_vkVoidFunction)vkWaitForFences_shim },
+  { "vkQueueWaitIdle",           (PFN_vkVoidFunction *)&real_queue_wait_idle,           (PFN_vkVoidFunction)vkQueueWaitIdle_shim },
+  { "vkCreateGraphicsPipelines", (PFN_vkVoidFunction *)&real_create_graphics_pipelines, (PFN_vkVoidFunction)vkCreateGraphicsPipelines_shim },
+  { "vkCmdPipelineBarrier",      (PFN_vkVoidFunction *)&real_cmd_pipeline_barrier,      (PFN_vkVoidFunction)vkCmdPipelineBarrier_shim },
+  { "vkCmdCopyImageToBuffer",    (PFN_vkVoidFunction *)&real_cmd_copy_image_to_buffer,  (PFN_vkVoidFunction)vkCmdCopyImageToBuffer_shim },
+  { "vkCmdCopyImage",            (PFN_vkVoidFunction *)&real_cmd_copy_image,            (PFN_vkVoidFunction)vkCmdCopyImage_shim },
+  { "vkCmdBlitImage",            (PFN_vkVoidFunction *)&real_cmd_blit_image,            (PFN_vkVoidFunction)vkCmdBlitImage_shim },
+};
+
+/* Returns the shim to hand back for `name`, or NULL when this probe set has
+ * nothing to say about it (including when the driver returned no function). */
+static PFN_vkVoidFunction
+gpu_probe_lookup(const char *name, PFN_vkVoidFunction fn) {
+  if (!name || !fn) return NULL;
+  for (unsigned i = 0; i < sizeof(gpu_probes) / sizeof(gpu_probes[0]); ++i) {
+    if (strcmp(gpu_probes[i].name, name) != 0) continue;
+    *gpu_probes[i].real = fn;
+    return gpu_probes[i].shim;
+  }
+  return NULL;
+}
+
 static void perf_report(uint64_t now) {
   const uint64_t elapsed = (now > perf_window_start_ns) ? now - perf_window_start_ns : 0;
   const double seconds = (double)elapsed / 1e9;
@@ -509,6 +690,34 @@ static void perf_report(uint64_t now) {
                fm.to_core_prot - perf_fm_prev.to_core_prot,
                fm.live_pages, fm.peak_pages, fm.page_limit);
   perf_fm_prev = fm;
+
+  /* Third line of the same window: where the wall time that is not CPU time
+   * went. Field meanings are documented on the counter block above. */
+  {
+    const double win_ms = seconds * 1000.0;
+    const double fence_ms = (double)gpu_fence_ns / 1e6;
+    const double idle_ms = (double)gpu_idle_ns / 1e6;
+    const double pipe_ms = (double)gpu_pipe_ns / 1e6;
+    vk_diag_note("perf: gpu blocked fence %llu x %.1f ms (%.0f%%) + polls %llu,"
+                 " queue-idle %llu x %.1f ms (%.0f%%)"
+                 " | pipelines %llu x %.1f ms (%.0f%%)"
+                 " | cmds barrier %llu copy2buf %llu copyimg %llu blit %llu",
+                 gpu_fence_calls, fence_ms,
+                 win_ms > 0.0 ? 100.0 * fence_ms / win_ms : 0.0,
+                 gpu_fence_polls,
+                 gpu_idle_calls, idle_ms,
+                 win_ms > 0.0 ? 100.0 * idle_ms / win_ms : 0.0,
+                 gpu_pipe_calls, pipe_ms,
+                 win_ms > 0.0 ? 100.0 * pipe_ms / win_ms : 0.0,
+                 gpu_barrier_calls, gpu_copy2buf_calls,
+                 gpu_copyimg_calls, gpu_blit_calls);
+  }
+
+  gpu_fence_calls = gpu_fence_ns = gpu_fence_polls = 0;
+  gpu_idle_calls = gpu_idle_ns = 0;
+  gpu_pipe_calls = gpu_pipe_ns = 0;
+  gpu_barrier_calls = gpu_copy2buf_calls = 0;
+  gpu_copyimg_calls = gpu_blit_calls = 0;
 
   perf_window_presents = 0;
   perf_ring_count = 0;
@@ -1175,6 +1384,10 @@ vk_gdpa_hook(VkDevice dev, const char *name) {
   PFN_vkVoidFunction fn = vkGetDeviceProcAddr(dev, name);
   if (!name) return fn;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+  {
+    PFN_vkVoidFunction probe = gpu_probe_lookup(name, fn);
+    if (probe) return probe;
+  }
   if (!strcmp(name, "vkQueueSubmit")) {
     real_queue_submit = (PFN_vkQueueSubmit)fn;
     return (PFN_vkVoidFunction)vkQueueSubmit_shim;
@@ -1355,6 +1568,11 @@ vk_gipa_hook(VkInstance inst, const char *name) {
     if (!strcmp(name, "vkGetDeviceProcAddr"))
       return (PFN_vkVoidFunction)vk_gdpa_hook;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+    {
+      PFN_vkVoidFunction probe =
+          gpu_probe_lookup(name, vkGetInstanceProcAddr(inst, name));
+      if (probe) return probe;
+    }
     if (!strcmp(name, "vkQueueSubmit")) {
       real_queue_submit = (PFN_vkQueueSubmit)vkGetInstanceProcAddr(inst, name);
       return (PFN_vkVoidFunction)vkQueueSubmit_shim;
