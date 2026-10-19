@@ -87,4 +87,11 @@ int pthr_sched_yield(void);
 
 void pthr_ensure_fake_tls(void);
 
+// Formats "EE 97% GS 61% MTVU 95%": scheduled CPU time of the three heavy
+// roles as a share of wall time since the previous call, from
+// svcGetInfo(InfoType_ThreadTickCount). "-" = thread has not named itself yet,
+// "?" = its handle no longer answers (thread exited). Returns 0 if no role is
+// registered at all. Meant for the perf window line in the Vulkan diag log.
+int pthr_cpu_time_report(char *buf, size_t len);
+
 #endif

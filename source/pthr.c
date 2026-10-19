@@ -204,6 +204,8 @@ void pthr_pin_ee_core(void) {
 // "how many threads are there", so an approximate count would answer nothing.
 static int work_assigned;
 
+static int current_priority(void);
+
 static void assign_work_core(void) {
   mutexLock(&core_lock);
   core_init_once();
@@ -224,10 +226,20 @@ static void assign_work_core(void) {
   // in the log that is within 16 of the truth, instead of going silent at a hard
   // limit the way the driver-thread counter does. Not exact -- #100 would log as
   // #96 -- but "three or three hundred" is the question this line has to answer.
+  //
+  // The priority is whatever newlib's pthread_create left: the comments in this
+  // file used to say "libnx hands every new thread its creator's", but current
+  // libnx source (nx/source/runtime/newlib.c, __syscall_thread_create) calls
+  // threadCreate(..., 0x3B, -2), i.e. a fixed 59 on the creator's core, and
+  // the libnx the toolchain ships may or may not match. Printed here so the
+  // log settles it: a thread that never gets a name sitting on core 1/2 at 30
+  // would share the core with GS/MTVU at equal priority, and Horizon does not
+  // time-slice between equal priorities; at 59 it is below everything and only
+  // ever runs in their gaps.
   if (n <= 16 || (n % 16) == 0)
     corelog_log(CORELOG_INFO, "Wrapper",
-                "worker thread #%d -> work pool core %d, mask 0x%x (renamed later only if it has a role)",
-                n, core, m);
+                "worker thread #%d -> work pool core %d, mask 0x%x, inherited priority %d (renamed later only if it has a role)",
+                n, core, m, current_priority());
 }
 
 // background threads (audio, etc.): the dedicated bg core if we have one, else
@@ -244,15 +256,22 @@ void pthr_pin_bg_core(void) {
   svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, m);
 }
 
-// Horizon never preempts between equal priorities and libnx gives every thread
-// its creator's, so the core-3 tenants carry distinct ones. Failure is harmless:
-// the thread keeps the inherited priority.
-// Horizon never preempts between equal priorities and libnx hands every thread
-// its creator's, so co-tenants of one core need distinct ones. Lower number is
-// higher priority.
+// Horizon never preempts between equal priorities, so co-tenants of one core
+// need distinct ones. Lower number is higher priority. What a fresh pthread
+// starts with is NOT assumed here any more (see the read-back in
+// assign_work_core()): every role sets its own explicitly, and failure is
+// harmless -- the thread keeps whatever it arrived with.
 #define EMU_THREAD_PRIO    30  // EE / MTGS / MTVU: above everything else
+#define LIGHT_THREAD_PRIO  40  // CDVD / ISO Decompress / texture loader: GS and MTVU preempt them
 #define SPU2_THREAD_PRIO   44  // between audio (43) and input (45)
 #define DRIVER_THREAD_PRIO 47  // below audio and input on the shared bg core
+
+// Read-back for the log lines. -1 when the kernel refuses, which the log then
+// shows verbatim instead of inventing a number.
+static int current_priority(void) {
+  s32 prio = 0;
+  return R_SUCCEEDED(svcGetThreadPriority(&prio, CUR_THREAD_HANDLE)) ? (int)prio : -1;
+}
 
 void pthr_set_priority(int priority) {
   svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)priority);
@@ -343,6 +362,98 @@ int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
 // hundreds of thousands, and it avoids putting a lock on the hottest path in
 // the process.
 static __thread char tls_self_name[16];
+
+// ---------------------------------------------------------------------------
+// per-thread CPU time of the three heavy roles
+//
+// The perf line in the Vulkan diag log (vk.c) says how many frames reached the
+// screen, and the core-utilisation log says "core 2 at 95%", but neither says
+// WHICH thread is the bottleneck: a core-2 figure of 95% is the same whether
+// MTVU is computing or spinning on `yield`/`isb` waiting for the EE (PCSX2's
+// ShortSpin()/WorkSema spin in userspace and reach sched_yield only after the
+// spin budget runs out, so the sched_yield counter cannot tell the two apart).
+// svcGetInfo(InfoType_ThreadTickCount, handle, -1) returns the ticks a thread
+// has actually been scheduled across all cores, which does separate them: an
+// EE at 97% of wall time with MTVU at 60% is EE-bound, GS at 98% is GS-bound,
+// all three well below 100% means the frame is waiting on something else
+// (GPU, present, I/O). Reported as a percentage of wall time per perf window.
+//
+// Only the thread itself can register (threadGetCurHandle() is per-thread), so
+// this runs from pthr_pin_by_name(), before the "auto" test, so the numbers
+// exist regardless of pinning mode. A role that gets recreated (renderer
+// switch recreates GS) re-registers and its baseline resets.
+typedef struct {
+  const char *label;
+  Handle handle;          // INVALID_HANDLE until the thread names itself
+  u64 last_ticks;
+} CpuTimeSlot;
+
+static CpuTimeSlot cpu_time_slots[] = {
+  { "EE",   INVALID_HANDLE, 0 },
+  { "GS",   INVALID_HANDLE, 0 },
+  { "MTVU", INVALID_HANDLE, 0 },
+};
+static u64 cpu_time_last_wall;
+static Mutex cpu_time_lock;
+
+// InfoType 25 exists only on 13.0.0+; older firmware answers the same question
+// under 0xF0000002 (InfoType_ThreadTickCountDeprecated). The sub-id UINT64_MAX
+// (TickCountInfo_Total) sums all cores, which is what a migratable thread needs.
+static Result cpu_time_ticks(Handle h, u64 *ticks) {
+  const u32 id = hosversionAtLeast(13, 0, 0) ? InfoType_ThreadTickCount
+                                             : InfoType_ThreadTickCountDeprecated;
+  return svcGetInfo(ticks, id, h, TickCountInfo_Total);
+}
+
+static void cpu_time_register(const char *name) {
+  int slot;
+  if (!strcmp(name, "CPU Thread")) slot = 0;
+  else if (!strcmp(name, "GS"))    slot = 1;
+  else if (!strcmp(name, "MTVU"))  slot = 2;
+  else return;
+  u64 ticks = 0;
+  const Handle h = threadGetCurHandle();
+  if (R_FAILED(cpu_time_ticks(h, &ticks)))
+    ticks = 0;
+  mutexLock(&cpu_time_lock);
+  cpu_time_slots[slot].handle = h;
+  cpu_time_slots[slot].last_ticks = ticks;
+  mutexUnlock(&cpu_time_lock);
+}
+
+int pthr_cpu_time_report(char *buf, size_t len) {
+  const u64 now = armGetSystemTick();
+  mutexLock(&cpu_time_lock);
+  const u64 wall = (cpu_time_last_wall && now > cpu_time_last_wall)
+                       ? now - cpu_time_last_wall : 0;
+  cpu_time_last_wall = now;
+  int n = 0, any = 0;
+  for (unsigned i = 0; i < sizeof cpu_time_slots / sizeof cpu_time_slots[0]; ++i) {
+    CpuTimeSlot *s = &cpu_time_slots[i];
+    const char *sep = i ? " " : "";
+    if (s->handle == INVALID_HANDLE) {
+      n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, "%s%s -", sep, s->label);
+      continue;
+    }
+    u64 ticks = 0;
+    if (R_FAILED(cpu_time_ticks(s->handle, &ticks))) {
+      // The thread exited and its handle is gone (or was reused): say so
+      // instead of carrying a stale number forward.
+      n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, "%s%s ?", sep, s->label);
+      continue;
+    }
+    const u64 delta = ticks > s->last_ticks ? ticks - s->last_ticks : 0;
+    s->last_ticks = ticks;
+    any = 1;
+    if (wall)
+      n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, "%s%s %u%%",
+                    sep, s->label, (unsigned)((delta * 100 + wall / 2) / wall));
+    else
+      n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, "%s%s ..", sep, s->label);
+  }
+  mutexUnlock(&cpu_time_lock);
+  return any;
+}
 static __thread unsigned long long tls_yield_count;
 static unsigned long long g_yield_total;
 
@@ -409,6 +520,7 @@ void pthr_pin_by_name(const char *name) {
   // including the ones with no role to pin (CDVD, ISO Decompress, the ImGui
   // texture loader) and including runs with pinning switched off.
   snprintf(tls_self_name, sizeof tls_self_name, "%s", name);
+  cpu_time_register(name);
   // "auto" leaves the trampoline's round-robin assignment exactly as it is.
   if (!strcmp(prefs_get_string("Wrapper/ThreadPinning", "role"), "auto"))
     return;
@@ -456,13 +568,31 @@ void pthr_pin_by_name(const char *name) {
     // that answers the question either way.
     s32 pref = -1;
     u64 aff = 0;
+    // Priority: these threads are created by the EE thread after it has taken
+    // EMU_THREAD_PRIO. If newlib's pthread_create inherits the creator's
+    // priority (what the older comments here assumed) they arrive at 30 -- the
+    // same as GS and MTVU, which share cores 1/2 with them -- and because
+    // Horizon never preempts between equal priorities, a CHD hunk
+    // decompression that starts while MTVU is blocked on its semaphore keeps
+    // the core until it is done, with MTVU waiting behind it. If instead
+    // libnx's __syscall_thread_create uses its fixed 0x3B (59), they are
+    // already below everything and nothing needs doing. The clamp below covers
+    // the first case and is a no-op in the second; the "before -> after" in
+    // the log says which one this build is in. Only ever lowered, never
+    // raised: a thread that arrived below 40 for a reason is left alone.
+    const int inherited = current_priority();
+    int prio_now = inherited;
+    if (inherited >= 0 && inherited < LIGHT_THREAD_PRIO &&
+        R_SUCCEEDED(svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)LIGHT_THREAD_PRIO)))
+      prio_now = LIGHT_THREAD_PRIO;
     if (R_SUCCEEDED(svcGetThreadCoreMask(&pref, &aff, CUR_THREAD_HANDLE)))
       corelog_log(CORELOG_INFO, "Wrapper",
-                  "thread \"%s\" -> no dedicated role, preferred core %d, affinity 0x%llx, pool mask 0x%x",
-                  name, (int)pref, (unsigned long long)aff, wm);
+                  "thread \"%s\" -> no dedicated role, preferred core %d, affinity 0x%llx, pool mask 0x%x, priority %d -> %d",
+                  name, (int)pref, (unsigned long long)aff, wm, inherited, prio_now);
     else
       corelog_log(CORELOG_INFO, "Wrapper",
-                  "thread \"%s\" -> no dedicated role, pool mask 0x%x", name, wm);
+                  "thread \"%s\" -> no dedicated role, pool mask 0x%x, priority %d -> %d",
+                  name, wm, inherited, prio_now);
     return;
   }
 

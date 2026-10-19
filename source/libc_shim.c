@@ -1071,6 +1071,40 @@ static uintptr_t g_fastmem_base;
 static uint32_t *g_fastmem_pages;
 static uint32_t *g_fastmem_reverse_next;
 static unsigned g_fastmem_live_pages;
+
+// Fault accounting for the diag perf line (vk.c). Every first touch of a lazy
+// fastmem page is a full exception round trip (__libnx_exception_handler ->
+// trampoline -> fastmem_dispatch_fault), and once g_fastmem_live_pages reaches
+// FASTMEM_MAPPED_PAGE_LIMIT a new page is NOT mapped: the fault goes to the
+// core's handler, which backpatches that access onto the slow path for good.
+// None of that was visible anywhere, so "fastmem is on" could not be told from
+// "fastmem is on but half the hot pages fell off the fast path". Written under
+// g_fastmem_lock where the state is, atomically elsewhere; read racily by the
+// reporter, which only needs a per-window delta.
+static unsigned long long g_fastmem_stat_lazy_faults;   // faults resolved by mapping
+static unsigned long long g_fastmem_stat_lazy_pages;    // pages mapped by those faults
+static unsigned long long g_fastmem_stat_limit_hits;    // lazy fault refused: page limit
+static unsigned long long g_fastmem_stat_map_failures;  // svcMapProcessMemory failed
+static unsigned long long g_fastmem_stat_to_core;       // forwarded to the core's handler
+static unsigned long long g_fastmem_stat_to_core_prot;  // ...of which on a PROTECTED page
+static unsigned g_fastmem_live_pages_peak;
+
+static void fastmem_live_pages_note_peak(void) {
+  if (g_fastmem_live_pages > g_fastmem_live_pages_peak)
+    g_fastmem_live_pages_peak = g_fastmem_live_pages;
+}
+
+void fastmem_stats_snapshot(FastmemStats *out) {
+  out->lazy_faults  = __atomic_load_n(&g_fastmem_stat_lazy_faults, __ATOMIC_RELAXED);
+  out->lazy_pages   = __atomic_load_n(&g_fastmem_stat_lazy_pages, __ATOMIC_RELAXED);
+  out->limit_hits   = __atomic_load_n(&g_fastmem_stat_limit_hits, __ATOMIC_RELAXED);
+  out->map_failures = __atomic_load_n(&g_fastmem_stat_map_failures, __ATOMIC_RELAXED);
+  out->to_core      = __atomic_load_n(&g_fastmem_stat_to_core, __ATOMIC_RELAXED);
+  out->to_core_prot = __atomic_load_n(&g_fastmem_stat_to_core_prot, __ATOMIC_RELAXED);
+  out->live_pages   = __atomic_load_n(&g_fastmem_live_pages, __ATOMIC_RELAXED);
+  out->peak_pages   = __atomic_load_n(&g_fastmem_live_pages_peak, __ATOMIC_RELAXED);
+  out->page_limit   = FASTMEM_MAPPED_PAGE_LIMIT;
+}
 static char g_smc_reason[128] = "not configured";
 
 void fastmem_set_mode(FastmemMode mode) {
@@ -1745,6 +1779,7 @@ static Result fastmem_map_run_locked(size_t first, size_t count,
     return rc;
 
   g_fastmem_live_pages += (unsigned)count;
+  fastmem_live_pages_note_peak();
 
   for (size_t i = 0; i < count; i++) {
     const uint32_t entry = __atomic_load_n(&g_fastmem_pages[first + i],
@@ -1842,6 +1877,7 @@ static int fastmem_try_resolve_fault(uintptr_t fault_addr) {
   }
 
   if (g_fastmem_live_pages >= FASTMEM_MAPPED_PAGE_LIMIT) {
+    g_fastmem_stat_limit_hits++;
     mutexUnlock(&g_fastmem_lock);
     return 0;
   }
@@ -1863,8 +1899,16 @@ static int fastmem_try_resolve_fault(uintptr_t fault_addr) {
   }
 
   Result rc = fastmem_map_run_locked(first, count, region, source_offset);
-  if (R_FAILED(rc) && count > 1)
+  if (R_FAILED(rc) && count > 1) {
+    count = 1;
     rc = fastmem_map_run_locked(first, 1, region, source_offset);
+  }
+  if (R_SUCCEEDED(rc)) {
+    g_fastmem_stat_lazy_faults++;
+    g_fastmem_stat_lazy_pages += count;
+  } else {
+    g_fastmem_stat_map_failures++;
+  }
   mutexUnlock(&g_fastmem_lock);
   return R_SUCCEEDED(rc);
 }
@@ -1924,6 +1968,24 @@ int fastmem_dispatch_fault(uintptr_t pc, uintptr_t fault_addr) {
   BionicSigaction action;
   if (!fastmem_select_signal_action(&sig, &action))
     return 0;
+
+  // Everything from here on is the core's own handler: either a page it
+  // mprotect()ed itself (PROTECTED -- its write tracking, expected and
+  // bounded) or a page the lazy path refused (limit hit, map failure, no
+  // mapping at all), which the core answers by backpatching the faulting
+  // access onto the slow path permanently. The PROTECTED split is what tells
+  // the two apart in the log.
+  __atomic_fetch_add(&g_fastmem_stat_to_core, 1, __ATOMIC_RELAXED);
+  {
+    uint32_t *pages = __atomic_load_n(&g_fastmem_pages, __ATOMIC_ACQUIRE);
+    const uintptr_t base = __atomic_load_n(&g_fastmem_base, __ATOMIC_ACQUIRE);
+    if (pages && base && fault_addr >= base && fault_addr - base < FASTMEM_AREA_SIZE) {
+      const uint32_t entry = __atomic_load_n(&pages[(fault_addr - base) / MMAP_PAGE],
+                                             __ATOMIC_ACQUIRE);
+      if (entry != FASTMEM_ENTRY_EMPTY && (entry & FASTMEM_ENTRY_PROTECTED))
+        __atomic_fetch_add(&g_fastmem_stat_to_core_prot, 1, __ATOMIC_RELAXED);
+    }
+  }
 
   uint8_t siginfo[128] __attribute__((aligned(16))) = {0};
   FaultUcontext context __attribute__((aligned(16))) = {0};

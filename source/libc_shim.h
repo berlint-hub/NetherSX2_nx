@@ -136,6 +136,22 @@ int sigaction_fake(int sig, const void *act, void *old_act);
 int fastmem_fault_can_dispatch(uintptr_t pc, uintptr_t fault_addr);
 int fastmem_dispatch_fault(uintptr_t pc, uintptr_t fault_addr);
 
+// Cumulative fastmem fault counters since boot; the perf reporter in vk.c
+// differences consecutive snapshots into per-window rates. See the comment at
+// the counters in libc_shim.c for what each one means.
+typedef struct {
+  unsigned long long lazy_faults;   // resolved by mapping the page(s)
+  unsigned long long lazy_pages;    // pages mapped by those faults (batched)
+  unsigned long long limit_hits;    // refused: FASTMEM_MAPPED_PAGE_LIMIT reached
+  unsigned long long map_failures;  // refused: svcMapProcessMemory failed
+  unsigned long long to_core;       // forwarded to the core's SIGSEGV handler
+  unsigned long long to_core_prot;  // ...of which hit a PROTECTED (mprotect) page
+  unsigned live_pages;              // currently mapped fastmem pages
+  unsigned peak_pages;              // high-water mark of live_pages
+  unsigned page_limit;              // FASTMEM_MAPPED_PAGE_LIMIT
+} FastmemStats;
+void fastmem_stats_snapshot(FastmemStats *out);
+
 int jit_redirect_lookup(uintptr_t address, uintptr_t *redirected);
 
 // JIT-capable anonymous mmap (PS2 recompiler RX memory via process code memory)

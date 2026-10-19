@@ -615,6 +615,30 @@ jobs:
             echo "::error::log pro role-less vlakna chybi (diag ${rld}x / prod ${rlp}x) -- z logu by opet neslo poznat, jestli neco sdili jadro s MTVU"
             exit 1
           fi
+          # Priorita role-less vlaken: dedi 30 po EE (stejne jako GS/MTVU na
+          # jadrech 1/2), pthr_pin_by_name() ji snizuje na LIGHT_THREAD_PRIO a
+          # loguje "pred -> po". Bez te hodnoty v .rodata by se z logu nedalo
+          # overit, ze se snizeni opravdu provedlo (a ne ze kernel odmitl).
+          # Neni to za #ifdef -> v obou.
+          rpd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "priority %d -> %d" || true); rpd=${rpd:-0}
+          rpp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "priority %d -> %d" || true); rpp=${rpp:-0}
+          ipd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "inherited priority %d" || true); ipd=${ipd:-0}
+          ipp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "inherited priority %d" || true); ipp=${ipp:-0}
+          echo "::notice::priorita v logu: role-less ${rpd}x/${rpp}x, anonymni (work pool) ${ipd}x/${ipp}x (diag/prod), vse ma byt aspon 1"
+          if [ "$rpd" = "0" ] || [ "$rpp" = "0" ] || [ "$ipd" = "0" ] || [ "$ipp" = "0" ]; then
+            echo "::error::readback priority vlaken chybi (role-less diag ${rpd}x / prod ${rpp}x, anonymni diag ${ipd}x / prod ${ipp}x)"
+            exit 1
+          fi
+          # Druhy radek perf okna (jen diag): CPU cas EE/GS/MTVU z
+          # svcGetInfo(ThreadTickCount) a fastmem fault citace. Bez nich radek
+          # "presents / ... fps" rika JAK pomalu, ne PROC.
+          pcd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "perf: cpu %s | fastmem lazy" || true); pcd=${pcd:-0}
+          pcp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "perf: cpu %s | fastmem lazy" || true); pcp=${pcp:-0}
+          echo "::notice::perf cpu/fastmem radek: ${pcd}x (diag, ma byt aspon 1) / ${pcp}x (produkce, ma byt 0)"
+          if [ "$pcd" = "0" ] || [ "$pcp" != "0" ]; then
+            echo "::error::perf cpu/fastmem radek: diag ${pcd}x / prod ${pcp}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
+            exit 1
+          fi
           wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
           # [0-9a-f]{7} pred -run: dokazuje ze tam je i commit, ne jen cislo behu.
           # Holý grep na "-run<cislo>" by prosel i s prazdnou sha.

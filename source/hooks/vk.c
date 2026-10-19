@@ -37,6 +37,8 @@
 #include "../config.h"
 #include "../prefs.h"
 #include "../lsfg/lsfg_bridge.h"
+#include "../pthr.h"
+#include "../libc_shim.h"
 
 // The Mesa NVK portlib package (nxvk.pc, built from berlint-hub/nxvk) ships only
 // libnvk.a + libnvk_support.a, and libnvk.a defines exactly one entry point:
@@ -435,6 +437,7 @@ static uint64_t perf_window_start_ns;
 static uint64_t perf_prev_ns;
 static unsigned perf_stalls;
 static unsigned long long perf_generated;
+static FastmemStats perf_fm_prev;
 
 /* Insertion-sort a copy and average the worst `count` entries -- the 1% low
  * expressed as a frame time. Pure and bounded (n <= PERF_RING) so the
@@ -479,6 +482,33 @@ static void perf_report(uint64_t now) {
                !lsfg_requested() ? "off"
                    : (lsfg_mode_is_fractional() ? "fractional" : "auto"),
                lsfg_frozen_source_fps, lsfg_target_fps_pref(), perf_generated);
+
+  // Second line of the same window: who was busy. Both halves exist because
+  // the first line alone cannot say WHY a window was slow. The CPU share
+  // (pthr.c) separates EE-bound / GS-bound / MTVU-bound / none-of-them, and
+  // the fastmem counters (libc_shim.c) show whether page faults were part of
+  // it: "lazy" faults are first touches resolved by mapping (expected to decay
+  // to ~0 once a game's working set is mapped), "to core" faults went to the
+  // core's handler, and of those the non-PROTECTED ones are accesses that fell
+  // onto the slow path for good -- the number that must stay at 0 while
+  // "live/peak" sits below the limit, and that explains a slowdown if it does
+  // not.
+  char cpu[96];
+  if (!pthr_cpu_time_report(cpu, sizeof cpu))
+    snprintf(cpu, sizeof cpu, "no role registered");
+  FastmemStats fm;
+  fastmem_stats_snapshot(&fm);
+  vk_diag_note("perf: cpu %s | fastmem lazy %llu faults/%llu pages, limit %llu, map-fail %llu,"
+               " to core %llu (protected %llu), live %u peak %u of %u",
+               cpu,
+               fm.lazy_faults - perf_fm_prev.lazy_faults,
+               fm.lazy_pages - perf_fm_prev.lazy_pages,
+               fm.limit_hits - perf_fm_prev.limit_hits,
+               fm.map_failures - perf_fm_prev.map_failures,
+               fm.to_core - perf_fm_prev.to_core,
+               fm.to_core_prot - perf_fm_prev.to_core_prot,
+               fm.live_pages, fm.peak_pages, fm.page_limit);
+  perf_fm_prev = fm;
 
   perf_window_presents = 0;
   perf_ring_count = 0;
