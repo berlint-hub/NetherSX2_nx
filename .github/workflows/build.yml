@@ -797,6 +797,7 @@ jobs:
                     EmuCore/GS/UserHacks_CPU_FB_Conversion EmuCore/GS/UserHacks_Disable_Safe_Features \
                     EmuCore/GS/UserHacks_DisableDepthSupport EmuCore/GS/UserHacks_DisablePartialInvalidation \
                     EmuCore/GS/UserHacks_EstimateTextureRegion EmuCore/GS/UserHacks_SkipDraw_Start \
+                    EmuCore/GS/UserHacks_TextureInsideRt EmuCore/GS/UserHacks_GPUTargetCLUTMode \
                     EmuCore/GS/UserHacks_SkipDraw_End; do
             hkc=$(grep -c "$hk" /tmp/nx_lprod.txt || true); hkc=${hkc:-0}
             hkk=$(grep -c "$hk" /tmp/nx_ldiag.txt || true); hkk=${hkk:-0}
