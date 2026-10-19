@@ -1042,6 +1042,13 @@ int AndroidBitmap_unlockPixels_fake(void *env, void *bitmap) {
 #define FASTMEM_AREA_SIZE       0x100000000ULL
 #define FASTMEM_PAGE_COUNT      (FASTMEM_AREA_SIZE / MMAP_PAGE)
 #define FASTMEM_BACKING_MIN     0x08000000ULL
+/* MEASURED on GT3 (build 8bc47ee, diag, ~7 min session): peak 8550 of 16384
+ * pages, limit hits 0, map failures 0, and lazy faults fall to 0/page after the
+ * first two windows. 8550 pages is ~33.4 MB, i.e. the 32 MB of PS2 RAM mapped
+ * ONCE -- the kseg0/kseg1 mirrors do not consume separate slots, so the worry
+ * that three aliases of RAM would overflow a 64 MB ceiling does not happen.
+ * Raising this to 32768 would therefore buy nothing; do not "optimise" it
+ * without a perf line showing limit > 0 first. */
 #define FASTMEM_MAPPED_PAGE_LIMIT 16384u
 #define FASTMEM_ENTRY_EMPTY     UINT32_MAX
 #define FASTMEM_ENTRY_PROTECTED 0x80000000u
