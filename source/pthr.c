@@ -199,12 +199,35 @@ void pthr_pin_ee_core(void) {
 // heavy emucore threads (MTGS, VU1, ring/texture workers): distinct preferred
 // core round-robined over the work pool; work_mask lets a light worker migrate
 // off a heavy peer's core but never onto the EE core.
+// Counted under core_lock so the number in the log is exact; the driver-thread
+// counter above is deliberately raced, but here the whole point of the line is
+// "how many threads are there", so an approximate count would answer nothing.
+static int work_assigned;
+
 static void assign_work_core(void) {
   mutexLock(&core_lock);
   core_init_once();
   const int core = work_list[work_rr++ % (unsigned)work_count]; const unsigned m = work_mask;
+  const int n = ++work_assigned;
   mutexUnlock(&core_lock);
   svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, m);
+  // This runs for EVERY thread the core creates, before it has a name -- so it
+  // is the only place that can show the ones that never call prctl(PR_SET_NAME)
+  // and therefore never reach pthr_pin_by_name(). Those keep this assignment for
+  // good, and on a four-core grant the pool is cores 1 and 2, i.e. it includes
+  // the core MTVU is hard-pinned to. A hardware log that names three threads and
+  // says nothing about creation cannot tell "there are only three" from "there
+  // are seven and four of them are anonymous".
+  //
+  // Bounded but not capped: the first 16 individually, then every 16th. A game
+  // that spawns hundreds of short-lived threads therefore still leaves a count
+  // in the log that is within 16 of the truth, instead of going silent at a hard
+  // limit the way the driver-thread counter does. Not exact -- #100 would log as
+  // #96 -- but "three or three hundred" is the question this line has to answer.
+  if (n <= 16 || (n % 16) == 0)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "worker thread #%d -> work pool core %d, mask 0x%x (renamed later only if it has a role)",
+                n, core, m);
 }
 
 // background threads (audio, etc.): the dedicated bg core if we have one, else

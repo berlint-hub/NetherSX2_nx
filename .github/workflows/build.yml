@@ -594,6 +594,17 @@ jobs:
           # Build ID musi v binarce SKUTECNE byt -- jinak log ze zarizeni opet
           # nelze pripsat commitu. Grep na "-run<cislo>" je silny test: dokazuje,
           # ze hodnota prosla pres make az do .rodata, ne jen ze format existuje.
+          # Vlakna jadra prochazeji pres pthread_create_soloader -> thread_trampoline
+          # -> assign_work_core() PRED tim, nez maji jmeno. Bez tohohle logu nejde
+          # poznat, jestli nejake zustane anonymni na jadru 1/2 (tj. i na tom, kde
+          # je natvrdo MTVU). Neni to za #ifdef -> musi byt v obou.
+          wap=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "work pool core " || true); wap=${wap:-0}
+          wad=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "work pool core " || true); wad=${wad:-0}
+          echo "::notice::work-pool log pri vytvoreni vlakna: ${wap}x (produkce) / ${wad}x (diag), oboji ma byt aspon 1"
+          if [ "$wap" = "0" ] || [ "$wad" = "0" ]; then
+            echo "::error::log assign_work_core() chybi (prod ${wap}x / diag ${wad}x) -- anonymni vlakna jadra by opet nebyla videt"
+            exit 1
+          fi
           # Role-less vlakna (CDVD, ISO Decompress, texture loader) se v logu
           # drive vubec neobjevila, takze nebylo videt, ze jejich pool mask 0x6
           # zahrnuje i core 2, kde je MTVU natvrdo. Neni to za #ifdef -> v obou.
