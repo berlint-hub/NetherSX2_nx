@@ -735,6 +735,16 @@ jobs:
           # "directories", protoze ensureDirectory() je jeden ne-rekurzivni mkdir
           # a jeho selhani vraci startupFailure() -- na konzoli bez /roms by tedy
           # launcher vubec nenabootoval. Proto se vytvari best-effort zvlast.
+          # FXAA je v jadre (shaders/common/fxaa.fx, "#define FXAA_GLSL_VK 1") a asset
+          # se bundli, ale launcher ho nikdy nevystavoval -- takze slo jen o jednu radku
+          # v menu. Kontrola klice, ne popisku: ten se muze prelozit.
+          fxp=$("$xstrings" NetherSX2.nro | grep -c "EmuCore/GS/FXAA" || true); fxp=${fxp:-0}
+          fxd=$("$xstrings" NetherSX2-diag.nro | grep -c "EmuCore/GS/FXAA" || true); fxd=${fxd:-0}
+          echo "::notice::FXAA v grafickem menu: ${fxp}x (produkce) / ${fxd}x (diag), oboji ma byt aspon 1"
+          if [ "$fxp" = "0" ] || [ "$fxd" = "0" ]; then
+            echo "::error::FXAA se nedostalo do menu launcheru (prod ${fxp}x / diag ${fxd}x) -- jadro ho umi a asset fxaa.fx je v bundle, jen nebylo jak ho zapnout"
+            exit 1
+          fi
           gdp=$("$xstrings" NetherSX2.nro | grep -c "sdmc:/roms/ps2" || true); gdp=${gdp:-0}
           gdd=$("$xstrings" NetherSX2-diag.nro | grep -c "sdmc:/roms/ps2" || true); gdd=${gdd:-0}
           echo "::notice::vychozi adresar her sdmc:/roms/ps2: ${gdp}x (produkce) / ${gdd}x (diag)"
