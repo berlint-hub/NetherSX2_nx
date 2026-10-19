@@ -594,6 +594,16 @@ jobs:
           # Build ID musi v binarce SKUTECNE byt -- jinak log ze zarizeni opet
           # nelze pripsat commitu. Grep na "-run<cislo>" je silny test: dokazuje,
           # ze hodnota prosla pres make az do .rodata, ne jen ze format existuje.
+          # Role-less vlakna (CDVD, ISO Decompress, texture loader) se v logu
+          # drive vubec neobjevila, takze nebylo videt, ze jejich pool mask 0x6
+          # zahrnuje i core 2, kde je MTVU natvrdo. Neni to za #ifdef -> v obou.
+          rld=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "no dedicated role" || true); rld=${rld:-0}
+          rlp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "no dedicated role" || true); rlp=${rlp:-0}
+          echo "::notice::role-less vlakna v logu: ${rld}x (diag) / ${rlp}x (produkce), oboji ma byt aspon 1"
+          if [ "$rld" = "0" ] || [ "$rlp" = "0" ]; then
+            echo "::error::log pro role-less vlakna chybi (diag ${rld}x / prod ${rlp}x) -- z logu by opet neslo poznat, jestli neco sdili jadro s MTVU"
+            exit 1
+          fi
           wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
           # [0-9a-f]{7} pred -run: dokazuje ze tam je i commit, ne jen cislo behu.
           # Holý grep na "-run<cislo>" by prosel i s prazdnou sha.

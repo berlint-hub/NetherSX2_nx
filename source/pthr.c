@@ -414,6 +414,22 @@ void pthr_pin_by_name(const char *name) {
   } else {
     // CDVD / ISO Decompress / ImGuiFullscreen Texture Loader / anything else:
     // I/O and light, the round-robin already placed them well enough.
+    //
+    // Named in the log even though nothing is changed, because the pool they
+    // stay in is work_mask -- on a four-core grant that is cores 1 and 2, and
+    // core 2 is the one MTVU is hard-pinned to with no escape. Whether the ISO
+    // decompressor actually ends up sitting next to a 95%-busy MTVU cannot be
+    // told from a log that never mentions it, so read back the affinity the
+    // trampoline left the thread with instead of guessing.
+    u64 have = 0;
+    s32 on = -1;
+    if (R_SUCCEEDED(svcGetThreadCoreMask(CUR_THREAD_HANDLE, &have, &on)))
+      corelog_log(CORELOG_INFO, "Wrapper",
+                  "thread \"%s\" -> no dedicated role, running on core %d, pool mask 0x%x",
+                  name, (int)on, wm);
+    else
+      corelog_log(CORELOG_INFO, "Wrapper",
+                  "thread \"%s\" -> no dedicated role, pool mask 0x%x", name, wm);
     return;
   }
 
