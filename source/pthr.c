@@ -238,7 +238,7 @@ static void assign_work_core(void) {
   // ever runs in their gaps.
   if (n <= 16 || (n % 16) == 0)
     corelog_log(CORELOG_INFO, "Wrapper",
-                "worker thread #%d -> work pool core %d, mask 0x%x, inherited priority %d (renamed later only if it has a role)",
+                "worker thread #%d -> work pool core %d, mask 0x%x, inherited priority %d (PROVISIONAL -- if a named role line follows, that one already replaced core, mask and priority)",
                 n, core, m, current_priority());
 }
 
