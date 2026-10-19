@@ -705,6 +705,20 @@ jobs:
           cp NetherSX2_nx_vk.nro launcher/romfs/emu/NetherSX2_nx_vk.nro
           echo "::notice::diag bundle: $(ls -la NetherSX2-diag.nro)"
 
+          # Vychozi adresar s ISO je na zaklade pozadavku sdmc:/roms/ps2. Musi byt
+          # v launcheru v obou bundlech. Co pres strings overit NEJDE a co je na
+          # tom nejrizikovejsi: DEF_GAMEDIR zaroven nesmi zpatky do pole
+          # "directories", protoze ensureDirectory() je jeden ne-rekurzivni mkdir
+          # a jeho selhani vraci startupFailure() -- na konzoli bez /roms by tedy
+          # launcher vubec nenabootoval. Proto se vytvari best-effort zvlast.
+          gdp=$("$xstrings" NetherSX2.nro | grep -c "sdmc:/roms/ps2" || true); gdp=${gdp:-0}
+          gdd=$("$xstrings" NetherSX2-diag.nro | grep -c "sdmc:/roms/ps2" || true); gdd=${gdd:-0}
+          echo "::notice::vychozi adresar her sdmc:/roms/ps2: ${gdp}x (produkce) / ${gdd}x (diag)"
+          if [ "$gdp" = "0" ] || [ "$gdd" = "0" ]; then
+            echo "::error::vychozi adresar her sdmc:/roms/ps2 v launcheru chybi (prod ${gdp}x / diag ${gdd}x) -- hrac by musel pri kazde instalaci znovu hledat svoje ISO"
+            exit 1
+          fi
+
       - name: Artefakty
         uses: actions/upload-artifact@v4
         with:

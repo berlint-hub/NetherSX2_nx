@@ -56,7 +56,7 @@ static const char *GAMECFG_DIR= "sdmc:/switch/nethersx2/gamecfg";
 static const char *GAMECRC_DIR= "sdmc:/switch/nethersx2/gamecrc";
 static const char *CHEATS_DIR = "sdmc:/switch/nethersx2/cheats";
 static const char *TEXTURES_DIR = "sdmc:/switch/nethersx2/textures";
-static const char *DEF_GAMEDIR= "sdmc:/switch/nethersx2/games";
+static const char *DEF_GAMEDIR= "sdmc:/roms/ps2";
 static const char *BIOS_DIR   = "sdmc:/switch/nethersx2/bios";
 static const char *RESOURCES_DIR = "sdmc:/switch/nethersx2/resources";
 static const char *LSFG_DIR = "sdmc:/switch/nethersx2/lsfg";
@@ -7479,8 +7479,20 @@ int main(int argc, char **argv){
 
   g_griddbReady=griddb_global_init();
   if(!g_griddbReady&&R_SUCCEEDED(socketInitializeDefault())) g_storageSocketReady=true;
-  const char *directories[]={"sdmc:/switch",DATA_DIR,EMU_HOST_DIR,COVERS_DIR,CORES_DIR,GAMECFG_DIR,GAMECRC_DIR,CHEATS_DIR,TEXTURES_DIR,DEF_GAMEDIR,BIOS_DIR,RESOURCES_DIR,LSFG_DIR};
+  // DEF_GAMEDIR is deliberately NOT in this list. It is the only path here that
+  // is user content outside /switch/nethersx2, and ensureDirectory() is a single
+  // non-recursive mkdir whose failure returns startupFailure() -- so pointing the
+  // default at sdmc:/roms/ps2 would stop the launcher booting at all on a Switch
+  // that has no /roms, for a directory that is only a default the user can change.
+  const char *directories[]={"sdmc:/switch",DATA_DIR,EMU_HOST_DIR,COVERS_DIR,CORES_DIR,GAMECFG_DIR,GAMECRC_DIR,CHEATS_DIR,TEXTURES_DIR,BIOS_DIR,RESOURCES_DIR,LSFG_DIR};
   for(const char *directory:directories) if(!ensureDirectory(directory)) return startupFailure("Could not create the NetherSX2 data directories.");
+  // Best effort instead, parent first because mkdir here does not create it.
+  {
+    const std::string gamedir=DEF_GAMEDIR;
+    const size_t slash=gamedir.find_last_of('/');
+    if(slash!=std::string::npos&&slash>0) (void)ensureDirectory(gamedir.substr(0,slash).c_str());
+    (void)ensureDirectory(gamedir.c_str());
+  }
   migrateLegacyEmuHosts();
   if(!updateRecoveryOk)
     modalMessage(uiText("Update recovery failed").c_str(),{updateRecoveryError,uiText("The installed launcher was left unchanged.")});

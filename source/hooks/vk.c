@@ -166,6 +166,9 @@ static int lsfg_runtime_available;
 static uint64_t lsfg_last_source_present_ns;
 static double lsfg_source_interval_ns;
 static unsigned lsfg_source_samples;
+/* Consecutive source presents at or above the target. See the fractional
+ * warm-up below for why this has to be a run and not a single sample. */
+static unsigned lsfg_at_cap_run;
 static unsigned lsfg_high_fps_slow_samples;
 static int lsfg_previous_requested;
 static int lsfg_rate_decision = -1; /* -1: measuring, 0: generate, 1: passthrough */
@@ -256,7 +259,11 @@ int vk_lsfg_is_high_fps_passthrough(void) {
    * above the target simply never earns a generated frame. Report that, so the
    * quick menu still says the same true thing it said before. */
   if (lsfg_mode_is_fractional())
-    return lsfg_fractional_ready &&
+    /* Deliberately not gated on lsfg_fractional_ready: that flag now only latches
+     * once the source is BELOW the target, so requiring it here would make this
+     * branch unreachable and the quick menu would stop reporting passthrough
+     * while warming up at the cap -- exactly when reporting it is informative. */
+    return lsfg_frozen_source_fps > 0.0 &&
            lsfg_frozen_source_fps >= lsfg_target_fps_pref();
   return lsfg_rate_decision == 1;
 }
@@ -386,6 +393,7 @@ static void reset_tracked_swapchain(void) {
   lsfg_last_source_present_ns = 0;
   lsfg_source_interval_ns = 0.0;
   lsfg_source_samples = 0;
+  lsfg_at_cap_run = 0;
   lsfg_high_fps_slow_samples = 0;
   lsfg_previous_requested = 0;
   lsfg_rate_decision = -1;
@@ -976,10 +984,54 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   if (fractional) {
     if (!lsfg_fractional_ready) {
       source_interval = lsfg_observe_source_present();
+      /* A menu or a loading screen sits at the display cap, and the estimate is
+       * an EWMA carrying 0.875 of its past, so history taken there poisons the
+       * latch: 16 samples into a 43 fps race it still reads ~46 out of 50, the
+       * ratio comes out 1.08 and generation nearly stops. That history has to be
+       * thrown away -- but only on a SUSTAINED run at or above the cap. A single
+       * 50 fps frame in the middle of a race is ordinary jitter, and resetting on
+       * it would mean a game that alternates 43 and 50 fps never latches at all.
+       * Eight in a row is a menu; one is noise. */
+      if (source_interval > 0) {
+        const double raw_fps = 1e9 / (double)source_interval;
+        if (raw_fps >= target_fps) {
+          /* Published straight away: while at the cap nothing is generated, so
+           * there is no FIFO back-pressure to distort it, and the quick menu and
+           * the perf line can still say what the source is doing. The EWMA needs
+           * 8 samples to report anything and the reset below keeps it below that,
+           * so the raw interval is the only honest value available here. */
+          lsfg_frozen_source_fps = raw_fps;
+          if (++lsfg_at_cap_run >= 8) {
+            lsfg_source_samples = 0;
+            lsfg_source_interval_ns = 0.0;
+          }
+        } else {
+          lsfg_at_cap_run = 0;
+        }
+      }
+      /* Latch only once the measured source is genuinely BELOW the target.
+       * Latching on a rate at or above it -- which is what a menu produces --
+       * freezes the estimate at the cap, the ratio comes out exactly 1.0 and
+       * fractional mode then never earns a single generated frame for the rest
+       * of the session, because the estimate is by design never revisited.
+       *
+       * GT3 does precisely this: 50.17 fps in the menus and 42.9-43.2 fps in a
+       * race, so enabling frame generation anywhere outside a race locked the
+       * output to the race rate with generation permanently off. Deus Ex sits at
+       * 30 fps everywhere, which is why the same build appeared to work there
+       * and not here -- it was never the game, it was what the source was doing
+       * during the 16 warm-up samples.
+       *
+       * Measuring on is safe while nothing is generated: the back-pressure
+       * described above only appears once interpolation actually starts, so
+       * there is no feedback loop left to run away with. */
       if (lsfg_source_samples >= 16) {
-        lsfg_frozen_source_fps = lsfg_measured_source_fps();
-        lsfg_fractional_ready = lsfg_frozen_source_fps > 0.0;
-        lsfg_gen_phase = 0.0;
+        const double measured = lsfg_measured_source_fps();
+        if (measured > 0.0 && measured < target_fps) {
+          lsfg_frozen_source_fps = measured;
+          lsfg_fractional_ready = 1;
+          lsfg_gen_phase = 0.0;
+        }
       }
     }
   } else if (!requested || lsfg_rate_decision != 0) {
@@ -996,6 +1048,7 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
       lsfg_last_source_present_ns = 0;
       lsfg_source_interval_ns = 0.0;
       lsfg_source_samples = 0;
+      lsfg_at_cap_run = 0;
       lsfg_high_fps_slow_samples = 0;
     }
     lsfg_previous_requested = requested;
