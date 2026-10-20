@@ -546,11 +546,6 @@ static const Opt S_optimize[] = {
    * steal is a length-preserving binary patch this port applies to the core. */
   O_CHOICE("Thread pinning",   "Wrapper/ThreadPinning", C_pin, "role"),
   O_CHOICE("VU cycle steal",   "EmuCore/Speedhacks/vuCycleSteal", C_vusteal, "0"),
-  /* Not gated on LSFGEnabled, unlike Mode and Target output rate above in Frame
-   * Generation: this publishes frame pacing whether or not generation runs, and
-   * only its target-override half interacts with those rows. It lives here
-   * because it is one of ours, not an upstream control. */
-  O_CHOICE("Publish FPS to overlays", "Wrapper/SaltyFPS", C_bool, "false"),
 };
 
 static const Opt S_framegen[] = {
@@ -810,11 +805,6 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Sets the resolution used for optical-flow analysis. Half can retain more motion detail but costs considerably more GPU time and memory; Quarter is recommended on Switch."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
    "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
-  {"Wrapper/SaltyFPS", "Overlay FPS reporting",
-   "Publishes frame pacing into the SaltySD shared block that FPSLocker and Status Monitor read, and lets a target set there reach this build. MEASURED ON HARDWARE AND IT DOES NOT WORK FROM HERE: the overlays reach that block over the 'SaltySD' named port, and opening a session on it fails with kernel OutOfResource. A calibration probe settles why -- a port that cannot exist returns NotFound, while BOTH SaltySD and InjectServ, registered by the same sysmodule with max_sessions=1, return OutOfResource. So the port is visible and the limit is this process's own reslimit, not a slot somebody else holds; 64 retries across 46 seconds were identical, and the module now gives up on the first failure instead of filling the log. Nothing in this build can raise its own reslimit. Left in because the row is harmless when it fails, and because a launcher whose process could open sysmodule sessions would make it work unchanged. The diagnostic 'saltyfps' line reports state, offset, refresh rate and target."},
-
-
-
 
   {"SPU2/Mixing/FinalVolume", "Audio output",
    "Sets the final emulator volume sent to the Switch audio output. It does not change the game's internal volume setting."},

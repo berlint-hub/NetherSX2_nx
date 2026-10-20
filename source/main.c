@@ -36,7 +36,6 @@
 #include "ra_http.h"
 #include "lsfg_control.h"
 #include "network.h"
-#include "saltyfps.h"
 
 // Android MotionEvent axis codes (handleControllerAxisEvent expects these)
 #define AAXIS_X         0
@@ -1959,12 +1958,6 @@ int main(void) {
 
   // settings store: load nethersx2.ini + seed OpenGL/folder defaults
   prefs_init(PREFS_PATH);
-  // Publish frame pacing into the SaltySD shared block that FPSLocker and
-  // Status Monitor read. Stays inert unless Wrapper/SaltyFPS is on and the
-  // SaltySD port answers, so a console without SaltyNX is unaffected; the
-  // present path retries the attach a few times in case the sysmodule is
-  // slower to come up than we are.
-  saltyfps_init();
 #if GS_RENDERER == GS_RENDERER_OGL && !defined(USE_DEKO3D)
   // The unified Mesa SDK contains both the native NVC0 Gallium driver and Zink. Select Zink before
   // libemucore initializes EGL; leaving the override unset preserves Mesa's native default.
@@ -2117,15 +2110,6 @@ int main(void) {
                GS_PREF_I("EmuCore/GS/filter"));
 #undef GS_PREF_I
 #undef GS_PREF_B
-
-  /* Last of the startup echoes. Reports whether the overlays can see us at
-   * all, which block we write to, and what target they have set -- the three
-   * things that decide whether an FPSLocker number means anything here. */
-  {
-    char saltyfps_line[256];
-    saltyfps_status(saltyfps_line, sizeof(saltyfps_line));
-    vk_diag_note("saltyfps %s", saltyfps_line);
-  }
 #endif
 
   check_syscalls();
