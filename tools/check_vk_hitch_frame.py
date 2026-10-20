@@ -114,6 +114,9 @@ static unsigned long long gpu_idle_calls, gpu_idle_ns;
 static unsigned long long gpu_pipe_calls, gpu_pipe_ns;
 static unsigned long long gpu_barrier_calls, gpu_copy2buf_calls;
 static unsigned long long gpu_copyimg_calls, gpu_blit_calls;
+static unsigned long long gpu_acq_calls, gpu_acq_ns;
+static unsigned long long gpu_sub_calls, gpu_sub_ns;
+static unsigned long long gpu_pres_calls, gpu_pres_ns;
 
 /* ---- window machinery perf_observe_present lives among (vk.c lines above the
    extracted block; values must match or the rollover cases test nothing) ---- */

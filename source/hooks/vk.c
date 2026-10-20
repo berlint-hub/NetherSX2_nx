@@ -506,6 +506,21 @@ static unsigned long long gpu_pipe_calls, gpu_pipe_ns;
 static unsigned long long gpu_barrier_calls, gpu_copy2buf_calls;
 static unsigned long long gpu_copyimg_calls, gpu_blit_calls;
 
+/* Wall time the presenting thread spent inside the three calls that can block on
+ * the GPU without ever touching a fence. This is the field that was missing both
+ * times a diagnosis went wrong here: "no thread is above 55% and the frame rate
+ * is low, so something must be waiting on the GPU" was settled by looking at
+ * fences, which measured 0.1% of the window -- but a FIFO swapchain with no free
+ * image blocks its caller inside vkAcquireNextImageKHR, and a compositor that
+ * cannot take the frame blocks it inside vkQueuePresentKHR, and neither of those
+ * is a fence wait. While the internal resolution was reduced, GT3 was bound by
+ * CPU work in the GS thread and these stayed small. At 2x internal resolution
+ * the GPU has four times the pixels of native to fill, so the wall can move to
+ * the GPU side, and this is the only place in the log where that would show. */
+static unsigned long long gpu_acq_calls, gpu_acq_ns;
+static unsigned long long gpu_sub_calls, gpu_sub_ns;
+static unsigned long long gpu_pres_calls, gpu_pres_ns;
+
 /* Per-frame hitch attribution.
  *
  * Everything above is a per-window total and a window is 300 frames / ~6 s, so a
@@ -816,9 +831,14 @@ static void perf_report(uint64_t now) {
     const double fence_ms = (double)gpu_fence_ns / 1e6;
     const double idle_ms = (double)gpu_idle_ns / 1e6;
     const double pipe_ms = (double)gpu_pipe_ns / 1e6;
+    const double acq_ms = (double)gpu_acq_ns / 1e6;
+    const double sub_ms = (double)gpu_sub_ns / 1e6;
+    const double pres_ms = (double)gpu_pres_ns / 1e6;
     vk_diag_note("perf: gpu blocked fence %llu x %.1f ms (%.0f%%) + polls %llu,"
                  " queue-idle %llu x %.1f ms (%.0f%%)"
                  " | pipelines %llu x %.1f ms (%.0f%%)"
+                 " | vk acquire %llu x %.1f ms (%.0f%%) submit %llu x %.1f ms (%.0f%%)"
+                 " present %llu x %.1f ms (%.0f%%)"
                  " | cmds barrier %llu copy2buf %llu copyimg %llu blit %llu",
                  gpu_fence_calls, fence_ms,
                  win_ms > 0.0 ? 100.0 * fence_ms / win_ms : 0.0,
@@ -827,6 +847,12 @@ static void perf_report(uint64_t now) {
                  win_ms > 0.0 ? 100.0 * idle_ms / win_ms : 0.0,
                  gpu_pipe_calls, pipe_ms,
                  win_ms > 0.0 ? 100.0 * pipe_ms / win_ms : 0.0,
+                 gpu_acq_calls, acq_ms,
+                 win_ms > 0.0 ? 100.0 * acq_ms / win_ms : 0.0,
+                 gpu_sub_calls, sub_ms,
+                 win_ms > 0.0 ? 100.0 * sub_ms / win_ms : 0.0,
+                 gpu_pres_calls, pres_ms,
+                 win_ms > 0.0 ? 100.0 * pres_ms / win_ms : 0.0,
                  gpu_barrier_calls, gpu_copy2buf_calls,
                  gpu_copyimg_calls, gpu_blit_calls);
   }
@@ -862,6 +888,9 @@ static void perf_report(uint64_t now) {
   gpu_pipe_calls = gpu_pipe_ns = 0;
   gpu_barrier_calls = gpu_copy2buf_calls = 0;
   gpu_copyimg_calls = gpu_blit_calls = 0;
+  gpu_acq_calls = gpu_acq_ns = 0;
+  gpu_sub_calls = gpu_sub_ns = 0;
+  gpu_pres_calls = gpu_pres_ns = 0;
   /* The frame deltas are computed against these, so they must follow the
    * counters they mirror back to zero or the next frame's delta wraps. */
   prev_barrier = prev_copyimg = prev_copy2buf = prev_blit = 0;
@@ -1133,7 +1162,7 @@ vkQueueSubmit_shim(VkQueue queue, uint32_t submit_count,
   VkResult result = submit(queue, submit_count, submits, fence);
   {
     const uint64_t t1 = lsfg_monotonic_ns();
-    if (t1 > t0) frame_sub_ns += t1 - t0;
+    if (t1 > t0) { frame_sub_ns += t1 - t0; gpu_note_time(&gpu_sub_calls, &gpu_sub_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_submit_calls;
   if (call <= 3 || result != VK_SUCCESS)
@@ -1150,7 +1179,7 @@ vkQueueSubmit2_shim(VkQueue queue, uint32_t submit_count,
   VkResult result = submit(queue, submit_count, submits, fence);
   {
     const uint64_t t1 = lsfg_monotonic_ns();
-    if (t1 > t0) frame_sub_ns += t1 - t0;
+    if (t1 > t0) { frame_sub_ns += t1 - t0; gpu_note_time(&gpu_sub_calls, &gpu_sub_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_submit2_calls;
   if (call <= 3 || result != VK_SUCCESS)
@@ -1170,7 +1199,7 @@ vkAcquireNextImageKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
                             image_index);
   {
     const uint64_t t1 = lsfg_monotonic_ns();
-    if (t1 > t0) frame_acq_ns += t1 - t0;
+    if (t1 > t0) { frame_acq_ns += t1 - t0; gpu_note_time(&gpu_acq_calls, &gpu_acq_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_acquire_calls;
   if (call <= 4 || (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR))
@@ -1319,7 +1348,10 @@ vkQueuePresentKHR_native(VkQueue queue, const VkPresentInfoKHR *present_info) {
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
-    if (t1 > t0) frame_pres_ns += t1 - t0;
+    if (t1 > t0) {
+      frame_pres_ns += t1 - t0;
+      gpu_note_time(&gpu_pres_calls, &gpu_pres_ns, t0, t1);
+    }
   }
   if (vk_present_count <= 4 || result != VK_SUCCESS)
     vk_diag_note("vkQueuePresentKHR call=%d swaps=%u result=%d",

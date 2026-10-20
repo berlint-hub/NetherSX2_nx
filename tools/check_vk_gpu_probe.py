@@ -49,6 +49,7 @@ PREAMBLE = r"""
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 static uint64_t fake_clock = 0;
 static uint64_t clock_step = 0;
@@ -58,7 +59,14 @@ static uint64_t lsfg_monotonic_ns(void) {
   return t;
 }
 static void vk_diag_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void vk_diag_note(const char *fmt, ...) { (void)fmt; }
+/* Keeps the last formatted line so field order can be checked, not just counts. */
+static char diag_out[2048];
+static void vk_diag_note(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(diag_out, sizeof diag_out, fmt, ap);
+  va_end(ap);
+}
 
 /* The two other modules the per-frame hitch line reads. Types are pasted in
  * verbatim by the generator; only the functions are faked. */
@@ -185,6 +193,22 @@ int main(void) {
    * here: the region must still compile as a whole with -Werror. The logic of
    * those deltas is what tools/check_vk_hitch_frame.py tests. */
   perf_note_frame(0);
+
+  /* The three blocking-call fields must each land in their own slot. Swapping
+   * two of them (or printing submit's nanoseconds under acquire's label) still
+   * compiles and still prints a plausible line, so this is checked as text: the
+   * whole reason these fields exist is that a wrong number here would send the
+   * next "is it the GPU or the CPU?" answer the wrong way. */
+  gpu_acq_calls = 11;  gpu_acq_ns = 1000000;
+  gpu_sub_calls = 22;  gpu_sub_ns = 2000000;
+  gpu_pres_calls = 33; gpu_pres_ns = 3000000;
+  report_body(6.0);
+  CHECK(strstr(diag_out,
+               "vk acquire 11 x 1.0 ms (0%) submit 22 x 2.0 ms (0%)"
+               " present 33 x 3.0 ms (0%)") != NULL,
+        "third-line vk fields wrong: %s", diag_out);
+  gpu_acq_calls = gpu_acq_ns = gpu_sub_calls = gpu_sub_ns = 0;
+  gpu_pres_calls = gpu_pres_ns = 0;
 
   /* An empty window must not divide by zero in the percentages. */
   report_body(0.0);

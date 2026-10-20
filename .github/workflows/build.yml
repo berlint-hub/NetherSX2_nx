@@ -652,6 +652,22 @@ jobs:
             echo "::error::perf gpu-blocked radek: diag ${gbd}x / prod ${gbp}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
             exit 1
           fi
+          # Cas vlakna, ktere prezentuje, uvnitr tri volani, ktera umi cekat na
+          # GPU, aniz by se dotkla fence: FIFO swapchain bez volneho obrazu
+          # zastavi volajiciho v vkAcquireNextImageKHR a kompozitor, ktery snimek
+          # nestiha prevzit, ho zastavi v vkQueuePresentKHR. Bez techto poli
+          # vypadal radek "cekani na GPU = 0 %" stejne v behu vazanem na CPU i v
+          # behu vazanem na GPU -- a presne tak dvakrat vznikla diagnoza, ktera
+          # pak merenim neobstala. Pri vyssim internim rozliseni (napr. 2x = 4x
+          # pixelu proti nativu) se zed muze presunout na stranu GPU, a tohle je
+          # jedine misto v logu, kde by se to ukazalo.
+          vad=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "vk acquire %llu x" || true); vad=${vad:-0}
+          vap=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "vk acquire %llu x" || true); vap=${vap:-0}
+          echo "::notice::perf pole acquire/submit/present: ${vad}x (diag, ma byt aspon 1) / ${vap}x (produkce, ma byt 0)"
+          if [ "$vad" = "0" ] || [ "$vap" != "0" ]; then
+            echo "::error::perf pole acquire/submit/present: diag ${vad}x / prod ${vap}x -- diag je musi mit, produkce nesmi"
+            exit 1
+          fi
           # Adresni prostor, ve kterem proces skutecne nabootoval. Na otazku,
           # jestli by pomohl sirsi (39bitovy) adresni prostor nebo forwarder
           # s plnym application rezimem, musi odpovedet Horizon, ne predpoklad:

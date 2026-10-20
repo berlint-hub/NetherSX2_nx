@@ -672,7 +672,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"Wrapper/Language", "Launcher language",
    "Selects the language used by the SDL launcher. System follows the language configured on the Switch. Game names, paths, server messages and user-entered text are never translated."},
   {"EmuCore/GS/upscale_multiplier", "Resolution / performance",
-   "Sets the internal resolution used for 3D rendering. Higher scales improve clarity but increase GPU load; sub-native scales reduce GPU work at the cost of image quality. Pre-rendered FMV resolution does not change."},
+   "Sets the internal resolution used for 3D rendering. Higher scales improve clarity but increase GPU load; sub-native scales reduce GPU work at the cost of image quality. Pre-rendered FMV resolution does not change. Every render target the hardware renderer has to copy is copied at this size, so that cost grows with the square of the multiplier. Measured on Gran Turismo 3 (Tegra X1): at 0.5x the 50 FPS PAL cap held in 42 of 50 racing windows even though the renderer issued up to 121.9 target copies and 694 barriers per frame, and the copy count stopped tracking the frame rate at all -- what those copies cost is bandwidth, not commands."},
   {"EmuCore/GS/AspectRatio", "Display geometry",
    "Chooses the shape of the final game image. 4:3 preserves the original PS2 display, 16:9 is intended for compatible games or widescreen patches, and Stretch fills the screen by distorting the image."},
   {"EmuCore/GS/FMVAspectRatioSwitch", "Video display",
@@ -697,7 +697,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Loads compatible no-interlacing PNACH patches. These can reduce flicker and simplify deinterlacing, but game-specific patches may introduce visual issues."},
 
   {"EmuCore/GS/accurate_blending_unit", "Accuracy / performance",
-   "Controls how accurately unsupported PS2 GS blend modes are reproduced in shaders. Higher levels fix more effects but can carry a large GPU cost. Basic is the recommended starting point."},
+   "Controls how accurately unsupported PS2 GS blend modes are reproduced in shaders. Higher levels fix more effects but can carry a large GPU cost. Basic is the recommended starting point. Blending is done per pixel, so its cost grows with Resolution scale: when playing above native this is the first accuracy setting worth lowering, and Minimum is the cheapest level the core offers."},
   {"EmuCore/GS/deinterlace_mode", "Video processing",
    "Chooses how interlaced PS2 output is converted for the progressive Switch display. Auto follows the game; manual modes are useful only when a title shows combing, shaking, or an incorrect field order."},
   {"EmuCore/GS/dithering_ps2", "Image accuracy",
