@@ -39,7 +39,6 @@
 #include "../lsfg/lsfg_bridge.h"
 #include "../pthr.h"
 #include "../libc_shim.h"
-#include "../saltyfps.h"
 
 // The Mesa NVK portlib package (nxvk.pc, built from berlint-hub/nxvk) ships only
 // libnvk.a + libnvk_support.a, and libnvk.a defines exactly one entry point:
@@ -241,12 +240,7 @@ static int lsfg_mode_is_fractional(void) {
 }
 
 static double lsfg_target_fps_pref(void) {
-  /* FPSLocker / Status Monitor write FPSlocked into the SaltySD shared block
-   * and the user can change it mid-game, so an overlay target wins over the ini
-   * value. Clamped to the same range: below 30 there is nothing to generate
-   * towards, and 120 is the panel's ceiling in docked mode. */
-  int target = saltyfps_target_fps();
-  if (target <= 0) target = prefs_get_int("Wrapper/LSFGTargetFPS", 60);
+  int target = prefs_get_int("Wrapper/LSFGTargetFPS", 60);
   if (target < 30) target = 30;
   if (target > 120) target = 120;
   return (double)target;
@@ -1300,16 +1294,6 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     tracked_swapchain_extent = create_info->imageExtent;
     tracked_swapchain_lsfg_compatible = compatible;
     __atomic_store_n(&lsfg_runtime_available, compatible, __ATOMIC_RELEASE);
-    /* FPSLocker shows "Active buffers" for API==3 only when Buffers is 2..4, so
-     * ask the driver how many images it really made instead of reporting the
-     * minImageCount we requested. */
-    {
-      PFN_vkGetSwapchainImagesKHR gi = real_get_swapchain_images ?
-          real_get_swapchain_images : vkGetSwapchainImagesKHR;
-      uint32_t image_count = 0;
-      if (gi(device, *out, &image_count, NULL) == VK_SUCCESS)
-        saltyfps_set_buffers((int)image_count);
-    }
   }
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   vk_diag_note("vkCreateSwapchainKHR end result=%d swapchain=%p compatible=%d actual_usage=0x%x actual_images=%u actual_mode=%u",
@@ -1431,10 +1415,8 @@ static int lsfg_try_create(VkQueue queue) {
 static VkResult VKAPI_CALL
 vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   ++vk_present_count;
-  /* Every present, whatever the path below decides to do with it -- and not
-   * diagnostic-gated, because the overlays read this in the shipping build. */
-  saltyfps_present();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+  /* Every present, whatever the path below decides to do with it. */
   perf_observe_present();
 #endif
 #ifdef NETHERSX2_VK_DIAGNOSTIC
