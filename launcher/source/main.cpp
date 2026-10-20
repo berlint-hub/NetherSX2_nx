@@ -708,7 +708,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Loads compatible no-interlacing PNACH patches. These can reduce flicker and simplify deinterlacing, but game-specific patches may introduce visual issues."},
 
   {"EmuCore/GS/accurate_blending_unit", "Accuracy / performance",
-   "Controls how accurately unsupported PS2 GS blend modes are reproduced in shaders. Higher levels fix more effects but can carry a large GPU cost. Basic is the recommended starting point. Blending is done per pixel, so its cost grows with Resolution scale: when playing above native this is the first accuracy setting worth lowering, and Minimum is the cheapest level the core offers."},
+   "Controls how accurately unsupported PS2 GS blend modes are reproduced in shaders. Higher levels fix more effects but can carry a large GPU cost. Basic is the recommended starting point. Blending is per pixel, so its cost grows with Resolution scale and this is the first accuracy setting worth lowering above native. Measured at 2x on Gran Turismo 3 with Minimum: pipeline barriers fell from 422-605 per frame to about 70 and every racing window held the 50 fps PAL cap, though several settings changed in that run. The core warns that blending below Basic may break effects."},
   {"EmuCore/GS/deinterlace_mode", "Video processing",
    "Chooses how interlaced PS2 output is converted for the progressive Switch display. Auto follows the game; manual modes are useful only when a title shows combing, shaking, or an incorrect field order."},
   {"EmuCore/GS/dithering_ps2", "Image accuracy",
@@ -748,13 +748,13 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"EmuCore/GS/SoftwareRendererFMV", "Game-specific workaround",
    "Temporarily uses the software renderer for FMV sequences. It can fix videos that hardware rendering displays incorrectly, but costs substantial CPU time during those scenes."},
   {"EmuCore/GS/HWDownloadMode", "Accuracy / performance",
-   "Changes synchronization for data read back from the GPU. Accurate is safest but makes every GS download a blocking round trip. The default here is Unsynchronized rather than Accurate: in the Gran Turismo 3 hardware logs the only runs that reached about 50 fps had this set away from Accurate, while a run stuck near 30 fps with no thread above 55 % CPU had it on Accurate. That is not a controlled A/B, the two runs were not the same scene, so treat it as the better starting point and not as a measured result. Less synchronized modes can break effects, videos, or other rendering that depends on GS downloads."},
+   "Changes synchronization for data read back from the GPU. Accurate is safest but makes every GS download a blocking round trip. Measured at 2x on Gran Turismo 3 with Accurate: 8 of 34 windows blocked 100-686 ms inside vkWaitForFences, up to 11% of a window, with 58-212 readback copies, and the frame rate still held the PAL cap in 33 of 34 windows. So at 2x Accurate costs headroom rather than frames. An earlier version of this text claimed the opposite, from a 30 fps run that the GPU counters later showed had zero readbacks and 7-14 ms of fence time; that claim was wrong. The default here is Unsynchronized rather than Accurate because it buys headroom in a heavier scene. Less synchronized modes can break effects or videos that depend on GS downloads."},
   {"EmuCore/GS/HWSpinCPUForReadbacks", "Readback latency",
    "Keeps the CPU doing throwaway work instead of sleeping while a frame waits for data coming back from the GPU. Can shorten those stalls at a large cost in power and heat. This port is not tuned for battery life, so the trade is deliberate; the per-thread CPU counters in the diagnostic build show the extra load."},
   {"EmuCore/GS/HWSpinGPUForReadbacks", "Readback latency",
    "Submits throwaway work to the GPU while waiting for a readback so the GPU does not idle down. It needs VK_EXT_calibrated_timestamps to pace itself: without it the core logs 'Spin GPU During Readbacks is enabled, but calibrated timestamps are unavailable. This might be really slow.' If that line appears in nethersx2-core.log, turn this off again and keep the CPU spin."},
   {"EmuCore/GS/UserHacks_CPUSpriteRenderBW", "GPU to CPU offload",
-   "Renders sprite primitives on the CPU instead of the GPU when the target they draw into is no wider than the selected level. 0 is off; PCSX2 labels the levels by that maximum width, 1 = 64 px up to 10 = 640 px, and the number written to the INI is the level. This is the lever for a scene that is GPU-bound while CPU cores still have headroom, which the per-thread CPU counters measure. Sprites drawn on the CPU can come out wrong."},
+   "Renders sprite primitives on the CPU instead of the GPU when the target they draw into is no wider than the selected level. 0 is off; the levels are that maximum width, 1 = 64 px up to 10 = 640 px. Clean A/B on Gran Turismo 3 at 2x with this the only difference (level 2 over 34 racing windows, level 0 over 24): median 50.18 against 50.17 fps, GS thread 48.5% against 49.0%, EE 62.0% against 62.5%, target copies per frame 7.02 in both. Indistinguishable, because level 2 only moves sprites up to 128 px wide and both runs sit at the frame limiter. It can only pay off in a GPU-bound scene that still has CPU headroom, at a level wide enough to move real work. Sprites drawn on the CPU can come out wrong."},
   {"EmuCore/GS/UserHacks_CPUCLUTRender", "GPU to CPU offload",
    "Detects a game drawing its own colour palette and performs that lookup in software instead of on the GPU. Normal catches the common cases, Aggressive catches more at a higher CPU cost. A misdetected palette shows up as wrong colours."},
   {"EmuCore/GS/UserHacks_CPU_FB_Conversion", "GPU to CPU offload",
@@ -772,7 +772,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"EmuCore/GS/UserHacks_GPUTargetCLUTMode", "Target copies",
    "When a game reads its colour palette out of a render target, do that lookup on the GPU with special handling instead of pulling the target back through the texture cache. Same reason as Texture inside RT: fewer target copies. Exact match is strict about where the palette sits; Check inside target also looks for it inside a larger target, which catches more cases and mismatches more often, showing up as wrong colours."},
   {"EmuCore/GS/OverrideTextureBarriers", "Target copies",
-   "Forces whether the renderer believes texture barriers exist instead of using what the driver reports. On this driver the core logs VK_ARM_rasterization_order_attachment_access as NOT supported, so a render target that is also sampled must be copied first. Measured on Gran Turismo 3 at 2x internal resolution: up to 99.8 target copies and 605 pipeline barriers per frame in the slowest stretch, while the presenting thread sat inside vkAcquireNextImageKHR for up to 86% of the window with EE and GS both under 80% -- a GPU limit, not a CPU one. Force on replaces those copies with barriers; because the driver does not guarantee the ordering the extension would, blending and effects may come out wrong, so treat it as an experiment and go back to Automatic if the image breaks. Force off always copies, which is what Automatic already resolves to here. The diagnostic log's copyimg and barrier counts show whether it changed anything."},
+   "Forces whether the renderer believes texture barriers exist instead of using what the driver reports. Here the core logs VK_ARM_rasterization_order_attachment_access as NOT supported, so a render target that is also sampled must be copied first. Measured on Gran Turismo 3 at 2x: before this knob, up to 99.8 copies and 605 barriers per frame, with the presenting thread parked in vkAcquireNextImageKHR for up to 86% of a window and the frame rate down to 41.75. With Force on: 7.0 copies and about 70 barriers per frame, acquire never above 8%, 57 of 58 racing windows at 49.80 fps or better. Other settings changed in the same run, so that is the configuration which removed the GPU wall, not this knob alone. Force on can break blending and effects."},
   {"EmuCore/GS/UserHacks_SkipDraw_Start", "Draw skipping",
    "Draw calls numbered from this value up to 'Skip draw to' are skipped outright in every frame, counted from the first draw of the frame. Used to drop a fixed post-processing pass that costs more than it is worth. 0 with 0 skips nothing."},
   {"EmuCore/GS/UserHacks_SkipDraw_End", "Draw skipping",
@@ -4665,7 +4665,10 @@ static void showHelpCard(const char *section,const char *title,const char *kind,
 
     clearUiBackground();
     const int panelWidth=std::min(SW-120,1000);
-    const int panelHeight=std::min(SH-96,500);
+    /* Taller than the old fixed 500: the line budget below is derived from this,
+   * and 500 px only ever fitted 7 lines. At 720p and at 1080p this both leave
+   * 48 px of margin top and bottom. */
+  const int panelHeight=std::min(SH-96,624);
     const int panelX=(SW-panelWidth)/2,panelY=(SH-panelHeight)/2;
     glassPanel(panelX,panelY,panelWidth,panelHeight);
     drawText(g_font_sm,panelX+40,panelY+24,translatedSection.c_str(),COL_DIM);
@@ -4683,12 +4686,20 @@ static void showHelpCard(const char *section,const char *title,const char *kind,
       bodyY=panelY+198;
     }
     fillRect(panelX+40,bodyY-18,panelWidth-80,2,(SDL_Color){70,78,92,210});
-    drawWrapped(g_font,panelX+40,bodyY,panelWidth-80,32,7,
+    // drawWrapped stops at maxLines with no ellipsis and no scrolling, so the
+    // hard-coded 7 silently truncated every help text longer than roughly 650
+    // characters at this panel width -- the tail simply never appeared, and the
+    // longest entries in the table are past 1200. Derived from the panel instead,
+    // with 12 px kept clear of the footer hint, so the budget follows the space
+    // that is actually there at 720p and at 1080p alike (12 lines in both).
+    const int footerY=panelY+panelHeight-30;
+    const int bodyLines=std::max(1,(footerY-12-bodyY)/32);
+    drawWrapped(g_font,panelX+40,bodyY,panelWidth-80,32,bodyLines,
                 translatedDescription.c_str(),COL_TXT);
     // A, B and X all close; naming one is enough. The bare A / B glyphs this
     // used to draw read as broken hints with no caption beside them.
     FootItem footer[]={{"A","Close"},{"Touch","anywhere to close"}};
-    drawFooterHints(footer,2,panelY+panelHeight-30);
+    drawFooterHints(footer,2,footerY);
     SDL_RenderPresent(g_ren);
     waitForNextFrame();
   }
