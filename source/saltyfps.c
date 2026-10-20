@@ -265,6 +265,26 @@ static bool saltyfps_attach(void) {
     corelog_log(CORELOG_WARN, "Wrapper",
                 "saltyfps: svcConnectToNamedPort(\"SaltySD\") failed rc=0x%x "
                 "(attempt %d of %d)", rc, g_attempts, SALTYFPS_MAX_ATTEMPTS);
+    /* rc=0x10801 is MAKERESULT(Module_Kernel, KernelError_OutOfResource=132),
+     * and that one code covers two situations with opposite fixes: either the
+     * port is not visible to this process at all, or it is visible but its
+     * single session slot is held by somebody else -- saltysd_proc registers it
+     * with svcManageNamedPort(..., "SaltySD", 1) and saltysd_bootstrap.elf holds
+     * the handle for the whole time it spends injecting saltynx_core.elf.
+     * Asking the kernel about a port that cannot exist separates the two: same
+     * code back means "not visible", a different code means "visible but full".
+     * Done once, on the first failure, and touches no real port. */
+    if (g_attempts == 1) {
+      Handle dummy = INVALID_HANDLE;
+      const Result drc = svcConnectToNamedPort(&dummy, "NxNull");
+      corelog_log(CORELOG_INFO, "Wrapper",
+                  "saltyfps: calibration -- a port that cannot exist returns "
+                  "rc=0x%x, SaltySD returns rc=0x%x => %s",
+                  drc, rc,
+                  drc == rc ? "SaltySD is NOT VISIBLE to this process"
+                            : "SaltySD IS visible, its one session slot is TAKEN");
+      if (R_SUCCEEDED(drc)) svcCloseHandle(dummy);
+    }
     return false;
   }
   g_last_rc = 0;
