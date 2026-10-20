@@ -263,10 +263,17 @@ it hides inside every percentage there, and a Gran Turismo 3 log measured exactl
 that (worst frame 82.4 ms in a window reporting EE 68% and no GPU wait at all).
 
 At startup the same log prints the settings the run actually used
-(`settings upscale=0.50 crc=4 hwdl=2 ...`), read back from the store the core
+(`settings upscale=2.00 crc=4 hwdl=3 ...` and a second line
+`settings-gpu blend=1 mipmap=1 preload=2 ...`), read back from the store the core
 reads. Without it a log can only be decoded from the core's own
 `[Unsafe Settings]` warnings, which name a setting when it differs from a default
-but never say to what.
+but never say to what, and never mention one the core does not consider unsafe.
+
+`tools/check_ini_keys.py` compares every key the launcher writes against the
+strings of the core it ships. A key spelled differently on the two sides is
+silent and total: the row appears in the menu, the value lands in the ini, the
+core never asks for it. FXAA was dead that way from the commit that added it --
+the launcher wrote `EmuCore/GS/FXAA` while the core binds `"fxaa"`.
 
 ### How to build
 

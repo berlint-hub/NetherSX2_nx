@@ -2080,6 +2080,30 @@ int main(void) {
                GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_Start"),
                GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_End"),
                GS_PREF_I("EmuCore/GS/UserHacks_TriFilter"));
+  /* Second line, the per-pixel GPU cost knobs. These are separate because a run
+   * at 2x internal resolution turned out to be limited by the GPU rather than by
+   * the renderer thread -- five windows ended with the presenting thread parked
+   * inside vkAcquireNextImageKHR for 37-86% of the wall time while EE and GS both
+   * had headroom -- and which of these were active decides how much pixel work
+   * the GPU was actually being asked for. Blending in particular is done per
+   * pixel, so at 2x it costs four times what it costs at native, and the core's
+   * own "[Unsafe Settings]" warnings say nothing about any of them unless the
+   * value happens to be one it considers unsafe.
+   *
+   * blend 0..5 = Minimum/Basic/Medium/High/Full/Maximum, preload 0..2 =
+   * None/Partial/Full, deint and filter follow the launcher's choice lists. */
+  vk_diag_note("settings-gpu blend=%d mipmap=%d preload=%d fxaa=%d cas=%d shadeboost=%d"
+               " skipdup=%d deint=%d aniso=%d filter=%d",
+               GS_PREF_I("EmuCore/GS/accurate_blending_unit"),
+               GS_PREF_B("EmuCore/GS/mipmap_hw"),
+               GS_PREF_I("EmuCore/GS/texture_preloading"),
+               GS_PREF_B("EmuCore/GS/fxaa"),
+               GS_PREF_I("EmuCore/GS/CASMode"),
+               GS_PREF_B("EmuCore/GS/ShadeBoost"),
+               GS_PREF_B("EmuCore/GS/SkipDuplicateFrames"),
+               GS_PREF_I("EmuCore/GS/deinterlace_mode"),
+               GS_PREF_I("EmuCore/GS/MaxAnisotropy"),
+               GS_PREF_I("EmuCore/GS/filter"));
 #undef GS_PREF_I
 #undef GS_PREF_B
 #endif
