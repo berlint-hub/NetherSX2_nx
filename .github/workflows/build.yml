@@ -859,7 +859,8 @@ jobs:
           # UserHacks_DrawBuffering v nem nejsou a radka s takovym klicem by
           # zapsala hodnotu, kterou jaderny getter nikdy necte.
           # strings se pousti jednou na binarku, ne jednou na klic: .nro ma 47 MB
-          # a jedenact klicu x dve binarky by jinak bylo dvaadvacet prubehu.
+          # a kazdy dalsi klic by jinak znamenal dva prubehy pres celou binarku
+          # (prod + diag), takze se dumpne jednou a grepuje se z textu.
           "$xstrings" NetherSX2.nro > /tmp/nx_lprod.txt
           "$xstrings" NetherSX2-diag.nro > /tmp/nx_ldiag.txt
           hk_missing=""
@@ -869,7 +870,7 @@ jobs:
                     EmuCore/GS/UserHacks_DisableDepthSupport EmuCore/GS/UserHacks_DisablePartialInvalidation \
                     EmuCore/GS/UserHacks_EstimateTextureRegion EmuCore/GS/UserHacks_SkipDraw_Start \
                     EmuCore/GS/UserHacks_TextureInsideRt EmuCore/GS/UserHacks_GPUTargetCLUTMode \
-                    EmuCore/GS/UserHacks_SkipDraw_End; do
+                    EmuCore/GS/UserHacks_SkipDraw_End EmuCore/GS/OverrideTextureBarriers; do
             hkc=$(grep -c "$hk" /tmp/nx_lprod.txt || true); hkc=${hkc:-0}
             hkk=$(grep -c "$hk" /tmp/nx_ldiag.txt || true); hkk=${hkk:-0}
             if [ "$hkc" = "0" ] || [ "$hkk" = "0" ]; then hk_missing="$hk_missing $hk"; fi

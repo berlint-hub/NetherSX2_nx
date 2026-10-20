@@ -2056,12 +2056,15 @@ int main(void) {
    * Auto/None/Minimum/Partial/Full/Aggressive, hwdl 0/1/2/3 = Accurate/Disable
    * readbacks/Unsynchronized/Disabled, texinrt 0/1/2 = Disabled/Inside target/
    * Merge targets, gpuclut 0/1/2 = Disabled/Exact match/Check inside target,
-   * cpusprite 0..10, cpuclut 0..2, trifilter -1 = automatic. */
+   * cpusprite 0..10, cpuclut 0..2, trifilter -1 = automatic, texbar -1/0/1 =
+   * Automatic/Force off/Force on (a tristate upstream binds as a bitfield, drawn
+   * over s_generic_options with -1 as the automatic default). */
 #define GS_PREF_I(k) (prefs_contains(k) ? prefs_get_int((k), -1) : -1)
 #define GS_PREF_B(k) (prefs_contains(k) ? (prefs_get_bool((k), false) ? 1 : 0) : -1)
   vk_diag_note("settings upscale=%.2f crc=%d hwdl=%d paltex=%d texinrt=%d gpuclut=%d"
                " nodepth=%d nopartial=%d estregion=%d unsafe=%d"
-               " cpusprite=%d cpuclut=%d cpufb=%d skipdraw=%d/%d trifilter=%d",
+               " cpusprite=%d cpuclut=%d cpufb=%d skipdraw=%d/%d trifilter=%d"
+               " texbar=%d",
                prefs_contains("EmuCore/GS/upscale_multiplier")
                    ? prefs_get_float("EmuCore/GS/upscale_multiplier", -1.0f)
                    : -1.0f,
@@ -2079,7 +2082,8 @@ int main(void) {
                GS_PREF_B("EmuCore/GS/UserHacks_CPU_FB_Conversion"),
                GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_Start"),
                GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_End"),
-               GS_PREF_I("EmuCore/GS/UserHacks_TriFilter"));
+               GS_PREF_I("EmuCore/GS/UserHacks_TriFilter"),
+               GS_PREF_I("EmuCore/GS/OverrideTextureBarriers"));
   /* Second line, the per-pixel GPU cost knobs. These are separate because a run
    * at 2x internal resolution turned out to be limited by the GPU rather than by
    * the renderer thread -- five windows ended with the presenting thread parked

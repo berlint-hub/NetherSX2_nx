@@ -414,6 +414,12 @@ static const Choice C_cpusprite[] = { {"0 (off)","0"}, {"1 (64 px)","1"}, {"2 (1
 static const Choice C_clutrender[]= { {"Off","0"}, {"Normal","1"}, {"Aggressive","2"} };
 static const Choice C_texinrt[]  = { {"Disabled","0"}, {"Inside target","1"}, {"Merge targets","2"} };
 static const Choice C_gpuclut[]  = { {"Disabled","0"}, {"Exact match","1"}, {"Check inside target","2"} };
+// Upstream binds OverrideTextureBarriers with SettingsWrapBitfieldEx and draws
+// it as a DrawIntListSetting over s_generic_options with -1 as the automatic
+// default, so the stored value is a tristate integer, not a boolean.
+static const Choice C_texbar[]   = { {"Automatic (what the driver reports)","-1"},
+                                     {"Force off (always copy targets)","0"},
+                                     {"Force on (use barriers)","1"} };
 static const Choice C_interp[]   = { {"Nearest","0"}, {"Linear","1"}, {"Cubic","2"}, {"Hermite","3"}, {"Catmull-Rom","4"} };
 static const Choice C_sync[]     = { {"TimeStretch","0"}, {"Async","1"}, {"None","2"} };
 static const Choice C_eecr[]     = { {"50%","-3"}, {"60%","-2"}, {"75%","-1"}, {"100%","0"}, {"130%","1"}, {"180%","2"}, {"300%","3"} };
@@ -512,6 +518,11 @@ static const Opt S_enhance[] = {
    * renderer avoid that copy instead of moving work onto the busiest thread. */
   O_CHOICE("Texture inside RT",   "EmuCore/GS/UserHacks_TextureInsideRt", C_texinrt, "0"),
   O_CHOICE("GPU target CLUT",     "EmuCore/GS/UserHacks_GPUTargetCLUTMode", C_gpuclut, "0"),
+  /* The other side of the same problem: with the barrier capability reported
+   * missing the renderer copies, and at 2x internal resolution those copies are
+   * what the GPU is spending its time on. This knob overrides the report.
+   * Measured, not assumed -- see the help entry for the numbers. */
+  O_CHOICE("Override texture barriers", "EmuCore/GS/OverrideTextureBarriers", C_texbar, "-1"),
   O_RANGE ("Skip draw from",        "EmuCore/GS/UserHacks_SkipDraw_Start", 0, 100, 1, "0"),
   O_RANGE ("Skip draw to",          "EmuCore/GS/UserHacks_SkipDraw_End",   0, 100, 1, "0"),
 };
@@ -760,6 +771,8 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Lets the texture cache reuse the inner part of an earlier framebuffer as an input texture instead of copying that framebuffer into a new texture first. On this driver that copy is what a heavy scene pays for: a Gran Turismo 3 log counted 1.5 vkCmdCopyImage per frame while cruising and 80.6 per frame in the slow stretch, because VK_ARM_rasterization_order_attachment_access is not supported, so a render target that is also sampled has to be duplicated. Inside target is the mild form, Merge targets the aggressive one. A wrong guess shows up as smearing, or as a stale image where an effect should be."},
   {"EmuCore/GS/UserHacks_GPUTargetCLUTMode", "Target copies",
    "When a game reads its colour palette out of a render target, do that lookup on the GPU with special handling instead of pulling the target back through the texture cache. Same reason as Texture inside RT: fewer target copies. Exact match is strict about where the palette sits; Check inside target also looks for it inside a larger target, which catches more cases and mismatches more often, showing up as wrong colours."},
+  {"EmuCore/GS/OverrideTextureBarriers", "Target copies",
+   "Forces whether the renderer believes texture barriers exist instead of using what the driver reports. On this driver the core logs VK_ARM_rasterization_order_attachment_access as NOT supported, so a render target that is also sampled must be copied first. Measured on Gran Turismo 3 at 2x internal resolution: up to 99.8 target copies and 605 pipeline barriers per frame in the slowest stretch, while the presenting thread sat inside vkAcquireNextImageKHR for up to 86% of the window with EE and GS both under 80% -- a GPU limit, not a CPU one. Force on replaces those copies with barriers; because the driver does not guarantee the ordering the extension would, blending and effects may come out wrong, so treat it as an experiment and go back to Automatic if the image breaks. Force off always copies, which is what Automatic already resolves to here. The diagnostic log's copyimg and barrier counts show whether it changed anything."},
   {"EmuCore/GS/UserHacks_SkipDraw_Start", "Draw skipping",
    "Draw calls numbered from this value up to 'Skip draw to' are skipped outright in every frame, counted from the first draw of the frame. Used to drop a fixed post-processing pass that costs more than it is worth. 0 with 0 skips nothing."},
   {"EmuCore/GS/UserHacks_SkipDraw_End", "Draw skipping",
