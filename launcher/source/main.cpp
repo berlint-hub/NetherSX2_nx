@@ -536,6 +536,10 @@ static const Opt S_framegen[] = {
   O_CHOICEG("Target output rate", "Wrapper/LSFGTargetFPS", C_lsfgTarget, "60", "Wrapper/LSFGEnabled", "false"),
   O_CHOICEG("Flow resolution", "Wrapper/LSFGFlowScale", C_lsfgFlow, "0.25", "Wrapper/LSFGEnabled", "false"),
   O_CHOICEG("Performance mode", "Wrapper/LSFGPerformance", C_bool, "true", "Wrapper/LSFGEnabled", "false"),
+  /* Not gated on LSFGEnabled: this publishes frame pacing whether or not frame
+   * generation runs, and only its target-override half interacts with the rows
+   * above. */
+  O_CHOICE("Publish FPS to overlays", "Wrapper/SaltyFPS", C_bool, "false"),
   O_STATUS("Lossless.dll"),
 };
 static const Opt S_audio[] = {
@@ -784,6 +788,8 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Sets the resolution used for optical-flow analysis. Half can retain more motion detail but costs considerably more GPU time and memory; Quarter is recommended on Switch."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
    "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
+  {"Wrapper/SaltyFPS", "Overlay FPS reporting",
+   "Publishes this run's frame pacing into the SaltySD shared block that FPSLocker and Status Monitor read, so both show a real FPS number instead of waiting for a frame, and so a target set there reaches this build. Those overlays never look inside a process: they map a 4 KiB block from the SaltySD sysmodule and take the first entry whose magic matches, normally written by the SaltyNX plugin injected into a retail title. That plugin resolves its hooks through nn::ro::LookupSymbol, which cannot find anything in a homebrew NRO, so without this switch the overlays stay empty here. Needs SaltyNX running (NX Venom ships 2.1.3); with no SaltySD port the switch does nothing and costs nothing. A target set in the overlay replaces 'Target output rate' for frame generation while it is non-zero, but it does not lower the rate below what the game produces, because the cap lives in the core. Reporting yields by itself if the SaltyNX plugin ever does take the block over. Not yet verified on hardware: if the overlay still shows nothing, the diagnostic build's 'saltyfps' startup line says whether a block was found."},
 
   {"SPU2/Mixing/FinalVolume", "Audio output",
    "Sets the final emulator volume sent to the Switch audio output. It does not change the game's internal volume setting."},

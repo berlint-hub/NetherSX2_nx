@@ -275,6 +275,44 @@ silent and total: the row appears in the menu, the value lands in the ini, the
 core never asks for it. FXAA was dead that way from the commit that added it --
 the launcher wrote `EmuCore/GS/FXAA` while the core binds `"fxaa"`.
 
+### FPSLocker and Status Monitor
+
+`Wrapper/SaltyFPS` (launcher: Frame Generation → *Publish FPS to overlays*,
+off by default) makes the run visible to the SaltySD overlays. It is not
+verified on hardware yet; the diagnostic startup line reports what happened.
+
+Those overlays never look inside a process. They connect to the `SaltySD` named
+port, map a 4 KiB page the sysmodule hands out, and scan it for the magic
+`0x465053`, taking the first match; whoever wrote that block owns the FPS
+readout. Normally that is the SaltyNX plugin injected into a retail title, which
+installs its hooks through `nn::ro::LookupSymbol` -- and a homebrew NRO is not a
+`ro` module, so the lookup resolves nothing and the overlays stay on "waiting
+for frame" forever. `source/saltyfps.c` is therefore the plugin here: it reserves
+the block over the same two IPC commands the SaltyNX plugin uses and fills it on
+every present, reproducing `PostFrame()` from SaltyNX step for step.
+
+The layout is the part that fails silently. It is packed and deliberately
+misaligned — `FPSavg` at byte 5, `frameNumber` at 165 — and it exists in two
+generations at once: SaltyNX 2.1.3 reserves 310 bytes while
+`berlint-hub/FPSLocker` still declares 174, so the smaller one has to stay a
+prefix of the larger. A field at the wrong offset still writes a plausible
+number into somebody else's bytes, and neither side reports anything.
+`tools/check_saltyfps_layout.py` compiles the struct on the host, checks all 26
+offsets plus the size against values measured from SaltyNX 2.1.3 (`a3fee3f`,
+the version inside the NX Venom bundle), and then exercises the writer: attach
+with and without the port, adoption of a lower-offset block, first-present
+seeding, 50 fps of ticks reporting 50, the foreign-writer stand-down, and the
+handheld/docked target split. Re-measure the reference after any SaltyNX
+upgrade.
+
+What it buys is visibility and a target you can change mid-game, not speed: a
+target set in the overlay replaces *Target output rate* for frame generation
+while it is non-zero. It cannot lower the frame rate below what the game
+produces, because that cap lives in the core. Two safety notes: the module never
+touches the fields an overlay owns (`FPSlocked`, `SetBuffers`, `displaySync`),
+and if the SaltyNX plugin ever does take the block over, the poll notices
+`frameNumber` moving without us and stops writing rather than fighting it.
+
 ### How to build
 
 Install the devkitPro Switch toolchain and portlibs:
