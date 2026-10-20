@@ -546,6 +546,11 @@ static const Opt S_optimize[] = {
    * steal is a length-preserving binary patch this port applies to the core. */
   O_CHOICE("Thread pinning",   "Wrapper/ThreadPinning", C_pin, "role"),
   O_CHOICE("VU cycle steal",   "EmuCore/Speedhacks/vuCycleSteal", C_vusteal, "0"),
+  /* Not gated on LSFGEnabled, unlike Mode and Target output rate above in Frame
+   * Generation: this publishes frame pacing whether or not generation runs, and
+   * only its target-override half interacts with those rows. It lives here
+   * because it is one of ours, not an upstream control. */
+  O_CHOICE("Publish FPS to overlays", "Wrapper/SaltyFPS", C_bool, "false"),
 };
 
 static const Opt S_framegen[] = {
@@ -805,6 +810,10 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Sets the resolution used for optical-flow analysis. Half can retain more motion detail but costs considerably more GPU time and memory; Quarter is recommended on Switch."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
    "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
+  {"Wrapper/SaltyFPS", "Overlay FPS reporting",
+   "Publishes this run's frame pacing into the SaltySD shared block that FPSLocker and Status Monitor read. Those overlays never look inside a process: they map a 4 KiB page from the SaltySD sysmodule and take the first entry whose magic matches, normally written by the SaltyNX plugin injected into a retail title. That plugin resolves its hooks through nn::ro::LookupSymbol, which finds nothing in a homebrew NRO, so without this switch FPSLocker reports 'NX-FPS is not running' -- that exact message means it reached the shared page and found no block in it. Needs SaltyNX running; NX Venom ships 2.1.3, whose block layout this build reproduces byte for byte. A target set in the overlay replaces 'Target output rate' while non-zero, and generation never aims above the panel's actual rate, so Display Sync at 50 Hz gives a PAL game 1:1 presentation instead of 50 fps spread across 60 Hz. It cannot lower the rate below what the game produces, because that cap lives in the core. If the SaltyNX plugin ever does take the block over, reporting yields by itself. The diagnostic 'saltyfps' startup line reports state, block offset, refresh rate and target."},
+
+
 
   {"SPU2/Mixing/FinalVolume", "Audio output",
    "Sets the final emulator volume sent to the Switch audio output. It does not change the game's internal volume setting."},
