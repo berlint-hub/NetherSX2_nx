@@ -275,15 +275,34 @@ static bool saltyfps_attach(void) {
      * code back means "not visible", a different code means "visible but full".
      * Done once, on the first failure, and touches no real port. */
     if (g_attempts == 1) {
+      /* OutOfResource on a port that demonstrably exists still has two readings,
+       * and the first calibration pass could not separate them:
+       *   (a) the port's single session slot is held by somebody else, or
+       *   (b) THIS process has no room left for a session handle at all -- the
+       *       upstream comment next to svcManageNamedPort(..., "SaltySD", 1)
+       *       guesses at exactly this: "0 reslimit handle related?".
+       * A second port registered by the same sysmodule, also with
+       * max_sessions = 1, decides it: if InjectServ opens, this process can
+       * create sessions and (a) is the answer; if it fails with the same code,
+       * (b) is, and no amount of retrying will ever help. */
       Handle dummy = INVALID_HANDLE;
       const Result drc = svcConnectToNamedPort(&dummy, "NxNull");
-      corelog_log(CORELOG_INFO, "Wrapper",
-                  "saltyfps: calibration -- a port that cannot exist returns "
-                  "rc=0x%x, SaltySD returns rc=0x%x => %s",
-                  drc, rc,
-                  drc == rc ? "SaltySD is NOT VISIBLE to this process"
-                            : "SaltySD IS visible, its one session slot is TAKEN");
       if (R_SUCCEEDED(drc)) svcCloseHandle(dummy);
+
+      Handle inj = INVALID_HANDLE;
+      const Result irc = svcConnectToNamedPort(&inj, "InjectServ");
+      const int inj_ok = R_SUCCEEDED(irc);
+      if (inj_ok) svcCloseHandle(inj);   /* held for microseconds, then released */
+
+      corelog_log(CORELOG_INFO, "Wrapper",
+                  "saltyfps: calibration -- nonexistent port rc=0x%x, "
+                  "InjectServ rc=0x%x (%s), SaltySD rc=0x%x => %s",
+                  drc, irc, inj_ok ? "opened and closed" : "refused", rc,
+                  inj_ok
+                    ? "this process CAN open sessions, so the SaltySD slot itself "
+                      "is HELD by another client"
+                    : "this process CANNOT open a session on ANY sysmodule port "
+                      "-- reslimit, not a busy slot; retrying can never succeed");
     }
     return false;
   }
