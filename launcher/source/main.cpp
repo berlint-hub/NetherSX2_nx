@@ -445,7 +445,7 @@ static const Choice C_launcherTheme[] = { {"PS2","animated"}, {"Classic","classi
 static const Choice C_gridColumns[] = { {"3","3"}, {"4","4"}, {"5","5"}, {"6","6"}, {"7","7"}, {"8","8"} };
 static const Choice C_gridRows[] = { {"1","1"}, {"2","2"}, {"3","3"} };
 
-enum { SCR_GRAPHICS, SCR_ENHANCE, SCR_FRAMEGEN, SCR_AUDIO, SCR_EMU, SCR_ADVANCED, SCR_GAMEFIXES, SCR_FRAMERATE, SCR_NETWORK, SCR_CONTROLLER, SCR_COUNT };
+enum { SCR_GRAPHICS, SCR_ENHANCE, SCR_FRAMEGEN, SCR_AUDIO, SCR_EMU, SCR_ADVANCED, SCR_GAMEFIXES, SCR_FRAMERATE, SCR_NETWORK, SCR_CONTROLLER, SCR_OPTIMIZE, SCR_COUNT };
 
 static const Opt S_graphics[] = {
   O_CHOICE("Resolution scale", "EmuCore/GS/upscale_multiplier", C_upscale, "1"),
@@ -473,7 +473,6 @@ static const Opt S_enhance[] = {
   O_CHOICE("GPU palette conv", "EmuCore/GS/paltex", C_bool, "false"),
   O_CHOICE("Anti-blur",        "EmuCore/GS/pcrtc_antiblur", C_bool, "true"),
   O_CHOICE("CRT/TV shader",    "EmuCore/GS/TVShader", C_tvshader, "0"),
-  O_CHOICE("FXAA",             "EmuCore/GS/fxaa", C_bool, "false"),
   O_CHOICE("CAS sharpening",   "EmuCore/GS/CASMode", C_cas, "0"),
   O_RANGEG("CAS strength",     "EmuCore/GS/CASSharpness", 0, 100, 5, "50", "EmuCore/GS/CASMode", "0"),
   O_CHOICE("Shade boost",      "EmuCore/GS/ShadeBoost", C_bool, "false"),
@@ -488,6 +487,23 @@ static const Opt S_enhance[] = {
    * Gran Turismo 3 logs this default was chosen from and why it is not a clean
    * A/B result. */
   O_CHOICE("HW download mode", "EmuCore/GS/HWDownloadMode", C_hwdl, "2"),
+  O_RANGE ("Skip draw from",        "EmuCore/GS/UserHacks_SkipDraw_Start", 0, 100, 1, "0"),
+  O_RANGE ("Skip draw to",          "EmuCore/GS/UserHacks_SkipDraw_End",   0, 100, 1, "0"),
+  /* Everything this port adds on top of the upstream menu lives behind here, so
+   * the rows that differ from stock NetherSX2 are in one place instead of being
+   * interleaved with upstream controls. */
+  O_SUB   ("Optimization...",    SCR_OPTIMIZE),
+};
+/* Rows this port adds on top of upstream NetherSX2, grouped so that a user can
+ * tell at a glance which knobs are ours and which came with the original menu.
+ * Moved out of S_enhance and S_emu verbatim, comments included: the measurements
+ * recorded in them are the reason these rows exist at all.
+ *
+ * FXAA is the one row here that is a visual toggle rather than a performance
+ * knob; it is included because it is one of the keys this port exposed, and the
+ * key spelling was itself a bug once -- the launcher wrote EmuCore/GS/FXAA while
+ * the core binds "fxaa", so the row was dead for eleven commits. */
+static const Opt S_optimize[] = {
   /* GS hardware hacks -- the core's own "manual HW fixes" family. A GPU-bound
    * scene has no CPU-side fix, and these are the knobs that move work off the
    * GPU or stop the renderer waiting on it. Every key below was checked against
@@ -523,9 +539,15 @@ static const Opt S_enhance[] = {
    * what the GPU is spending its time on. This knob overrides the report.
    * Measured, not assumed -- see the help entry for the numbers. */
   O_CHOICE("Override texture barriers", "EmuCore/GS/OverrideTextureBarriers", C_texbar, "-1"),
-  O_RANGE ("Skip draw from",        "EmuCore/GS/UserHacks_SkipDraw_Start", 0, 100, 1, "0"),
-  O_RANGE ("Skip draw to",          "EmuCore/GS/UserHacks_SkipDraw_End",   0, 100, 1, "0"),
+  O_CHOICE("FXAA",             "EmuCore/GS/fxaa", C_bool, "false"),
+  /* Both of these came out of Emulation / System, where they sat next to the
+   * upstream EE/VU speed hacks. They are here because they are ours, not the
+   * core's: thread pinning is a wrapper-side CPU affinity policy, and VU cycle
+   * steal is a length-preserving binary patch this port applies to the core. */
+  O_CHOICE("Thread pinning",   "Wrapper/ThreadPinning", C_pin, "role"),
+  O_CHOICE("VU cycle steal",   "EmuCore/Speedhacks/vuCycleSteal", C_vusteal, "0"),
 };
+
 static const Opt S_framegen[] = {
   O_CHOICE("Frame generation", "Wrapper/LSFGEnabled", C_bool, "false"),
   /* Both gated on LSFGEnabled like their siblings rather than on LSFGMode:
@@ -547,12 +569,10 @@ static const Opt S_audio[] = {
 };
 static const Opt S_emu[] = {
   O_STATUSK("Allowed CPU cores", "cpu-cores"),
-  O_CHOICE("Thread pinning",   "Wrapper/ThreadPinning", C_pin, "role"),
   O_CHOICE("Fastmem",          "Wrapper/FastmemMode", C_fastmem, "hybrid"),
   O_CHOICE("System language",  "Wrapper/SystemLanguage", C_syslang, "auto"),
   O_CHOICE("EE cycle rate",    "EmuCore/Speedhacks/EECycleRate", C_eecr, "0"),
   O_CHOICE("EE cycle skip",    "EmuCore/Speedhacks/EECycleSkip", C_eecs, "0"),
-  O_CHOICE("VU cycle steal",   "EmuCore/Speedhacks/vuCycleSteal", C_vusteal, "0"),
   O_CHOICE("Fast boot",        "Wrapper/FastBoot", C_bool, "true"),
   O_CHOICE("MTVU (multi-VU)",  "EmuCore/Speedhacks/vuThread", C_bool, "true"),
   O_CHOICE("Instant VU1",      "EmuCore/Speedhacks/vu1Instant", C_bool, "true"),
@@ -666,6 +686,7 @@ static const Screen g_screens[SCR_COUNT] = {
   { "Frame Rate Control",  S_framerate,  (int)(sizeof(S_framerate)/sizeof(Opt)),  false },
   { "Network (experimental)", S_network, (int)(sizeof(S_network)/sizeof(Opt)),    false },
   { "Controller",          S_controller, (int)(sizeof(S_controller)/sizeof(Opt)), true  },
+  { "Optimization",        S_optimize,   (int)(sizeof(S_optimize)/sizeof(Opt)),   false },
 };
 
 struct SettingHelpEntry {
@@ -979,6 +1000,8 @@ static SettingHelpInfo settingHelpFor(const Opt &option) {
       return {"Settings group","Contains advanced GS accuracy controls, visual enhancements, and game-specific rendering workarounds. Higher accuracy often requires more GPU performance."};
     if(option.sub==SCR_FRAMERATE)
       return {"Settings group","Contains the frame limiter, normal/turbo/slow-motion targets, and the base NTSC/PAL video rates. Changing base video timing can affect game logic."};
+    if(option.sub==SCR_OPTIMIZE)
+      return {"Settings group","Everything this port adds on top of the upstream NetherSX2 menu, so the rows that differ from stock are in one place. These trade correctness for speed; each help card records the hardware measurement behind it."};
   }
   if(option.type==OT_STATUS)
     return {"Required component","Shows whether Lossless.dll is installed in NetherSX2_nx's fixed frame-generation folder. LSFG options cannot be enabled while it is missing."};
@@ -4739,6 +4762,8 @@ static const char *settingsScreenDescription(int screen) {
       return "Configures the experimental PS2 network-adapter path and an optional custom DNS server for compatible games or replacement services.";
     case SCR_CONTROLLER:
       return "Configures controller ports, vibration, PS2-to-Switch button and stick mappings, analog deadzone, and the multi-button turbo-speed hotkey.";
+    case SCR_OPTIMIZE:
+      return "Every row this port adds on top of upstream NetherSX2, in one place: the GS hardware hacks, the readback and texture-barrier knobs, FXAA, thread pinning and VU cycle steal. These trade correctness for speed, and each one records the hardware measurement it came from in its help card.";
     default:
       return "Opens this group of emulator settings.";
   }
