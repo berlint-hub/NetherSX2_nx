@@ -148,6 +148,7 @@ enum {
 
 static int g_state = ST_INIT;
 static int g_attempts;
+static Result g_last_rc;      /* why the last attach attempt failed */
 
 static Handle g_port = INVALID_HANDLE;
 static SharedMemory g_shm;
@@ -169,7 +170,7 @@ static uint64_t g_expected_frame;    /* frameNumber as we last left it */
 static uint64_t g_present_count;
 static uint8_t  g_pending_buffers;   /* swapchain image count, set before attach */
 
-#define SALTYFPS_MAX_ATTEMPTS 8
+#define SALTYFPS_MAX_ATTEMPTS 64
 #define SALTYFPS_FOREIGN_CHECK_MASK 127u
 
 /* ------------------------------------------------------------------ IPC ---- */
@@ -248,12 +249,25 @@ static bool saltyfps_attach(void) {
 
   Result rc = svcConnectToNamedPort(&g_port, "SaltySD");
   if (R_FAILED(rc)) {
-    /* No SaltyNX on this console. Not an error worth retrying forever, but the
-     * sysmodule can also come up late, so the caller keeps trying up to the
-     * attempt cap. */
+    /* Three very different failures all land here, and guessing between them
+     * costs a hardware round trip each time, so the code is logged:
+     *   - the port does not exist      -> SaltyNX is not running at all
+     *   - the port exists but is busy  -> saltysd_proc registers it with
+     *     svcManageNamedPort(&saltyport, "SaltySD", 1), i.e. max_sessions = 1
+     *     ("For some reason, we only have one session maximum" upstream), and
+     *     saltysd_bootstrap.elf connects to it from inside the application
+     *     process, so an injected bootstrap holds the only slot
+     *   - access denied                -> a homebrew process may not reach it
+     * The first is terminal, the second is worth retrying, the third is not
+     * ours to fix. */
     g_port = INVALID_HANDLE;
+    g_last_rc = rc;
+    corelog_log(CORELOG_WARN, "Wrapper",
+                "saltyfps: svcConnectToNamedPort(\"SaltySD\") failed rc=0x%x "
+                "(attempt %d of %d)", rc, g_attempts, SALTYFPS_MAX_ATTEMPTS);
     return false;
   }
+  g_last_rc = 0;
 
   uint64_t offset = 0;
   rc = saltyfps_cmd(IPC_CMD_CHECK_SHARED_MEMORY, sizeof(struct saltyfps_block),
@@ -364,7 +378,7 @@ void saltyfps_present(void) {
     if (g_state != ST_INIT) return;
     /* The sysmodule may come up after we do. Retrying on a present costs one
      * failed svcConnectToNamedPort, so space the attempts out. */
-    if ((g_present_count++ & 255u) != 0u) return;
+    if ((g_present_count++ & 31u) != 0u) return;
     if (!prefs_get_bool("Wrapper/SaltyFPS", false)) { g_state = ST_ABSENT; return; }
     if (!saltyfps_attach()) return;
   }
@@ -475,7 +489,8 @@ void saltyfps_status(char *out, size_t out_size) {
       g_state == ST_FOREIGN ? "foreign-writer" :
       g_state == ST_GAVEUP  ? "unavailable" : "init";
   if (g_state != ST_READY && g_state != ST_FOREIGN) {
-    snprintf(out, out_size, "state=%s attempts=%d", state, g_attempts);
+    snprintf(out, out_size, "state=%s attempts=%d/%d rc=0x%x", state,
+             g_attempts, SALTYFPS_MAX_ATTEMPTS, (unsigned)g_last_rc);
     return;
   }
   snprintf(out, out_size,

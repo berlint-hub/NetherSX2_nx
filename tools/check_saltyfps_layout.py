@@ -454,6 +454,24 @@ static void case_target_respects_panel(void) {
         "the two disagree, which is the case the clamp in vk.c must resolve");
 }
 
+static void case_failure_is_diagnosable(void) {
+  printf("case: a failed attach reports WHY, not just that it failed\n");
+  platform_reset();
+  g_port_available = 0;
+  check(!saltyfps_init(), "init fails");
+  /* svcManageNamedPort registers "SaltySD" with max_sessions = 1, and an
+   * injected saltysd_bootstrap connects to it from inside the application
+   * process, so "port busy", "port absent" and "access denied" all arrive here
+   * looking identical. The Result code is the only thing that separates them,
+   * which is why it has to reach both the log and the status line. */
+  check(g_log_calls > 0, "the failure was logged to the core console");
+  char buf[256] = {0};
+  saltyfps_status(buf, sizeof(buf));
+  check(strstr(buf, "state=init") != NULL, "state stays init, so retry is still possible");
+  check(strstr(buf, "attempts=1/64") != NULL, "reports attempts against the cap");
+  check(strstr(buf, "rc=0x201") != NULL, "reports the actual Result code, not 0");
+}
+
 static void case_status_line(void) {
   printf("case: status line is populated for the diagnostic echo\n");
   platform_reset();
@@ -481,6 +499,7 @@ int main(void) {
   case_buffers();
   case_refresh_rate();
   case_target_respects_panel();
+  case_failure_is_diagnosable();
   case_status_line();
   if (g_fail) { printf("%d check(s) failed\n", g_fail); return 1; }
   printf("all saltyfps cases passed\n");
