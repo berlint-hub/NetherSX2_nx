@@ -388,7 +388,7 @@ typedef struct {
   u64 last_ticks;
 } CpuTimeSlot;
 
-static CpuTimeSlot cpu_time_slots[] = {
+static CpuTimeSlot cpu_time_slots[PTHR_CPU_ROLES] = {
   { "EE",   INVALID_HANDLE, 0 },
   { "GS",   INVALID_HANDLE, 0 },
   { "MTVU", INVALID_HANDLE, 0 },
@@ -454,6 +454,54 @@ int pthr_cpu_time_report(char *buf, size_t len) {
   mutexUnlock(&cpu_time_lock);
   return any;
 }
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+void pthr_cpu_time_sample(CpuTimeSample *out) {
+  if (!out)
+    return;
+  for (unsigned i = 0; i < PTHR_CPU_ROLES; ++i) {
+    out->ticks[i] = 0;
+    out->have[i] = 0;
+  }
+  mutexLock(&cpu_time_lock);
+  for (unsigned i = 0; i < PTHR_CPU_ROLES; ++i) {
+    CpuTimeSlot *s = &cpu_time_slots[i];
+    if (s->handle == INVALID_HANDLE)
+      continue;
+    u64 ticks = 0;
+    if (R_FAILED(cpu_time_ticks(s->handle, &ticks)))
+      continue;
+    out->ticks[i] = ticks;
+    out->have[i] = 1;
+  }
+  mutexUnlock(&cpu_time_lock);
+}
+
+int pthr_cpu_time_ms(const CpuTimeSample *from, const CpuTimeSample *to,
+                     char *buf, size_t len) {
+  if (!from || !to || !buf || !len)
+    return 0;
+  int n = 0, any = 0;
+  for (unsigned i = 0; i < PTHR_CPU_ROLES; ++i) {
+    const char *sep = i ? " " : "";
+    // No lock: only the static label is read here, and both samples were taken
+    // by pthr_cpu_time_sample() under it.
+    if (!from->have[i] || !to->have[i] || to->ticks[i] < from->ticks[i]) {
+      n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, "%s%s -",
+                    sep, cpu_time_slots[i].label);
+      continue;
+    }
+    any = 1;
+    n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, "%s%s %.1f",
+                  sep, cpu_time_slots[i].label,
+                  (double)armTicksToNs(to->ticks[i] - from->ticks[i]) / 1e6);
+  }
+  if (any)
+    n += snprintf(buf + n, n < (int)len ? len - (size_t)n : 0, " ms");
+  return any;
+}
+#endif
+
 static __thread unsigned long long tls_yield_count;
 static unsigned long long g_yield_total;
 

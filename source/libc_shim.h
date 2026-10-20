@@ -152,6 +152,24 @@ typedef struct {
 } FastmemStats;
 void fastmem_stats_snapshot(FastmemStats *out);
 
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+// Cumulative wall time the core spent blocked in file reads. The GPU counters in
+// vk.c cover the Vulkan side of a stall and pthr.c covers the three heavy CPU
+// roles, which leaves one plausible sink for a single long frame unmeasured:
+// synchronous SD-card access. GT3 streams from its ISO while racing, and a read
+// that blocks for tens of milliseconds shows up as a hitched frame with no
+// thread above ~70% and no Vulkan call taking any time at all -- exactly the
+// shape of the 82.4 ms worst frame in the e0e44b4 hardware log. Counts only the
+// core's own reads (its imports are bound through this file); the statically
+// linked NVK/Mesa driver reaches newlib directly and is NOT included.
+typedef struct {
+  unsigned long long calls;  // read/fread calls that reached the filesystem
+  unsigned long long bytes;  // bytes they returned
+  unsigned long long ns;     // wall time inside them, summed
+} FileIoStats;
+void fileio_stats_snapshot(FileIoStats *out);
+#endif
+
 int jit_redirect_lookup(uintptr_t address, uintptr_t *redirected);
 
 // JIT-capable anonymous mmap (PS2 recompiler RX memory via process code memory)

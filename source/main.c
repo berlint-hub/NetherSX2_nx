@@ -2038,6 +2038,51 @@ int main(void) {
                  (unsigned long long)(mem_total >> 20), (int)R_FAILED(rc_mem));
   }
 #endif
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  /* Which settings this run actually used, read back from the same store the
+   * core reads: the launcher writes nethersx2.ini and prefs.c serves it to the
+   * core's SharedPreferences shim. Until now a hardware log had to be decoded
+   * from the core's own "[Unsafe Settings]" warnings, which name a setting only
+   * when it deviates from a default and never print a value -- "CRC Fix Level is
+   * not set to default" does not say whether that is Minimum or Aggressive, and
+   * a setting left at a non-default value that the core does not consider unsafe
+   * is not mentioned at all. With this line the settings that produced a
+   * measurement are part of the measurement, which is what makes two logs
+   * comparable instead of merely both interesting.
+   *
+   * -1 means the key is absent from the ini, so the core's own default applies.
+   * Otherwise the values are the raw ones the launcher writes: upscale is a
+   * multiplier (0.50 = half native, 1.00 = native), crc -1/0/1/2/3/4 =
+   * Auto/None/Minimum/Partial/Full/Aggressive, hwdl 0/1/2/3 = Accurate/Disable
+   * readbacks/Unsynchronized/Disabled, texinrt 0/1/2 = Disabled/Inside target/
+   * Merge targets, gpuclut 0/1/2 = Disabled/Exact match/Check inside target,
+   * cpusprite 0..10, cpuclut 0..2, trifilter -1 = automatic. */
+#define GS_PREF_I(k) (prefs_contains(k) ? prefs_get_int((k), -1) : -1)
+#define GS_PREF_B(k) (prefs_contains(k) ? (prefs_get_bool((k), false) ? 1 : 0) : -1)
+  vk_diag_note("settings upscale=%.2f crc=%d hwdl=%d paltex=%d texinrt=%d gpuclut=%d"
+               " nodepth=%d nopartial=%d estregion=%d unsafe=%d"
+               " cpusprite=%d cpuclut=%d cpufb=%d skipdraw=%d/%d trifilter=%d",
+               prefs_contains("EmuCore/GS/upscale_multiplier")
+                   ? prefs_get_float("EmuCore/GS/upscale_multiplier", -1.0f)
+                   : -1.0f,
+               GS_PREF_I("EmuCore/GS/CRCHackLevel"),
+               GS_PREF_I("EmuCore/GS/HWDownloadMode"),
+               GS_PREF_B("EmuCore/GS/paltex"),
+               GS_PREF_I("EmuCore/GS/UserHacks_TextureInsideRt"),
+               GS_PREF_I("EmuCore/GS/UserHacks_GPUTargetCLUTMode"),
+               GS_PREF_B("EmuCore/GS/UserHacks_DisableDepthSupport"),
+               GS_PREF_B("EmuCore/GS/UserHacks_DisablePartialInvalidation"),
+               GS_PREF_B("EmuCore/GS/UserHacks_EstimateTextureRegion"),
+               GS_PREF_B("EmuCore/GS/UserHacks_Disable_Safe_Features"),
+               GS_PREF_I("EmuCore/GS/UserHacks_CPUSpriteRenderBW"),
+               GS_PREF_I("EmuCore/GS/UserHacks_CPUCLUTRender"),
+               GS_PREF_B("EmuCore/GS/UserHacks_CPU_FB_Conversion"),
+               GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_Start"),
+               GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_End"),
+               GS_PREF_I("EmuCore/GS/UserHacks_TriFilter"));
+#undef GS_PREF_I
+#undef GS_PREF_B
+#endif
 
   check_syscalls();
   check_data(g_core_so, g_disc_path);

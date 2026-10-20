@@ -87,11 +87,34 @@ int pthr_sched_yield(void);
 
 void pthr_ensure_fake_tls(void);
 
+// Number of heavy roles whose CPU time is tracked (EE, GS, MTVU). Outside the
+// diagnostic guard because the slot table itself is always compiled.
+#define PTHR_CPU_ROLES 3
+
 // Formats "EE 97% GS 61% MTVU 95%": scheduled CPU time of the three heavy
 // roles as a share of wall time since the previous call, from
 // svcGetInfo(InfoType_ThreadTickCount). "-" = thread has not named itself yet,
 // "?" = its handle no longer answers (thread exited). Returns 0 if no role is
 // registered at all. Meant for the perf window line in the Vulkan diag log.
 int pthr_cpu_time_report(char *buf, size_t len);
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+// Per-frame sampling of the same three roles, for the hitch line in vk.c.
+// pthr_cpu_time_report() consumes its own baselines (it is a rate), which is
+// wrong for a single frame: a 82 ms frame is 1.4% of a 6 s window, so the
+// window percentage cannot say whether that frame was CPU-bound at all. These
+// two read absolute tick counts and leave every baseline alone, so both can be
+// used from the same window without disturbing each other.
+typedef struct {
+  uint64_t ticks[PTHR_CPU_ROLES];  // absolute ThreadTickCount, 0 when unavailable
+  int      have[PTHR_CPU_ROLES];   // role registered and its handle answered
+} CpuTimeSample;
+
+void pthr_cpu_time_sample(CpuTimeSample *out);
+// Formats "EE 51.2 GS 12.0 MTVU 8.4 ms" for the tick delta between two samples.
+// Returns 0 when no role produced a usable delta.
+int pthr_cpu_time_ms(const CpuTimeSample *from, const CpuTimeSample *to,
+                     char *buf, size_t len);
+#endif
 
 #endif

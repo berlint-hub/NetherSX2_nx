@@ -506,6 +506,124 @@ static unsigned long long gpu_pipe_calls, gpu_pipe_ns;
 static unsigned long long gpu_barrier_calls, gpu_copy2buf_calls;
 static unsigned long long gpu_copyimg_calls, gpu_blit_calls;
 
+/* Per-frame hitch attribution.
+ *
+ * Everything above is a per-window total and a window is 300 frames / ~6 s, so a
+ * single long frame is invisible in it: the worst frame of the GT3 run measured
+ * on build e0e44b4 was 82.4 ms (1% low 22.65 fps) inside a window reporting
+ * EE 68% / GS 58% / pipelines 3.1 ms total / fence 8.1 ms total / 13046 copies.
+ * 82.4 ms is 1.4% of that window, so no percentage in it could have shown the
+ * hitch even if the frame had been 100% CPU-bound on one thread. The window
+ * lines answer "what is this stretch of racing limited by"; they structurally
+ * cannot answer "where did that one stuttering frame go".
+ *
+ * So the same quantities are also differenced per frame here and the longest
+ * frame of each window is dumped with its own breakdown. That line separates the
+ * four sinks a frame can disappear into: a Vulkan call that blocked, a file read
+ * that blocked (FileIoStats), CPU time on one of the three heavy roles
+ * (CpuTimeSample), or none of those -- which is itself the answer, because it
+ * leaves the driver's own threads and the core's unnamed ones.
+ *
+ * The frame boundary is a present, which this shim already sees exactly once.
+ * PERF_HITCH_NS is the reporting threshold: a PAL frame is 20 ms, so 40 ms is two
+ * dropped frames, the shortest hitch that is reliably visible while racing. */
+#define PERF_HITCH_NS UINT64_C(40000000)  /* 40 ms */
+
+/* Wall time inside the calls that can block the presenting thread. acquire and
+ * submit accumulate within the frame they are called in. present is measured in
+ * vkQueuePresentKHR_native, which for frame N runs *after* perf_observe_present
+ * of frame N, so at attribution time frame_pres_ns still holds the previous
+ * present's duration -- which is exactly the part of the interval just measured
+ * that the present call consumed. (The LSFG bridge path bypasses
+ * vkQueuePresentKHR_native, so with frame generation enabled this term reads 0;
+ * every hardware run so far has lsfg off.) */
+static uint64_t frame_acq_ns, frame_sub_ns, frame_pres_ns;
+
+/* Window counters as of the previous present, so a frame's own share can be
+ * differenced out of them. Reset alongside the counters in perf_report(), which
+ * zeroes them at the end of every window. */
+static unsigned long long prev_barrier, prev_copyimg, prev_copy2buf, prev_blit;
+static unsigned long long prev_fence_calls, prev_idle_calls, prev_pipe_calls;
+static uint64_t prev_fence_ns, prev_idle_ns, prev_pipe_ns;
+/* Absolute (never reset by anyone), so these are kept as sample pairs. */
+static FileIoStats prev_io;
+static CpuTimeSample prev_cpu;
+
+/* The longest frame of the current window and what it consisted of. */
+static uint64_t hitch_ns;
+static unsigned hitch_count;
+static uint64_t hitch_acq_ns, hitch_sub_ns, hitch_pres_ns;
+static unsigned long long hitch_barrier, hitch_copyimg, hitch_copy2buf, hitch_blit;
+static unsigned long long hitch_fence_calls, hitch_idle_calls, hitch_pipe_calls;
+static uint64_t hitch_fence_ns, hitch_idle_ns, hitch_pipe_ns;
+static FileIoStats hitch_io_from, hitch_io_to;
+static CpuTimeSample hitch_cpu_from, hitch_cpu_to;
+static int hitch_have;
+
+static void perf_note_frame(uint64_t interval) {
+  const uint64_t acq = frame_acq_ns, sub = frame_sub_ns, pres = frame_pres_ns;
+  frame_acq_ns = frame_sub_ns = frame_pres_ns = 0;
+
+  const unsigned long long d_barrier  = gpu_barrier_calls   - prev_barrier;
+  const unsigned long long d_copyimg  = gpu_copyimg_calls   - prev_copyimg;
+  const unsigned long long d_copy2buf = gpu_copy2buf_calls  - prev_copy2buf;
+  const unsigned long long d_blit     = gpu_blit_calls      - prev_blit;
+  const unsigned long long d_fcall    = gpu_fence_calls     - prev_fence_calls;
+  const unsigned long long d_icall    = gpu_idle_calls      - prev_idle_calls;
+  const unsigned long long d_pcall    = gpu_pipe_calls      - prev_pipe_calls;
+  const uint64_t d_fence_ns = gpu_fence_ns - prev_fence_ns;
+  const uint64_t d_idle_ns  = gpu_idle_ns  - prev_idle_ns;
+  const uint64_t d_pipe_ns  = gpu_pipe_ns  - prev_pipe_ns;
+  prev_barrier     = gpu_barrier_calls;
+  prev_copyimg     = gpu_copyimg_calls;
+  prev_copy2buf    = gpu_copy2buf_calls;
+  prev_blit        = gpu_blit_calls;
+  prev_fence_calls = gpu_fence_calls;
+  prev_idle_calls  = gpu_idle_calls;
+  prev_pipe_calls  = gpu_pipe_calls;
+  prev_fence_ns    = gpu_fence_ns;
+  prev_idle_ns     = gpu_idle_ns;
+  prev_pipe_ns     = gpu_pipe_ns;
+
+  if (interval < PERF_HITCH_NS) {
+    /* Still advance the two absolute baselines, so a frame that does hitch is
+     * differenced against its own immediate predecessor and not against the
+     * last hitch. */
+    fileio_stats_snapshot(&prev_io);
+    pthr_cpu_time_sample(&prev_cpu);
+    return;
+  }
+
+  ++hitch_count;
+  FileIoStats io_now;
+  CpuTimeSample cpu_now;
+  fileio_stats_snapshot(&io_now);
+  pthr_cpu_time_sample(&cpu_now);
+  if (interval > hitch_ns) {
+    hitch_ns          = interval;
+    hitch_acq_ns      = acq;
+    hitch_sub_ns      = sub;
+    hitch_pres_ns     = pres;
+    hitch_barrier     = d_barrier;
+    hitch_copyimg     = d_copyimg;
+    hitch_copy2buf    = d_copy2buf;
+    hitch_blit        = d_blit;
+    hitch_fence_calls = d_fcall;
+    hitch_idle_calls  = d_icall;
+    hitch_pipe_calls  = d_pcall;
+    hitch_fence_ns    = d_fence_ns;
+    hitch_idle_ns     = d_idle_ns;
+    hitch_pipe_ns     = d_pipe_ns;
+    hitch_io_from     = prev_io;
+    hitch_io_to       = io_now;
+    hitch_cpu_from    = prev_cpu;
+    hitch_cpu_to      = cpu_now;
+    hitch_have        = 1;
+  }
+  prev_io  = io_now;
+  prev_cpu = cpu_now;
+}
+
 static void gpu_note_time(unsigned long long *calls, unsigned long long *ns,
                           uint64_t t0, uint64_t t1) {
   __atomic_fetch_add(calls, 1, __ATOMIC_RELAXED);
@@ -713,11 +831,45 @@ static void perf_report(uint64_t now) {
                  gpu_copyimg_calls, gpu_blit_calls);
   }
 
+  /* Fourth line of the same window, emitted only when at least one frame was
+   * long enough to be visible: what the longest such frame was made of. */
+  if (hitch_have) {
+    char hcpu[96];
+    if (!pthr_cpu_time_ms(&hitch_cpu_from, &hitch_cpu_to, hcpu, sizeof hcpu))
+      snprintf(hcpu, sizeof hcpu, "no role registered");
+    const double io_ms = (double)(hitch_io_to.ns - hitch_io_from.ns) / 1e6;
+    vk_diag_note("perf: hitch %.1f ms (%u frame(s) over %u ms this window)"
+                 " | vk acquire %.1f submit %.1f present %.1f ms"
+                 " | fence %llu x %.1f idle %llu x %.1f pipe %llu x %.1f ms"
+                 " | cmds barrier %llu copyimg %llu copy2buf %llu blit %llu"
+                 " | cpu %s"
+                 " | io read %llu x %llu KiB blocked %.1f ms",
+                 (double)hitch_ns / 1e6, hitch_count,
+                 (unsigned)(PERF_HITCH_NS / UINT64_C(1000000)),
+                 (double)hitch_acq_ns / 1e6, (double)hitch_sub_ns / 1e6,
+                 (double)hitch_pres_ns / 1e6,
+                 hitch_fence_calls, (double)hitch_fence_ns / 1e6,
+                 hitch_idle_calls, (double)hitch_idle_ns / 1e6,
+                 hitch_pipe_calls, (double)hitch_pipe_ns / 1e6,
+                 hitch_barrier, hitch_copyimg, hitch_copy2buf, hitch_blit,
+                 hcpu,
+                 hitch_io_to.calls - hitch_io_from.calls,
+                 (hitch_io_to.bytes - hitch_io_from.bytes) >> 10, io_ms);
+  }
+
   gpu_fence_calls = gpu_fence_ns = gpu_fence_polls = 0;
   gpu_idle_calls = gpu_idle_ns = 0;
   gpu_pipe_calls = gpu_pipe_ns = 0;
   gpu_barrier_calls = gpu_copy2buf_calls = 0;
   gpu_copyimg_calls = gpu_blit_calls = 0;
+  /* The frame deltas are computed against these, so they must follow the
+   * counters they mirror back to zero or the next frame's delta wraps. */
+  prev_barrier = prev_copyimg = prev_copy2buf = prev_blit = 0;
+  prev_fence_calls = prev_idle_calls = prev_pipe_calls = 0;
+  prev_fence_ns = prev_idle_ns = prev_pipe_ns = 0;
+  hitch_ns = 0;
+  hitch_count = 0;
+  hitch_have = 0;
 
   perf_window_presents = 0;
   perf_ring_count = 0;
@@ -732,8 +884,19 @@ static void perf_observe_present(void) {
   ++perf_window_presents;
   if (!now) return;
   if (!perf_window_start_ns) perf_window_start_ns = now;
+  if (!perf_prev_ns) {
+    /* First present of the run: no interval to attribute yet, but the two
+     * absolute baselines must start here. Seeding them lazily inside
+     * perf_note_frame() would leave them zero for the first measured frame,
+     * which would then be credited with every byte read and every CPU tick
+     * since boot -- and the first frames of a boot are exactly the ones long
+     * enough to be reported as a hitch. */
+    fileio_stats_snapshot(&prev_io);
+    pthr_cpu_time_sample(&prev_cpu);
+  }
   if (perf_prev_ns && now > perf_prev_ns) {
     const uint64_t interval = now - perf_prev_ns;
+    perf_note_frame(interval);
     if (interval > PERF_MAX_INTERVAL_NS) ++perf_stalls;
     else if (perf_ring_count < PERF_RING) perf_ring[perf_ring_count++] = interval;
   }
@@ -966,7 +1129,12 @@ static VkResult VKAPI_CALL
 vkQueueSubmit_shim(VkQueue queue, uint32_t submit_count,
                    const VkSubmitInfo *submits, VkFence fence) {
   PFN_vkQueueSubmit submit = real_queue_submit ? real_queue_submit : vkQueueSubmit;
+  const uint64_t t0 = lsfg_monotonic_ns();
   VkResult result = submit(queue, submit_count, submits, fence);
+  {
+    const uint64_t t1 = lsfg_monotonic_ns();
+    if (t1 > t0) frame_sub_ns += t1 - t0;
+  }
   const unsigned call = ++vk_diag_submit_calls;
   if (call <= 3 || result != VK_SUCCESS)
     vk_diag_note("vkQueueSubmit call=%u count=%u fence=%p result=%d",
@@ -978,7 +1146,12 @@ static VkResult VKAPI_CALL
 vkQueueSubmit2_shim(VkQueue queue, uint32_t submit_count,
                     const VkSubmitInfo2 *submits, VkFence fence) {
   PFN_vkQueueSubmit2 submit = real_queue_submit2 ? real_queue_submit2 : vkQueueSubmit2;
+  const uint64_t t0 = lsfg_monotonic_ns();
   VkResult result = submit(queue, submit_count, submits, fence);
+  {
+    const uint64_t t1 = lsfg_monotonic_ns();
+    if (t1 > t0) frame_sub_ns += t1 - t0;
+  }
   const unsigned call = ++vk_diag_submit2_calls;
   if (call <= 3 || result != VK_SUCCESS)
     vk_diag_note("vkQueueSubmit2 call=%u count=%u fence=%p result=%d",
@@ -992,8 +1165,13 @@ vkAcquireNextImageKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
                            VkFence fence, uint32_t *image_index) {
   PFN_vkAcquireNextImageKHR acquire = real_acquire_next_image ?
       real_acquire_next_image : vkAcquireNextImageKHR;
+  const uint64_t t0 = lsfg_monotonic_ns();
   VkResult result = acquire(device, swapchain, timeout, semaphore, fence,
                             image_index);
+  {
+    const uint64_t t1 = lsfg_monotonic_ns();
+    if (t1 > t0) frame_acq_ns += t1 - t0;
+  }
   const unsigned call = ++vk_diag_acquire_calls;
   if (call <= 4 || (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR))
     vk_diag_note("vkAcquireNextImageKHR call=%u result=%d image=%u semaphore=%p fence=%p",
@@ -1134,8 +1312,15 @@ static PFN_vkQueuePresentKHR real_qpresent = NULL;
 static VkResult
 vkQueuePresentKHR_native(VkQueue queue, const VkPresentInfoKHR *present_info) {
   PFN_vkQueuePresentKHR present = real_qpresent ? real_qpresent : vkQueuePresentKHR;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  const uint64_t t0 = lsfg_monotonic_ns();
+#endif
   VkResult result = present(queue, present_info);
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+  {
+    const uint64_t t1 = lsfg_monotonic_ns();
+    if (t1 > t0) frame_pres_ns += t1 - t0;
+  }
   if (vk_present_count <= 4 || result != VK_SUCCESS)
     vk_diag_note("vkQueuePresentKHR call=%d swaps=%u result=%d",
                  vk_present_count,

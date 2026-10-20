@@ -235,6 +235,36 @@ void *__memset_chk_fake(void *dst, int c, size_t n, size_t dstlen) {
   return memset(dst, c, n);
 }
 
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+/* Updated from several threads (EE, GS, and whatever thread the core's CDVD
+ * uses), so every field is a relaxed atomic; see FileIoStats in libc_shim.h for
+ * why this is measured at all. The two clock reads per call are the cost: a
+ * hundred reads in one frame add ~10 us to a 20 ms frame, which is 0.05% and
+ * only in the diagnostic build. */
+static unsigned long long g_io_calls, g_io_bytes, g_io_ns;
+
+static uint64_t fileio_now_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    return 0;
+  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+
+static void fileio_note(long long bytes, uint64_t t0, uint64_t t1) {
+  __atomic_fetch_add(&g_io_calls, 1, __ATOMIC_RELAXED);
+  if (bytes > 0)
+    __atomic_fetch_add(&g_io_bytes, (unsigned long long)bytes, __ATOMIC_RELAXED);
+  if (t1 > t0)
+    __atomic_fetch_add(&g_io_ns, t1 - t0, __ATOMIC_RELAXED);
+}
+
+void fileio_stats_snapshot(FileIoStats *out) {
+  out->calls = __atomic_load_n(&g_io_calls, __ATOMIC_RELAXED);
+  out->bytes = __atomic_load_n(&g_io_bytes, __ATOMIC_RELAXED);
+  out->ns    = __atomic_load_n(&g_io_ns, __ATOMIC_RELAXED);
+}
+#endif
+
 long __read_chk_fake(int fd, void *buf, size_t count, size_t buf_size) {
   (void)buf_size;
   SynFile *s = synfile_get(fd);
@@ -249,7 +279,18 @@ long __read_chk_fake(int fd, void *buf, size_t count, size_t buf_size) {
     mutexUnlock(&g_synfile_lock);
     return (long)n; // 0 at EOF, exactly like read()
   }
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  /* The synthetic-descriptor branch above is a memcpy and must not be timed as
+   * I/O; only this one really touches the SD card. */
+  {
+    const uint64_t t0 = fileio_now_ns();
+    const long r = read(fd, buf, count);
+    fileio_note(r, t0, fileio_now_ns());
+    return r;
+  }
+#else
   return read(fd, buf, count);
+#endif
 }
 
 /* lseek over a synthetic descriptor. The import table used to bind lseek and
@@ -783,7 +824,19 @@ size_t fwrite_fake(const void *ptr, size_t size, size_t n, FILE *f) {
 size_t fread_fake(void *ptr, size_t size, size_t n, FILE *f) {
   if (is_fake_file(f))
     return 0;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  /* PCSX2's isoFile reads through stdio, so this is the path a CDVD sector
+   * actually takes; newlib's own internal read() below it is not one of our
+   * imports and would otherwise go unmeasured. */
+  {
+    const uint64_t t0 = fileio_now_ns();
+    const size_t r = fread(ptr, size, n, f);
+    fileio_note((long long)r * (long long)size, t0, fileio_now_ns());
+    return r;
+  }
+#else
   return fread(ptr, size, n, f);
+#endif
 }
 
 int fputc_fake(int c, FILE *f) {

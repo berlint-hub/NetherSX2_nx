@@ -26,6 +26,18 @@ import subprocess
 import sys
 import tempfile
 
+# The hitch instrumentation shares this region and reaches into two other
+# modules, so their types come from the headers verbatim (never retyped here)
+# and their functions are faked in the preamble.
+HDR_TYPES = (
+    (os.path.join("source", "libc_shim.h"),
+     "typedef struct {\n  unsigned long long calls;", "} FileIoStats;"),
+    (os.path.join("source", "pthr.h"),
+     "#define PTHR_CPU_ROLES 3", "#define PTHR_CPU_ROLES 3"),
+    (os.path.join("source", "pthr.h"),
+     "typedef struct {\n  uint64_t ticks[PTHR_CPU_ROLES];", "} CpuTimeSample;"),
+)
+
 BEGIN = "/* Which side of the CPU/GPU boundary"
 END = "static void perf_report(uint64_t now) {"
 REPORT_BEGIN = "  /* Third line of the same window"
@@ -47,6 +59,19 @@ static uint64_t lsfg_monotonic_ns(void) {
 }
 static void vk_diag_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void vk_diag_note(const char *fmt, ...) { (void)fmt; }
+
+/* The two other modules the per-frame hitch line reads. Types are pasted in
+ * verbatim by the generator; only the functions are faked. */
+__HDR_TYPES__
+static FileIoStats fake_io;
+static CpuTimeSample fake_cpu;
+static void fileio_stats_snapshot(FileIoStats *out) { *out = fake_io; }
+static void pthr_cpu_time_sample(CpuTimeSample *out) { *out = fake_cpu; }
+static int pthr_cpu_time_ms(const CpuTimeSample *from, const CpuTimeSample *to,
+                            char *buf, size_t len) {
+  (void)from; (void)to;
+  return snprintf(buf, len, "EE 0.0 GS 0.0 MTVU 0.0 ms") > 0;
+}
 
 """
 
@@ -155,6 +180,12 @@ int main(void) {
   CHECK(gpu_barrier_calls == 2 && fake_barrier_calls == 2, "barriers %llu counted / %d forwarded",
         gpu_barrier_calls, fake_barrier_calls);
 
+  /* The per-frame hitch bookkeeping now shares this region. Its only real
+   * caller (perf_observe_present) is outside the extraction, so call it once
+   * here: the region must still compile as a whole with -Werror. The logic of
+   * those deltas is what tools/check_vk_hitch_frame.py tests. */
+  perf_note_frame(0);
+
   /* An empty window must not divide by zero in the percentages. */
   report_body(0.0);
   report_body(5.0);
@@ -183,6 +214,15 @@ def main() -> int:
     block = src[src.index(BEGIN):src.index(END)]
     report = src[src.index(REPORT_BEGIN):src.index(REPORT_END)]
 
+    types = []
+    for rel, start, end in HDR_TYPES:
+        path = os.path.join(root, rel)
+        text = open(path, encoding="utf-8").read()
+        if text.count(start) != 1 or text.count(end) != 1:
+            print("anchor %r not unique in %s" % (start[:40], rel))
+            return 2
+        types.append(text[text.index(start):text.index(end) + len(end)])
+
     inc = args.vulkan_include
     if not inc:
         for cand in (os.environ.get("NXVK_INCLUDE"), "/tmp/nxvk/include",
@@ -198,7 +238,8 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="vkgpu")
     c = os.path.join(tmp, "gpu_test.c")
     open(c, "w", encoding="utf-8").write(
-        PREAMBLE + block + EPILOGUE.replace("__REPORT__", report))
+        PREAMBLE.replace("__HDR_TYPES__", "\n".join(types))
+        + block + EPILOGUE.replace("__REPORT__", report))
     exe = os.path.join(tmp, "gpu_test")
     cmd = ["gcc", "-std=c11", "-Wall", "-Wextra", "-Wformat=2", "-Werror",
            "-I" + inc, "-o", exe, c]

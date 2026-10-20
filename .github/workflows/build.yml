@@ -665,6 +665,35 @@ jobs:
             echo "::error::log adresniho prostoru: diag ${asd}x / prod ${asp}x -- diag ho musi mit, produkce nesmi"
             exit 1
           fi
+          # Radek pro jeden dlouhy snimek. Soucty za okno (300 snimku / ~6 s)
+          # nedokazou rict, kam se podel jeden 82ms snimek: to je 1,4 % okna,
+          # takze zmizi v kazdem procentu i v kazdem citaci. Nejnebezpecnejsi
+          # na tom je, ze to vypada jako mereni -- log z GT3 (build e0e44b4)
+          # hlasil u okna s nejdelsim snimkem behu 82,4 ms jen EE 68 % / GS 58 %
+          # / pipeliny 3,1 ms / fence 8,1 ms, tedy nic, co by ten snimek
+          # vysvetlovalo. Tenhle radek differencuje tyz citace po jednom snimku
+          # a rika, jestli cas sel do volani Vulkanu, do cteni ze souboru, do
+          # CPU nejake ze tri roli, nebo do nicoho z toho.
+          hid=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "perf: hitch" || true); hid=${hid:-0}
+          hip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "perf: hitch" || true); hip=${hip:-0}
+          echo "::notice::perf hitch radek: ${hid}x (diag, ma byt aspon 1) / ${hip}x (produkce, ma byt 0)"
+          if [ "$hid" = "0" ] || [ "$hip" != "0" ]; then
+            echo "::error::perf hitch radek: diag ${hid}x / prod ${hip}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
+            exit 1
+          fi
+          # Nastaveni, ktera ten beh skutecne pouzil, z teze store, ze ktere je
+          # cte jadro. Bez toho se log musi dekodovat z varovani "[Unsafe
+          # Settings]", ktera setting jen pojmenuji, kdyz se lisi od vychoziho, a
+          # nikdy nereknou hodnotu: "CRC Fix Level is not set to default" nerozlisuje
+          # Minimum od Aggressive a setting, ktery jadro nepovazuje za nebezpecny,
+          # se neobjevi vubec. Teprve tohle dela dva logy porovnatelne.
+          sid=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "settings upscale=" || true); sid=${sid:-0}
+          sip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "settings upscale=" || true); sip=${sip:-0}
+          echo "::notice::log aktivnich nastaveni: ${sid}x (diag, ma byt aspon 1) / ${sip}x (produkce, ma byt 0)"
+          if [ "$sid" = "0" ] || [ "$sip" != "0" ]; then
+            echo "::error::log aktivnich nastaveni: diag ${sid}x / prod ${sip}x -- diag ho musi mit, produkce nesmi"
+            exit 1
+          fi
           wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
           # [0-9a-f]{7} pred -run: dokazuje ze tam je i commit, ne jen cislo behu.
           # Holý grep na "-run<cislo>" by prosel i s prazdnou sha.

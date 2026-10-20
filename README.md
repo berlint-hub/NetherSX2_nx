@@ -238,6 +238,31 @@ they are called, and prints the physical-memory figure NVK sizes its heap from.
 A run whose log ends without `host exiting normally`
 did not exit cleanly — the last line before the gap names the stage that died.
 
+Every 300 presented frames the diagnostic build also writes a `perf:` block,
+which is the part that turns "it stutters" into a number:
+
+```
+perf: 300 presents / 5.981 s = 50.16 fps | worst 82.4 ms | 1% low 22.65 fps | stalls 0 | lsfg off ...
+perf: cpu EE 68% GS 58% MTVU 48% | fastmem lazy 0 faults/0 pages, limit 0, map-fail 0, ...
+perf: gpu blocked fence 300 x 8.1 ms (0%) + polls 0, queue-idle 0 x 0.0 ms (0%) | pipelines 5 x 3.1 ms (0%) | cmds barrier 130002 copy2buf 0 copyimg 13046 blit 0
+perf: hitch 82.4 ms (1 frame(s) over 40 ms this window) | vk acquire 0.1 submit 12.4 present 0.9 ms | ... | cpu EE 51.0 GS 12.0 MTVU 8.4 ms | io read 3 x 96 KiB blocked 61.2 ms
+```
+
+The first three lines are per-window totals and answer what a stretch of play is
+limited by: CPU share per heavy thread, time actually blocked waiting on the GPU,
+pipelines compiled at runtime, and how many copies and barriers the renderer
+issued. The fourth appears only when a single frame took 40 ms or more — two
+dropped PAL frames — and differences the same counters across that one frame.
+It exists because a window cannot see a hitch: 82 ms is 1.4% of a 6 s window, so
+it hides inside every percentage there, and a Gran Turismo 3 log measured exactly
+that (worst frame 82.4 ms in a window reporting EE 68% and no GPU wait at all).
+
+At startup the same log prints the settings the run actually used
+(`settings upscale=0.50 crc=4 hwdl=2 ...`), read back from the store the core
+reads. Without it a log can only be decoded from the core's own
+`[Unsafe Settings]` warnings, which name a setting when it differs from a default
+but never say to what.
+
 ### How to build
 
 Install the devkitPro Switch toolchain and portlibs:
