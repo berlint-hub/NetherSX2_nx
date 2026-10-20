@@ -303,6 +303,18 @@ static bool saltyfps_attach(void) {
                       "is HELD by another client"
                     : "this process CANNOT open a session on ANY sysmodule port "
                       "-- reslimit, not a busy slot; retrying can never succeed");
+
+      /* Measured on hardware, GT3 PAL, build 0ef8d96: nonexistent port returned
+       * 0xf201 (Kernel NotFound) while BOTH InjectServ and SaltySD returned
+       * 0x10801 (Kernel OutOfResource). The kernel therefore distinguishes
+       * "no such port" from "cannot allocate a session", and it refuses this
+       * process on every sysmodule port -- so the limit is our own reslimit,
+       * not a slot somebody holds. Sixty-four retries over 46 seconds all came
+       * back identical, which is what the calibration says up front: this can
+       * never succeed, so stop trying and stop filling the log.
+       *
+       * A busy slot, the other reading, WORTH retrying: the holder releases it. */
+      if (!inj_ok) g_state = ST_GAVEUP;
     }
     return false;
   }

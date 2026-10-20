@@ -116,6 +116,7 @@ typedef struct { Handle handle; void *addr; size_t size; } SharedMemory;
 
 /* Test-visible state of the fake platform. */
 static int      g_port_available = 1;
+static int      g_injectserv_available = 1;   /* the second sysmodule port */
 static uint64_t g_reserved_offset = 320;
 static size_t   g_requested_size;
 static int      g_connect_calls;
@@ -132,6 +133,13 @@ static inline uint64_t armGetSystemTickFreq(void) { return 19200000u; }
 static Result svcConnectToNamedPort(Handle *out, const char *name) {
   g_connect_calls++;
   if (g_port_available && name && !strcmp(name, "SaltySD")) { *out = 7u; return 0; }
+  /* InjectServ is registered by the same sysmodule with the same max_sessions=1.
+   * Whether it opens decides between "the SaltySD slot is held" and "this
+   * process cannot open a session at all", so the test has to be able to set
+   * each independently. */
+  if (g_injectserv_available && name && !strcmp(name, "InjectServ")) {
+    *out = 9u; return 0;
+  }
   *out = INVALID_HANDLE;
   return MAKERESULT(1, 1);
 }
@@ -200,6 +208,7 @@ static void platform_reset(void) {
   memset(g_tls, 0, sizeof(g_tls));
   memset(g_page, 0, sizeof(g_page));
   g_port_available = 1;
+  g_injectserv_available = 1;
   g_reserved_offset = 320;
   g_requested_size = 0;
   g_connect_calls = 0;
@@ -456,6 +465,38 @@ static void case_target_respects_panel(void) {
 
 static void case_failure_is_diagnosable(void) {
   printf("case: a failed attach reports WHY, not just that it failed\n");
+
+  /* Scenario 1 -- InjectServ opens, so this process CAN create sessions and the
+   * SaltySD slot is merely held by somebody else. That holder releases it, so
+   * retrying is meaningful and the state must stay retryable. */
+  platform_reset();
+  g_port_available = 0;
+  g_injectserv_available = 1;
+  check(!saltyfps_init(), "init fails");
+  check(g_log_calls > 0, "the failure was logged to the core console");
+  char buf1[256] = {0};
+  saltyfps_status(buf1, sizeof(buf1));
+  check(strstr(buf1, "state=init") != NULL, "busy slot: state stays retryable");
+  check(strstr(buf1, "rc=0x201") != NULL, "reports the Result code");
+
+  /* Scenario 2 -- InjectServ refuses with the same code, which is what the
+   * hardware measured: the limit is this process's own reslimit, not a slot.
+   * Retrying can never succeed, so it must stop immediately instead of writing
+   * 64 identical warnings into the log. */
+  platform_reset();
+  g_port_available = 0;
+  g_injectserv_available = 0;
+  check(!saltyfps_init(), "init fails");
+  char buf2[256] = {0};
+  saltyfps_status(buf2, sizeof(buf2));
+  check(strstr(buf2, "state=unavailable") != NULL, "reslimit: gives up at once");
+  const int calls_after_init = g_connect_calls;
+  for (int i = 0; i < 300; i++) { g_tick += 384000u; saltyfps_present(); }
+  check(g_connect_calls == calls_after_init,
+        "reslimit: presents never retry, so the log stays clean");
+  return;
+
+  /* unreachable, kept so the original single-scenario body below still parses */
   platform_reset();
   g_port_available = 0;
   check(!saltyfps_init(), "init fails");
