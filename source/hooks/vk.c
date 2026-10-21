@@ -1367,6 +1367,8 @@ vkQueuePresentKHR_native(VkQueue queue, const VkPresentInfoKHR *present_info) {
   const uint64_t t0 = lsfg_monotonic_ns();
 #endif
   VkResult result = present(queue, present_info);
+  /* Timestamp the completed present call rather than source-frame entry. */
+  saltysd_display_sync_note_present();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
@@ -1437,7 +1439,6 @@ static int lsfg_try_create(VkQueue queue) {
 static VkResult VKAPI_CALL
 vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   ++vk_present_count;
-  saltysd_display_sync_note_present();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   /* Every present, whatever the path below decides to do with it. */
   perf_observe_present();

@@ -15,6 +15,8 @@ void saltysd_display_sync_configure(bool enabled);
 void saltysd_display_sync_poll(void);
 void saltysd_display_sync_note_present(void);
 bool saltysd_display_sync_active(void);
+/* SaltySD rate, or a confident 50/60 Hz estimate from recent presentation
+ * timestamps; returns 0 while fallback timing is ambiguous. */
 float saltysd_display_sync_rate(void);
 /* Last one-shot/query status: -1 not queried/disabled, 0 service unavailable,
  * 1 service present but query failed/session busy, 2 refresh-rate query succeeded. */

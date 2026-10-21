@@ -24,12 +24,10 @@ static volatile uint32_t s_service_rate;
 static volatile uint32_t s_last_connect_result = UINT32_MAX;
 static volatile int s_last_query_status = -1;
 static volatile uint64_t s_last_present_tick;
-static volatile uint64_t s_present_period_ticks;
+#define PRESENT_INTERVAL_SAMPLES 16u
+static volatile uint64_t s_present_intervals[PRESENT_INTERVAL_SAMPLES];
+static volatile uint32_t s_present_interval_count;
 static volatile uint64_t s_next_query_tick;
-
-static uint64_t atomic_load_u64(const volatile uint64_t *value) {
-  return __atomic_load_n(value, __ATOMIC_ACQUIRE);
-}
 
 static int saltysd_query_refresh_rate(uint8_t *rate) {
   Handle session = INVALID_HANDLE;
@@ -97,6 +95,8 @@ void saltysd_display_sync_configure(bool enabled) {
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_query_status, -1, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_last_present_tick, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_present_interval_count, 0, __ATOMIC_RELEASE);
   }
 }
 
@@ -142,21 +142,80 @@ void saltysd_display_sync_note_present(void) {
     return;
   const uint64_t elapsed = now - previous;
   const uint64_t frequency = armGetSystemTickFreq();
-  if (elapsed < frequency / 240u || elapsed > frequency * 2u) {
-    __atomic_store_n(&s_present_period_ticks, 0, __ATOMIC_RELEASE);
+  if (elapsed < frequency / 240u || elapsed > frequency / 5u) {
+    if (elapsed > frequency / 5u)
+      __atomic_store_n(&s_present_interval_count, 0, __ATOMIC_RELEASE);
     return;
   }
-  uint64_t average = atomic_load_u64(&s_present_period_ticks);
-  if (!average)
-    average = elapsed;
-  else
-    average = (average * 7u + elapsed) / 8u;
-  __atomic_store_n(&s_present_period_ticks, average, __ATOMIC_RELEASE);
+
+  /* Keep recent present intervals. A raw presents-per-second average is not a
+   * display refresh estimate: a slow guest can present at 20 FPS on a 50/60 Hz
+   * display. Instead, rate estimation below checks for a stable 50/60 Hz
+   * cadence and its integer-multiple intervals (missed refreshes). */
+  const uint32_t index = __atomic_fetch_add(&s_present_interval_count, 1,
+                                             __ATOMIC_ACQ_REL);
+  __atomic_store_n(&s_present_intervals[index % PRESENT_INTERVAL_SAMPLES], elapsed,
+                   __ATOMIC_RELEASE);
 }
 
 bool saltysd_display_sync_active(void) {
   return __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE) &&
          __atomic_load_n(&s_port_available, __ATOMIC_ACQUIRE);
+}
+
+static unsigned estimate_present_display_rate(void) {
+  const uint64_t frequency = armGetSystemTickFreq();
+  uint32_t count = __atomic_load_n(&s_present_interval_count, __ATOMIC_ACQUIRE);
+  if (count > PRESENT_INTERVAL_SAMPLES)
+    count = PRESENT_INTERVAL_SAMPLES;
+  if (count < 4)
+    return 0;
+
+  unsigned matches_50 = 0, matches_60 = 0;
+  uint64_t error_50 = 0, error_60 = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint64_t interval = __atomic_load_n(&s_present_intervals[i],
+                                               __ATOMIC_ACQUIRE);
+    if (!interval)
+      continue;
+
+    const uint64_t period_50 = frequency / 50u;
+    const uint64_t period_60 = frequency / 60u;
+    const uint64_t periods_50 = (interval + period_50 / 2u) / period_50;
+    const uint64_t periods_60 = (interval + period_60 / 2u) / period_60;
+    if (periods_50 >= 1 && periods_50 <= 8) {
+      const uint64_t expected = periods_50 * period_50;
+      const uint64_t delta = interval > expected ? interval - expected : expected - interval;
+      if (delta <= period_50 / 6u) {
+        matches_50++;
+        error_50 += (delta * 1000u) / period_50;
+      }
+    }
+    if (periods_60 >= 1 && periods_60 <= 8) {
+      const uint64_t expected = periods_60 * period_60;
+      const uint64_t delta = interval > expected ? interval - expected : expected - interval;
+      if (delta <= period_60 / 6u) {
+        matches_60++;
+        error_60 += (delta * 1000u) / period_60;
+      }
+    }
+  }
+
+  if (matches_50 < 4 && matches_60 < 4)
+    return 0;
+  if (matches_50 >= matches_60 + 2)
+    return 50;
+  if (matches_60 >= matches_50 + 2)
+    return 60;
+  if (matches_50 >= 4 && matches_60 >= 4) {
+    const uint64_t avg_50 = error_50 / matches_50;
+    const uint64_t avg_60 = error_60 / matches_60;
+    if (avg_50 + 40u < avg_60)
+      return 50;
+    if (avg_60 + 40u < avg_50)
+      return 60;
+  }
+  return 0; /* ambiguous timing: keep the core's PAL/NTSC defaults */
 }
 
 float saltysd_display_sync_rate(void) {
@@ -165,10 +224,9 @@ float saltysd_display_sync_rate(void) {
   const uint32_t service_rate = __atomic_load_n(&s_service_rate, __ATOMIC_ACQUIRE);
   if (service_rate)
     return (float)service_rate;
-  const uint64_t period = atomic_load_u64(&s_present_period_ticks);
-  if (!period)
-    return 0.0f;
-  return (float)armGetSystemTickFreq() / (float)period;
+  /* Only accept a stable display cadence inferred from recent timestamps;
+   * never mistake a slow game's delivered FPS for the panel refresh rate. */
+  return (float)estimate_present_display_rate();
 }
 
 int saltysd_display_sync_query_status(void) {
