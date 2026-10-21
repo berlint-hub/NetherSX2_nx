@@ -1,0 +1,120 @@
+diff --git a/saltysd_proc/source/main.c b/saltysd_proc/source/main.c
+index 21c9bef..bca1005 100644
+--- a/saltysd_proc/source/main.c
++++ b/saltysd_proc/source/main.c
+@@ -28,7 +28,9 @@ struct MinMax {
+     u8 max;
+ };
+ 
+-Handle saltyport, sdcard, injectserv;
++Handle saltyport, saltyportDisplaySync, sdcard, injectserv;
++static Thread displaySyncThread;
++static u8 displaySyncThreadStack[0x4000] __attribute__((aligned(0x1000)));
+ static char g_heap[0x30000];
+ bool already_hijacking = false;
+ bool should_terminate = false;
+@@ -415,6 +417,7 @@ void Initialize() {
+     // Start our port
+     // For some reason, we only have one session maximum (0 reslimit handle related?)	
+     svcManageNamedPort(&saltyport, "SaltySD", 1);
++    svcManageNamedPort(&saltyportDisplaySync, "NethFPS", 1);
+     svcManageNamedPort(&injectserv, "InjectServ", 1);
+ 
+     uint64_t dummy = 0;
+@@ -433,6 +436,17 @@ void Initialize() {
+     shmemCreate(&_sharedMemory, shmem_size, Perm_Rw, Perm_Rw);
+     shmemMap(&_sharedMemory);
+     memset(shmemGetAddr(&_sharedMemory), 0, shmem_size);
++
++    Result threadRc = threadCreate(&displaySyncThread, serviceThreadDisplaySync,
++                                   (void*)(uintptr_t)saltyportDisplaySync,
++                                   displaySyncThreadStack, sizeof(displaySyncThreadStack),
++                                   0x3B, -2);
++    if (R_SUCCEEDED(threadRc)) {
++        threadRc = threadStart(&displaySyncThread);
++    }
++    if (R_FAILED(threadRc)) {
++        SaltyNX_printf(APP_NAME ": display-sync IPC port thread failed: 0x%x\n", threadRc);
++    }
+ }
+ 
+ int main(int argc, char *argv[])
+diff --git a/saltysd_proc/source/service.c b/saltysd_proc/source/service.c
+index f95bea6..382fcc8 100644
+--- a/saltysd_proc/source/service.c
++++ b/saltysd_proc/source/service.c
+@@ -1269,3 +1269,62 @@ void serviceThread()
+     
+     SaltyNX_printf(APP_NAME ": done accepting service calls\n");
+ }
++
++
++/* Isolated read-only client port for NetherSX2's presentation-rate bridge.
++ * The legacy SaltySD endpoint is a one-session service held by SaltyNX Core;
++ * this second endpoint lets the emulator query the rate and map the existing
++ * shared FPSLocker block without competing for that session. */
++void serviceThreadDisplaySync(void* portHandle)
++{
++    const Handle port = (Handle)(uintptr_t)portHandle;
++    while (1) {
++        Handle session;
++        Result ret = svcAcceptSession(&session, port);
++        if (R_FAILED(ret)) {
++            svcSleepThread(1000 * 1000);
++            continue;
++        }
++
++        Handle replySession = 0;
++        while (1) {
++            int handleIndex;
++            ret = svcReplyAndReceive(&handleIndex, &session, 1, replySession, UINT64_MAX);
++            if (R_FAILED(ret))
++                break;
++
++            IpcParsedCommand request = {0};
++            ipcParse(&request);
++            struct {
++                u64 magic;
++                u64 command;
++                u64 reserved[2];
++            } *raw = request.Raw;
++
++            if (raw->command == handleService_GetDisplayRefreshRate) {
++                handleServiceCmd((int)raw->command);
++            } else if (raw->command == handleService_GetSharedMemoryHandle) {
++                IpcCommand response;
++                ipcInitialize(&response);
++                ipcSendHandleCopy(&response, _sharedMemory.handle);
++                struct {
++                    u64 magic;
++                    u64 result;
++                } *out = ipcPrepareHeader(&response, sizeof(*out));
++                out->magic = SFCO_MAGIC;
++                out->result = 0;
++            } else {
++                IpcCommand response;
++                ipcInitialize(&response);
++                struct {
++                    u64 magic;
++                    u64 result;
++                } *out = ipcPrepareHeader(&response, sizeof(*out));
++                out->magic = SFCO_MAGIC;
++                out->result = 0xEE01;
++            }
++            replySession = session;
++        }
++        svcCloseHandle(session);
++    }
++}
+diff --git a/saltysd_proc/source/service.h b/saltysd_proc/source/service.h
+index eaae8b4..edfb0af 100644
+--- a/saltysd_proc/source/service.h
++++ b/saltysd_proc/source/service.h
+@@ -9,6 +9,7 @@ struct DirId {
+ };
+ 
+ void serviceThread();
++void serviceThreadDisplaySync(void* portHandle);
+ extern size_t openedFilesAmount;
+ extern struct FileId openedFilesArray[FOPEN_MAX-1];
+ extern size_t openedDirsAmount;

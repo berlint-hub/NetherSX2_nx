@@ -13,7 +13,8 @@
 
 #include "saltysd_display.h"
 
-#define SALTYSD_PORT "SaltySD"
+#define SALTYSD_PORT "NethFPS"
+#define SALTYSD_LEGACY_PORT "SaltySD"
 #define SFCI_MAGIC 0x49434653u
 #define SFCO_MAGIC 0x4f434653u
 #define IPC_REQUEST 4u
@@ -101,6 +102,14 @@ static int saltysd_send_query(Handle session, uint32_t command_id,
   if (response)
     memcpy(response, raw, response_words * sizeof(uint64_t));
   return 1;
+}
+
+static Result saltysd_connect(Handle *session) {
+  Result connected = svcConnectToNamedPort(session, SALTYSD_PORT);
+  if (R_SUCCEEDED(connected))
+    return connected;
+  /* Older SaltyNX builds lack the dedicated concurrent client endpoint. */
+  return svcConnectToNamedPort(session, SALTYSD_LEGACY_PORT);
 }
 
 static int saltysd_query_refresh_rate(Handle session, uint8_t *rate) {
@@ -262,7 +271,7 @@ void saltysd_display_sync_poll(void) {
   }
 
   Handle session = INVALID_HANDLE;
-  const Result connected = svcConnectToNamedPort(&session, SALTYSD_PORT);
+  const Result connected = saltysd_connect(&session);
   __atomic_store_n(&s_last_connect_result, (uint32_t)connected, __ATOMIC_RELEASE);
   if (R_FAILED(connected)) {
     const int busy = R_MODULE(connected) == Module_Kernel &&
