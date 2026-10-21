@@ -7,8 +7,10 @@
 extern "C" {
 #endif
 
-/* Opt-in display pacing bridge. All SaltySD IPC runs on the frontend thread;
- * present backends only read the cached, lock-free state. */
+/* Opt-in display pacing bridge. SaltySD IPC is throttled and thread-safe; the
+ * frontend polls while running and the Vulkan backend makes one opportunistic
+ * poll at initial swapchain creation so SaltyNX has time to attach first.
+ * Present backends otherwise read the cached, lock-free state. */
 void saltysd_display_sync_configure(bool enabled);
 void saltysd_display_sync_poll(void);
 void saltysd_display_sync_note_present(void);

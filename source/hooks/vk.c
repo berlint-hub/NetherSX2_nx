@@ -1244,6 +1244,14 @@ vkCreateSwapchainKHR_shim(VkDevice device,
   if (create_info->oldSwapchain == tracked_swapchain)
     reset_tracked_swapchain();
 
+  /* SaltyNX may still be bringing its Core up during early wrapper startup.
+   * The frontend's first nonblocking SaltySD attempt happens before the VM and
+   * surface are initialized; retry once here, immediately before choosing the
+   * swapchain mode. The client throttles concurrent callers to one attempt per
+   * second and this does not sleep or use SaltySD_Connect's blocking retry. */
+  if (!create_info->oldSwapchain)
+    saltysd_display_sync_poll();
+
   VkSwapchainCreateInfoKHR modified = *create_info;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   vk_diag_note("display-sync swapchain query=%d active=%d connect_rc=0x%08x service_rate=%u effective_rate=%.2f",

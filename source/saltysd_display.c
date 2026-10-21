@@ -25,7 +25,7 @@ static volatile uint32_t s_last_connect_result = UINT32_MAX;
 static volatile int s_last_query_status = -1;
 static volatile uint64_t s_last_present_tick;
 static volatile uint64_t s_present_period_ticks;
-static uint64_t s_next_query_tick;
+static volatile uint64_t s_next_query_tick;
 
 static uint64_t atomic_load_u64(const volatile uint64_t *value) {
   return __atomic_load_n(value, __ATOMIC_ACQUIRE);
@@ -96,9 +96,15 @@ void saltysd_display_sync_poll(void) {
     return;
 
   const uint64_t now = armGetSystemTick();
-  if (s_next_query_tick && now < s_next_query_tick)
-    return;
-  s_next_query_tick = now + armGetSystemTickFreq();
+  const uint64_t frequency = armGetSystemTickFreq();
+  uint64_t next = __atomic_load_n(&s_next_query_tick, __ATOMIC_ACQUIRE);
+  for (;;) {
+    if (next && now < next)
+      return;
+    if (__atomic_compare_exchange_n(&s_next_query_tick, &next, now + frequency,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      break;
+  }
 
   uint8_t rate = 0;
   const int query_status = saltysd_query_refresh_rate(&rate);
