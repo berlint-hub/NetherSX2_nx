@@ -35,8 +35,17 @@ static int saltysd_query_refresh_rate(uint8_t *rate) {
   Handle session = INVALID_HANDLE;
   const Result connected = svcConnectToNamedPort(&session, SALTYSD_PORT);
   __atomic_store_n(&s_last_connect_result, (uint32_t)connected, __ATOMIC_RELEASE);
-  if (R_FAILED(connected))
+  if (R_FAILED(connected)) {
+    /* SaltyNX currently creates SaltySD with a single session slot. During
+     * SaltyNX Core startup that slot can be occupied, making connect return
+     * KernelError_OutOfResource even though the service is present. Treat
+     * this as a failed rate query, not as an absent port: presentation timing
+     * is still usable and swap interval 1 should be enabled. */
+    if (R_MODULE(connected) == Module_Kernel &&
+        R_DESCRIPTION(connected) == KernelError_OutOfResource)
+      return 1;
     return 0;
+  }
 
   /* HIPC request with PID descriptor and a 32-byte SFCI payload. The raw
    * request starts at TLS+0x20 after the aligned PID descriptor. */
@@ -78,7 +87,7 @@ static int saltysd_query_refresh_rate(uint8_t *rate) {
     }
   }
   svcCloseHandle(session);
-  return valid ? 2 : 1; /* 0 = no named port, 1 = query/IPC failure */
+  return valid ? 2 : 1; /* 0 = unavailable, 1 = present/query failed, 2 = rate */
 }
 
 void saltysd_display_sync_configure(bool enabled) {
