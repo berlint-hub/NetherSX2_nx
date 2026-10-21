@@ -21,6 +21,7 @@
 static volatile int s_enabled;
 static volatile int s_port_available;
 static volatile uint32_t s_service_rate;
+static volatile uint32_t s_last_connect_result = UINT32_MAX;
 static volatile int s_last_query_status = -1;
 static volatile uint64_t s_last_present_tick;
 static volatile uint64_t s_present_period_ticks;
@@ -33,6 +34,7 @@ static uint64_t atomic_load_u64(const volatile uint64_t *value) {
 static int saltysd_query_refresh_rate(uint8_t *rate) {
   Handle session = INVALID_HANDLE;
   const Result connected = svcConnectToNamedPort(&session, SALTYSD_PORT);
+  __atomic_store_n(&s_last_connect_result, (uint32_t)connected, __ATOMIC_RELEASE);
   if (R_FAILED(connected))
     return 0;
 
@@ -85,6 +87,7 @@ void saltysd_display_sync_configure(bool enabled) {
     __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_query_status, -1, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_last_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
   }
 }
 
@@ -159,4 +162,8 @@ int saltysd_display_sync_query_status(void) {
 
 unsigned saltysd_display_sync_service_rate(void) {
   return __atomic_load_n(&s_service_rate, __ATOMIC_ACQUIRE);
+}
+
+unsigned saltysd_display_sync_connect_result(void) {
+  return __atomic_load_n(&s_last_connect_result, __ATOMIC_ACQUIRE);
 }

@@ -1246,9 +1246,10 @@ vkCreateSwapchainKHR_shim(VkDevice device,
 
   VkSwapchainCreateInfoKHR modified = *create_info;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-  vk_diag_note("display-sync swapchain query=%d active=%d service_rate=%u effective_rate=%.2f",
+  vk_diag_note("display-sync swapchain query=%d active=%d connect_rc=0x%08x service_rate=%u effective_rate=%.2f",
                saltysd_display_sync_query_status(),
                saltysd_display_sync_active() ? 1 : 0,
+               saltysd_display_sync_connect_result(),
                saltysd_display_sync_service_rate(),
                saltysd_display_sync_rate());
 #endif

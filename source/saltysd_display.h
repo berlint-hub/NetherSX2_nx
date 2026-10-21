@@ -18,6 +18,7 @@ float saltysd_display_sync_rate(void);
  * 1 port connected but query failed, 2 refresh-rate query succeeded. */
 int saltysd_display_sync_query_status(void);
 unsigned saltysd_display_sync_service_rate(void);
+unsigned saltysd_display_sync_connect_result(void);
 
 #ifdef __cplusplus
 }
