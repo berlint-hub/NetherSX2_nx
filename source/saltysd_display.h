@@ -7,22 +7,25 @@
 extern "C" {
 #endif
 
-/* Opt-in display pacing bridge. SaltySD IPC is throttled and thread-safe; the
- * frontend polls while running and the Vulkan backend makes one opportunistic
- * poll at initial swapchain creation so SaltyNX has time to attach first.
- * Present backends otherwise read the cached, lock-free state. */
+/* Opt-in display pacing bridge. Present backends feed their presentation
+ * timestamps to this client; once a stable cadence is measured it is published
+ * to the SaltyNX shared FPSLocker target so FPSLocker can sync the display to
+ * NetherSX2. SaltySD IPC is throttled to about once per second. */
 void saltysd_display_sync_configure(bool enabled);
 void saltysd_display_sync_poll(void);
+void saltysd_display_sync_shutdown(void);
 void saltysd_display_sync_note_present(void);
 bool saltysd_display_sync_active(void);
-/* SaltySD rate, or a confident 50/60 Hz estimate from recent presentation
- * timestamps; returns 0 while fallback timing is ambiguous. */
+/* Estimated NetherSX2 present rate from recent presentation timestamps; zero
+ * until the cadence is stable enough to publish as an FPSLocker target. */
 float saltysd_display_sync_rate(void);
 /* Last one-shot/query status: -1 not queried/disabled, 0 service unavailable,
  * 1 service present but query failed/session busy, 2 refresh-rate query succeeded. */
 int saltysd_display_sync_query_status(void);
 unsigned saltysd_display_sync_service_rate(void);
 unsigned saltysd_display_sync_connect_result(void);
+unsigned saltysd_display_sync_published_target(void);
+bool saltysd_display_sync_target_ready(void);
 
 #ifdef __cplusplus
 }

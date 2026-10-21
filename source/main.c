@@ -202,7 +202,6 @@ typedef unsigned char jbool;
 static void prefs_save_display_sync_safe(void);
 static void display_sync_poll_and_apply(void);
 static void display_sync_restore(void);
-static void display_sync_prepare_initial_rate(void);
 
 static struct {
   int  (*JNI_OnLoad)(void *vm, void *reserved);
@@ -238,120 +237,56 @@ static struct {
   void *(*getCheevoGameTitle)(void *env, void *cls);
 } nl;
 
-static float g_display_sync_base_pal;
-static float g_display_sync_base_ntsc;
-static float g_display_sync_last_rate;
-static float g_display_sync_last_surface_rate;
-static int g_display_sync_surface_forced;
-static int g_display_sync_overrides_rates;
+static void prefs_save_display_sync_safe(void) {
+  /* Frame pacing reports to FPSLocker; it never rewrites PAL/NTSC core prefs. */
+  prefs_save();
+}
 
 static void display_sync_restore(void) {
-  if (!g_display_sync_overrides_rates) return;
-  prefs_set_float("EmuCore/GS/FrameratePAL", g_display_sync_base_pal);
-  prefs_set_float("EmuCore/GS/FramerateNTSC", g_display_sync_base_ntsc);
-  g_display_sync_overrides_rates = 0;
-  g_display_sync_last_rate = 0.0f;
-}
-
-static void display_sync_prepare_initial_rate(void) {
-  if (!saltysd_display_sync_active()) return;
-  const float rate = saltysd_display_sync_rate();
-  if (rate < 20.0f || rate > 240.0f) return;
-  g_display_sync_base_pal = prefs_get_float("EmuCore/GS/FrameratePAL", 50.0f);
-  g_display_sync_base_ntsc = prefs_get_float("EmuCore/GS/FramerateNTSC", 59.94f);
-  g_display_sync_overrides_rates = 1;
-  g_display_sync_last_rate = rate;
-  prefs_set_float("EmuCore/GS/FrameratePAL", rate);
-  prefs_set_float("EmuCore/GS/FramerateNTSC", rate);
-}
-
-static void prefs_save_display_sync_safe(void) {
-  if (g_display_sync_overrides_rates) {
-    prefs_save_with_float_overrides("EmuCore/GS/FrameratePAL", g_display_sync_base_pal,
-                                    "EmuCore/GS/FramerateNTSC", g_display_sync_base_ntsc);
-  } else {
-    prefs_save();
-  }
+  saltysd_display_sync_shutdown();
 }
 
 static void display_sync_poll_and_apply(void) {
   saltysd_display_sync_poll();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
-  /* The SaltySD server does not log GetDisplayRefreshRate requests, so record
-   * client-side state transitions. This is intentionally edge-triggered: the
-   * poll runs every frame, but the diagnostic should not spam the log. */
+  /* Log state changes only. SaltySD's GetDisplayRefreshRate handler is silent,
+   * so this shows the source cadence and the target published for FPSLocker. */
   {
     static int last_query_status = -2;
     static int last_active = -1;
     static unsigned last_connect_result;
     static unsigned last_service_rate;
+    static unsigned last_published_target;
+    static int last_target_ready = -1;
     static float last_effective_rate = -1.0f;
     const int query_status = saltysd_display_sync_query_status();
     const int active = saltysd_display_sync_active();
     const unsigned connect_result = saltysd_display_sync_connect_result();
     const unsigned service_rate = saltysd_display_sync_service_rate();
+    const unsigned published_target = saltysd_display_sync_published_target();
+    const int target_ready = saltysd_display_sync_target_ready();
     const float effective_rate = saltysd_display_sync_rate();
     if (query_status >= 0 &&
         (query_status != last_query_status || active != last_active ||
          connect_result != last_connect_result || service_rate != last_service_rate ||
+         published_target != last_published_target || target_ready != last_target_ready ||
          last_effective_rate < 0.0f ||
          fabsf(effective_rate - last_effective_rate) >= 0.25f)) {
-      const char *rate_source = service_rate ? "saltysd" :
-                                (effective_rate > 0.0f ? "present-cadence" : "none");
       vk_diag_note("display-sync state query=%d active=%d connect_rc=0x%08x "
-                   "service_rate=%u effective_rate=%.2f source=%s",
+                   "display_rate=%u present_fps=%.2f shared_ready=%d "
+                   "fpslocker_target=%u",
                    query_status, active, connect_result, service_rate,
-                   effective_rate, rate_source);
+                   effective_rate, target_ready, published_target);
       last_query_status = query_status;
       last_active = active;
       last_connect_result = connect_result;
       last_service_rate = service_rate;
+      last_published_target = published_target;
+      last_target_ready = target_ready;
       last_effective_rate = effective_rate;
     }
   }
 #endif
-  if (!saltysd_display_sync_active()) {
-    const int restore_core_rate = g_display_sync_overrides_rates;
-    const int restore_surface_rate = g_display_sync_surface_forced ||
-        (g_display_sync_last_surface_rate > 0.0f &&
-         fabsf(g_display_sync_last_surface_rate - 60.0f) >= 0.25f);
-    display_sync_restore();
-    if (restore_surface_rate && nl.changeSurface && NATIVE_CLASS) {
-      nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
-                       screen_width, screen_height, 60.0f);
-      g_display_sync_last_surface_rate = 60.0f;
-      g_display_sync_surface_forced = 0;
-    }
-    if ((restore_core_rate || restore_surface_rate) && nl.applySettings && NATIVE_CLASS)
-      nl.applySettings(fake_env, NATIVE_CLASS);
-    return;
-  }
-
-  const float rate = saltysd_display_sync_rate();
-  if (rate < 20.0f || rate > 240.0f) return;
-  if (!g_display_sync_overrides_rates) {
-    g_display_sync_base_pal = prefs_get_float("EmuCore/GS/FrameratePAL", 50.0f);
-    g_display_sync_base_ntsc = prefs_get_float("EmuCore/GS/FramerateNTSC", 59.94f);
-    g_display_sync_overrides_rates = 1;
-  }
-  if (g_display_sync_last_rate > 0.0f && fabsf(rate - g_display_sync_last_rate) < 0.25f)
-    return;
-
-  /* The core selects PAL or NTSC's limiter for the running title. Keep both
-   * targets in step so a region/title transition cannot leave a stale cap. */
-  prefs_set_float("EmuCore/GS/FrameratePAL", rate);
-  prefs_set_float("EmuCore/GS/FramerateNTSC", rate);
-  g_display_sync_last_rate = rate;
-  if (nl.changeSurface && NATIVE_CLASS &&
-      (!g_display_sync_surface_forced ||
-       fabsf(rate - g_display_sync_last_surface_rate) >= 0.25f)) {
-    nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
-                     screen_width, screen_height, rate);
-    g_display_sync_last_surface_rate = rate;
-    g_display_sync_surface_forced = 1;
-  }
-  if (nl.applySettings && NATIVE_CLASS)
-    nl.applySettings(fake_env, NATIVE_CLASS);
 }
 
 #define RESOLVE(field, sym) \
@@ -633,11 +568,10 @@ static void run_startup_sequence(void) {
   pthread_create_self_marker: pthr_create_self(&emu_thread, NULL, emu_thread_main, NULL);
 
   svcSleepThread(250000000ull);
-  const float initial_display_rate = saltysd_display_sync_rate();
-  g_display_sync_last_surface_rate = initial_display_rate > 0.0f ? initial_display_rate : 60.0f;
-  g_display_sync_surface_forced = saltysd_display_sync_active();
-  nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE, screen_width, screen_height,
-                   g_display_sync_last_surface_rate);
+  /* Keep the surface hint at the panel default; FPSLocker receives NetherSX2's
+   * own measured present target independently through the SaltyNX shared block. */
+  nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
+                   screen_width, screen_height, 60.0f);
   nl.applySettings(fake_env, NATIVE_CLASS);
 
   egl_gl_ownership_release();
@@ -2088,15 +2022,18 @@ int main(void) {
   saltysd_display_sync_configure(display_sync_enabled);
   saltysd_display_sync_poll();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
-  vk_diag_note("display-sync enabled=%d query=%d active=%d connect_rc=0x%08x service_rate=%u effective_rate=%.2f",
+  vk_diag_note("display-sync enabled=%d query=%d active=%d connect_rc=0x%08x "
+               "display_rate=%u present_fps=%.2f shared_ready=%d "
+               "fpslocker_target=%u",
                display_sync_enabled ? 1 : 0,
                saltysd_display_sync_query_status(),
                saltysd_display_sync_active() ? 1 : 0,
                saltysd_display_sync_connect_result(),
                saltysd_display_sync_service_rate(),
-               saltysd_display_sync_rate());
+               saltysd_display_sync_rate(),
+               saltysd_display_sync_target_ready(),
+               saltysd_display_sync_published_target());
 #endif
-  display_sync_prepare_initial_rate();
 #if GS_RENDERER == GS_RENDERER_OGL && !defined(USE_DEKO3D)
   // The unified Mesa SDK contains both the native NVC0 Gallium driver and Zink. Select Zink before
   // libemucore initializes EGL; leaving the override unset preserves Mesa's native default.

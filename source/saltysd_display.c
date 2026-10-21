@@ -1,12 +1,13 @@
-/* Minimal SaltySD display-rate client. The request/response layout follows the
- * public SaltyNX SaltySD IPC protocol (GetDisplayRefreshRate, command 10).
- * Keep this non-blocking: unlike SaltySD_Connect() in some client headers, do
- * not retry/sleep on startup when the named port is absent. */
+/* SaltySD bridge for following NetherSX2's present cadence from FPSLocker.
+ * The SaltyNX shared block is the target FPSLocker already consumes; this
+ * client updates only its FPSlocked byte and restores the previous value on
+ * shutdown. No SaltyNX/NX-FPS code is patched. */
 #include <stdint.h>
 #include <string.h>
 #include <switch/types.h>
 #include <switch/result.h>
 #include <switch/kernel/svc.h>
+#include <switch/kernel/shmem.h>
 #include <switch/arm/tls.h>
 #include <switch/arm/counter.h>
 
@@ -16,7 +17,13 @@
 #define SFCI_MAGIC 0x49434653u
 #define SFCO_MAGIC 0x4f434653u
 #define IPC_REQUEST 4u
+#define SALTYSD_GET_SHARED_MEMORY_HANDLE 7u
 #define SALTYSD_GET_DISPLAY_REFRESH_RATE 10u
+#define SALTYSD_SHARED_MEMORY_SIZE 0x1000u
+#define NX_FPS_MAGIC 0x00465053u
+/* Packed NxFpsSharedBlock prefix: MAGIC(4), FPS(1), FPSavg(4), pluginActive(1), FPSlocked. */
+#define NX_FPS_TARGET_OFFSET 10u
+#define PRESENT_INTERVAL_SAMPLES 16u
 
 static volatile int s_enabled;
 static volatile int s_port_available;
@@ -24,80 +31,219 @@ static volatile uint32_t s_service_rate;
 static volatile uint32_t s_last_connect_result = UINT32_MAX;
 static volatile int s_last_query_status = -1;
 static volatile uint64_t s_last_present_tick;
-#define PRESENT_INTERVAL_SAMPLES 16u
 static volatile uint64_t s_present_intervals[PRESENT_INTERVAL_SAMPLES];
 static volatile uint32_t s_present_interval_count;
 static volatile uint64_t s_next_query_tick;
+static volatile unsigned s_published_target;
+static volatile int s_target_ready;
 
-static int saltysd_query_refresh_rate(uint8_t *rate) {
-  Handle session = INVALID_HANDLE;
-  const Result connected = svcConnectToNamedPort(&session, SALTYSD_PORT);
-  __atomic_store_n(&s_last_connect_result, (uint32_t)connected, __ATOMIC_RELEASE);
-  if (R_FAILED(connected)) {
-    /* SaltyNX currently creates SaltySD with a single session slot. During
-     * SaltyNX Core startup that slot can be occupied, making connect return
-     * KernelError_OutOfResource even though the service is present. Treat
-     * this as a failed rate query, not as an absent port: presentation timing
-     * is still usable and swap interval 1 should be enabled. */
-    if (R_MODULE(connected) == Module_Kernel &&
-        R_DESCRIPTION(connected) == KernelError_OutOfResource)
-      return 1;
-    return 0;
-  }
+static SharedMemory s_shared_memory;
+static int s_shared_memory_mapped;
+static volatile uint8_t *s_fpslocked;
+static uint8_t s_saved_fpslocked;
+static uint8_t s_last_written_fpslocked;
+static int s_saved_fpslocked_valid;
+static unsigned s_candidate_target;
+static unsigned s_candidate_observations;
 
-  /* HIPC request with PID descriptor and a 32-byte SFCI payload. The raw
-   * request starts at TLS+0x20 after the aligned PID descriptor. */
+static int saltysd_send_query(Handle session, uint32_t command_id,
+                              uint32_t request_bytes, uint64_t *response,
+                              size_t response_words, Handle *out_handle) {
   uint32_t *tls = (uint32_t *)armGetTls();
   memset(tls, 0, 0x100);
   tls[0] = IPC_REQUEST;
-  tls[1] = 0x8000000cu;        /* 12 raw words plus the special-header flag */
-  tls[2] = 1;                  /* special header: send caller PID */
+  tls[1] = 0x80000000u | (request_bytes / 4u);
+  tls[2] = 1; /* PID descriptor, as required by the SaltySD IPC client. */
   uint64_t *request = (uint64_t *)((uint8_t *)tls + 0x20);
   request[0] = SFCI_MAGIC;
-  request[1] = SALTYSD_GET_DISPLAY_REFRESH_RATE;
+  request[1] = command_id;
 
   const Result sent = svcSendSyncRequest(session);
-  int valid = 0;
-  if (R_SUCCEEDED(sent)) {
-    const uint32_t ctrl0 = tls[0];
-    const uint32_t ctrl1 = tls[1];
-    uint32_t *cursor = tls + 2;
-    if (ctrl1 & 0x80000000u) {
-      const uint32_t special = *cursor++;
-      if (special & 1u) cursor += 2; /* response PID */
-      cursor += ((special >> 1) & 15u) + ((special >> 5) & 15u);
-    }
-    cursor += ((ctrl0 >> 16) & 15u) * 2u;
-    cursor += (((ctrl0 >> 20) & 15u) + ((ctrl0 >> 24) & 15u) +
-               ((ctrl0 >> 28) & 15u)) * 3u;
-    const uintptr_t raw_address = ((uintptr_t)cursor + 15u) & ~(uintptr_t)15u;
-    const uint32_t response_bytes = (ctrl1 & 0x1ffu) * 4u;
-    if (response_bytes >= 24u && raw_address + response_bytes <=
-        (uintptr_t)tls + 0x100u) {
-      const uint64_t *response = (const uint64_t *)raw_address;
-      const uint64_t protocol_result = response[1];
-      const uint64_t refresh_rate = response[2];
-      if ((uint32_t)response[0] == SFCO_MAGIC && protocol_result == 0 &&
-          refresh_rate >= 20 && refresh_rate <= 240) {
-        *rate = (uint8_t)refresh_rate;
-        valid = 1;
+  if (R_FAILED(sent))
+    return 0;
+
+  const uint32_t ctrl0 = tls[0];
+  const uint32_t ctrl1 = tls[1];
+  uint32_t *cursor = tls + 2;
+  unsigned copied_handles = 0;
+  unsigned moved_handles = 0;
+  Handle first_handle = INVALID_HANDLE;
+  if (ctrl1 & 0x80000000u) {
+    const uint32_t special = *cursor++;
+    if (special & 1u)
+      cursor += 2; /* response PID */
+    copied_handles = (special >> 1) & 15u;
+    moved_handles = (special >> 5) & 15u;
+    if (copied_handles + moved_handles)
+      first_handle = (Handle)*cursor;
+    cursor += copied_handles + moved_handles;
+  }
+  cursor += ((ctrl0 >> 16) & 15u) * 2u;
+  cursor += (((ctrl0 >> 20) & 15u) + ((ctrl0 >> 24) & 15u) +
+             ((ctrl0 >> 28) & 15u)) * 3u;
+  if (out_handle) {
+    if (!copied_handles || first_handle == INVALID_HANDLE)
+      return 0;
+    *out_handle = first_handle;
+  }
+  if (!response_words)
+    return out_handle != NULL;
+
+  const uintptr_t raw_address = ((uintptr_t)cursor + 15u) & ~(uintptr_t)15u;
+  const uint32_t response_bytes = (ctrl1 & 0x1ffu) * 4u;
+  if (response_bytes < response_words * sizeof(uint64_t) ||
+      raw_address + response_bytes > (uintptr_t)tls + 0x100u)
+    return 0;
+
+  const uint64_t *raw = (const uint64_t *)raw_address;
+  if ((uint32_t)raw[0] != SFCO_MAGIC || raw[1] != 0)
+    return 0;
+  if (response)
+    memcpy(response, raw, response_words * sizeof(uint64_t));
+  return 1;
+}
+
+static int saltysd_query_refresh_rate(Handle session, uint8_t *rate) {
+  uint64_t response[3] = {0};
+  if (!saltysd_send_query(session, SALTYSD_GET_DISPLAY_REFRESH_RATE, 32,
+                          response, 3, NULL))
+    return 0;
+  if (response[2] < 20 || response[2] > 240)
+    return 0;
+  *rate = (uint8_t)response[2];
+  return 1;
+}
+
+static int saltysd_map_shared_memory(Handle session) {
+  if (s_shared_memory_mapped)
+    return 1;
+  Handle shared_handle = INVALID_HANDLE;
+  if (!saltysd_send_query(session, SALTYSD_GET_SHARED_MEMORY_HANDLE, 16,
+                          NULL, 2, &shared_handle))
+    return 0;
+
+  shmemLoadRemote(&s_shared_memory, shared_handle,
+                  SALTYSD_SHARED_MEMORY_SIZE, Perm_Rw);
+  if (R_FAILED(shmemMap(&s_shared_memory))) {
+    shmemClose(&s_shared_memory);
+    return 0;
+  }
+  s_shared_memory_mapped = 1;
+  return 1;
+}
+
+static int saltysd_find_fpslocked(void) {
+  s_fpslocked = NULL;
+  if (!s_shared_memory_mapped)
+    return 0;
+  const uint8_t *base = (const uint8_t *)shmemGetAddr(&s_shared_memory);
+  if (!base)
+    return 0;
+
+  for (size_t offset = 0; offset + NX_FPS_TARGET_OFFSET + 1 <=
+                           SALTYSD_SHARED_MEMORY_SIZE; offset += 4) {
+    uint32_t magic;
+    memcpy(&magic, base + offset, sizeof(magic));
+    if (magic == NX_FPS_MAGIC) {
+      s_fpslocked = (volatile uint8_t *)(base + offset + NX_FPS_TARGET_OFFSET);
+      __atomic_store_n(&s_target_ready, 1, __ATOMIC_RELEASE);
+      if (!s_saved_fpslocked_valid) {
+        s_saved_fpslocked = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
+        s_last_written_fpslocked = s_saved_fpslocked;
+        s_saved_fpslocked_valid = 1;
+        __atomic_store_n(&s_published_target, s_saved_fpslocked, __ATOMIC_RELEASE);
       }
+      return 1;
     }
   }
-  svcCloseHandle(session);
-  return valid ? 2 : 1; /* 0 = unavailable, 1 = present/query failed, 2 = rate */
+  s_saved_fpslocked_valid = 0;
+  __atomic_store_n(&s_target_ready, 0, __ATOMIC_RELEASE);
+  s_candidate_target = 0;
+  s_candidate_observations = 0;
+  __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
+  return 0;
+}
+
+static unsigned estimate_present_fps(void) {
+  const uint64_t frequency = armGetSystemTickFreq();
+  uint32_t count = __atomic_load_n(&s_present_interval_count, __ATOMIC_ACQUIRE);
+  if (count > PRESENT_INTERVAL_SAMPLES)
+    count = PRESENT_INTERVAL_SAMPLES;
+  if (count < 6)
+    return 0;
+
+  uint64_t total = 0;
+  unsigned samples = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint64_t interval = __atomic_load_n(&s_present_intervals[i],
+                                               __ATOMIC_ACQUIRE);
+    if (interval < frequency / 240u || interval > frequency / 10u)
+      continue;
+    total += interval;
+    samples++;
+  }
+  if (samples < 6 || !total)
+    return 0;
+
+  const uint64_t fps = (frequency * samples + total / 2u) / total;
+  return (fps >= 14 && fps <= 120) ? (unsigned)fps : 0;
+}
+
+static unsigned quantize_fpslocker_target(unsigned fps) {
+  static const uint8_t targets[] = {15, 20, 25, 30, 35, 40, 45, 50, 55, 60};
+  unsigned best = 0;
+  unsigned best_delta = UINT32_MAX;
+  for (size_t i = 0; i < sizeof(targets); i++) {
+    const unsigned delta = fps > targets[i] ? fps - targets[i] : targets[i] - fps;
+    if (delta < best_delta) {
+      best = targets[i];
+      best_delta = delta;
+    }
+  }
+  return best;
+}
+
+static void publish_present_rate(void) {
+  if (!saltysd_find_fpslocked())
+    return;
+  const unsigned fps = estimate_present_fps();
+  const unsigned target = fps ? quantize_fpslocker_target(fps) : 0;
+  if (!target)
+    return;
+
+  if (target == s_candidate_target)
+    s_candidate_observations++;
+  else {
+    s_candidate_target = target;
+    s_candidate_observations = 1;
+  }
+  /* Two one-second observations suppress mode changes caused by short hitches. */
+  if (s_candidate_observations < 2 || target == s_last_written_fpslocked)
+    return;
+
+  __atomic_store_n(s_fpslocked, (uint8_t)target, __ATOMIC_RELEASE);
+  s_last_written_fpslocked = (uint8_t)target;
+  __atomic_store_n(&s_published_target, target, __ATOMIC_RELEASE);
 }
 
 void saltysd_display_sync_configure(bool enabled) {
-  __atomic_store_n(&s_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
   if (!enabled) {
+    saltysd_display_sync_shutdown();
+    __atomic_store_n(&s_enabled, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_query_status, -1, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_present_tick, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_present_interval_count, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_next_query_tick, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
+    s_candidate_target = 0;
+    s_candidate_observations = 0;
+    return;
   }
+
+  __atomic_store_n(&s_enabled, 1, __ATOMIC_RELEASE);
 }
 
 void saltysd_display_sync_poll(void) {
@@ -115,21 +261,32 @@ void saltysd_display_sync_poll(void) {
       break;
   }
 
-  uint8_t rate = 0;
-  const int query_status = saltysd_query_refresh_rate(&rate);
-  __atomic_store_n(&s_last_query_status, query_status, __ATOMIC_RELEASE);
-  if (query_status == 2) {
-    __atomic_store_n(&s_service_rate, rate, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_port_available, 1, __ATOMIC_RELEASE);
-  } else if (query_status == 1) {
-    /* Service exists but the rate query failed; use presentation timing. */
+  Handle session = INVALID_HANDLE;
+  const Result connected = svcConnectToNamedPort(&session, SALTYSD_PORT);
+  __atomic_store_n(&s_last_connect_result, (uint32_t)connected, __ATOMIC_RELEASE);
+  if (R_FAILED(connected)) {
+    const int busy = R_MODULE(connected) == Module_Kernel &&
+                     R_DESCRIPTION(connected) == KernelError_OutOfResource;
+    const int query_status = busy ? 1 : 0;
+    __atomic_store_n(&s_last_query_status, query_status, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_port_available, busy ? 1 : 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_port_available, 1, __ATOMIC_RELEASE);
-  } else {
-    /* No service: make the setting a true no-op and keep today's pacing. */
-    __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
+    if (busy)
+      publish_present_rate(); /* Reuse a previously mapped NX-FPS block. */
+    return;
   }
+
+  uint8_t rate = 0;
+  const int query_ok = saltysd_query_refresh_rate(session, &rate);
+  __atomic_store_n(&s_last_query_status, query_ok ? 2 : 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_port_available, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_service_rate, query_ok ? rate : 0, __ATOMIC_RELEASE);
+
+  /* SaltySD returns the shared handle over the same short-lived session. */
+  if (!s_shared_memory_mapped)
+    saltysd_map_shared_memory(session);
+  svcCloseHandle(session);
+  publish_present_rate();
 }
 
 void saltysd_display_sync_note_present(void) {
@@ -148,14 +305,31 @@ void saltysd_display_sync_note_present(void) {
     return;
   }
 
-  /* Keep recent present intervals. A raw presents-per-second average is not a
-   * display refresh estimate: a slow guest can present at 20 FPS on a 50/60 Hz
-   * display. Instead, rate estimation below checks for a stable 50/60 Hz
-   * cadence and its integer-multiple intervals (missed refreshes). */
   const uint32_t index = __atomic_fetch_add(&s_present_interval_count, 1,
                                              __ATOMIC_ACQ_REL);
   __atomic_store_n(&s_present_intervals[index % PRESENT_INTERVAL_SAMPLES], elapsed,
                    __ATOMIC_RELEASE);
+}
+
+void saltysd_display_sync_shutdown(void) {
+  __atomic_store_n(&s_enabled, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
+  if (s_fpslocked && s_saved_fpslocked_valid) {
+    uint32_t magic = 0;
+    memcpy(&magic, (const void *)(s_fpslocked - NX_FPS_TARGET_OFFSET),
+           sizeof(magic));
+    const uint8_t current = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
+    if (magic == NX_FPS_MAGIC && current == s_last_written_fpslocked)
+      __atomic_store_n(s_fpslocked, s_saved_fpslocked, __ATOMIC_RELEASE);
+  }
+  s_fpslocked = NULL;
+  s_saved_fpslocked_valid = 0;
+  if (s_shared_memory_mapped)
+    shmemClose(&s_shared_memory);
+  s_shared_memory_mapped = 0;
+  memset(&s_shared_memory, 0, sizeof(s_shared_memory));
+  __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_target_ready, 0, __ATOMIC_RELEASE);
 }
 
 bool saltysd_display_sync_active(void) {
@@ -163,70 +337,10 @@ bool saltysd_display_sync_active(void) {
          __atomic_load_n(&s_port_available, __ATOMIC_ACQUIRE);
 }
 
-static unsigned estimate_present_display_rate(void) {
-  const uint64_t frequency = armGetSystemTickFreq();
-  uint32_t count = __atomic_load_n(&s_present_interval_count, __ATOMIC_ACQUIRE);
-  if (count > PRESENT_INTERVAL_SAMPLES)
-    count = PRESENT_INTERVAL_SAMPLES;
-  if (count < 4)
-    return 0;
-
-  unsigned matches_50 = 0, matches_60 = 0;
-  uint64_t error_50 = 0, error_60 = 0;
-  for (uint32_t i = 0; i < count; i++) {
-    const uint64_t interval = __atomic_load_n(&s_present_intervals[i],
-                                               __ATOMIC_ACQUIRE);
-    if (!interval)
-      continue;
-
-    const uint64_t period_50 = frequency / 50u;
-    const uint64_t period_60 = frequency / 60u;
-    const uint64_t periods_50 = (interval + period_50 / 2u) / period_50;
-    const uint64_t periods_60 = (interval + period_60 / 2u) / period_60;
-    if (periods_50 >= 1 && periods_50 <= 8) {
-      const uint64_t expected = periods_50 * period_50;
-      const uint64_t delta = interval > expected ? interval - expected : expected - interval;
-      if (delta <= period_50 / 6u) {
-        matches_50++;
-        error_50 += (delta * 1000u) / period_50;
-      }
-    }
-    if (periods_60 >= 1 && periods_60 <= 8) {
-      const uint64_t expected = periods_60 * period_60;
-      const uint64_t delta = interval > expected ? interval - expected : expected - interval;
-      if (delta <= period_60 / 6u) {
-        matches_60++;
-        error_60 += (delta * 1000u) / period_60;
-      }
-    }
-  }
-
-  if (matches_50 < 4 && matches_60 < 4)
-    return 0;
-  if (matches_50 >= matches_60 + 2)
-    return 50;
-  if (matches_60 >= matches_50 + 2)
-    return 60;
-  if (matches_50 >= 4 && matches_60 >= 4) {
-    const uint64_t avg_50 = error_50 / matches_50;
-    const uint64_t avg_60 = error_60 / matches_60;
-    if (avg_50 + 40u < avg_60)
-      return 50;
-    if (avg_60 + 40u < avg_50)
-      return 60;
-  }
-  return 0; /* ambiguous timing: keep the core's PAL/NTSC defaults */
-}
-
 float saltysd_display_sync_rate(void) {
   if (!saltysd_display_sync_active())
     return 0.0f;
-  const uint32_t service_rate = __atomic_load_n(&s_service_rate, __ATOMIC_ACQUIRE);
-  if (service_rate)
-    return (float)service_rate;
-  /* Only accept a stable display cadence inferred from recent timestamps;
-   * never mistake a slow game's delivered FPS for the panel refresh rate. */
-  return (float)estimate_present_display_rate();
+  return (float)estimate_present_fps();
 }
 
 int saltysd_display_sync_query_status(void) {
@@ -239,4 +353,12 @@ unsigned saltysd_display_sync_service_rate(void) {
 
 unsigned saltysd_display_sync_connect_result(void) {
   return __atomic_load_n(&s_last_connect_result, __ATOMIC_ACQUIRE);
+}
+
+unsigned saltysd_display_sync_published_target(void) {
+  return __atomic_load_n(&s_published_target, __ATOMIC_ACQUIRE);
+}
+
+bool saltysd_display_sync_target_ready(void) {
+  return __atomic_load_n(&s_target_ready, __ATOMIC_ACQUIRE) != 0;
 }
