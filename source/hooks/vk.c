@@ -20,6 +20,7 @@
  */
 
 #include "vk.h"
+#include "../saltysd_display.h"
 
 #ifdef USE_VULKAN
 
@@ -1244,6 +1245,7 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     reset_tracked_swapchain();
 
   VkSwapchainCreateInfoKHR modified = *create_info;
+  const int force_vsync = saltysd_display_sync_active();
   int compatible = 0;
   const int requested = lsfg_requested();
   const int want_lsfg = lsfg_device_capable;
@@ -1287,7 +1289,11 @@ vkCreateSwapchainKHR_shim(VkDevice device,
   if (requested && want_lsfg && have_dll && !compatible)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-  VkResult result = create_fn(device, compatible ? &modified : create_info, alloc, out);
+  if (force_vsync)
+    modified.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  const VkSwapchainCreateInfoKHR *selected_create_info =
+      (compatible || force_vsync) ? &modified : create_info;
+  VkResult result = create_fn(device, selected_create_info, alloc, out);
   if (result == VK_SUCCESS) {
     reset_tracked_swapchain();
     tracked_swapchain = *out;
@@ -1300,7 +1306,7 @@ vkCreateSwapchainKHR_shim(VkDevice device,
                result, out && result == VK_SUCCESS ? (void *)*out : NULL,
                compatible, compatible ? modified.imageUsage : create_info->imageUsage,
                compatible ? modified.minImageCount : create_info->minImageCount,
-               compatible ? modified.presentMode : create_info->presentMode);
+               selected_create_info->presentMode);
 #endif
   return result;
 }
@@ -1415,6 +1421,7 @@ static int lsfg_try_create(VkQueue queue) {
 static VkResult VKAPI_CALL
 vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   ++vk_present_count;
+  saltysd_display_sync_note_present();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   /* Every present, whatever the path below decides to do with it. */
   perf_observe_present();

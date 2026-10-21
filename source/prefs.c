@@ -172,6 +172,7 @@ static void prefs_seed_defaults(void) {
   // "4:3", "16:9". Editable in nethersx2.ini.
   prefs_seed("EmuCore/GS/AspectRatio", "4:3");
   prefs_seed("EmuCore/GS/VsyncEnable", "0");
+  prefs_seed("Wrapper/SyncFrameLimitToDisplay", "false");
 #if GS_RENDERER == GS_RENDERER_VK
   // Keep presentation work off the GS thread by default. The two bundled cores
   // use opposite names for the same state.
@@ -266,23 +267,40 @@ void prefs_init(const char *ini_path) {
     prefs_set_float("Wrapper/LSFGFlowScale", lsfg_flow > 0.375f ? 0.5f : 0.25f);
 }
 
-void prefs_save(void) {
+static void prefs_save_internal(const char *override_key1, const char *override_value1,
+                                const char *override_key2, const char *override_value2) {
   if (s_ini_path[0] == 0)
     return;
 
   FILE *f = fopen(s_ini_path, "w");
-  if (!f) {
-
+  if (!f)
     return;
-  }
 
   fputs("# NetherSX2 settings -- auto-written; edit with the emulator stopped\n",
         f);
   // Insertion order: stable and readable; the core never relies on ordering.
-  for (int i = 0; i < s_count; ++i)
-    fprintf(f, "%s = %s\n", s_map[i].key, s_map[i].val);
+  for (int i = 0; i < s_count; ++i) {
+    const char *value = s_map[i].val;
+    if (override_key1 && strcmp(s_map[i].key, override_key1) == 0)
+      value = override_value1;
+    else if (override_key2 && strcmp(s_map[i].key, override_key2) == 0)
+      value = override_value2;
+    fprintf(f, "%s = %s\n", s_map[i].key, value);
+  }
 
   fclose(f);
+}
+
+void prefs_save(void) {
+  prefs_save_internal(NULL, NULL, NULL, NULL);
+}
+
+void prefs_save_with_float_overrides(const char *key1, float value1,
+                                     const char *key2, float value2) {
+  char value1_text[64], value2_text[64];
+  snprintf(value1_text, sizeof(value1_text), "%g", value1);
+  snprintf(value2_text, sizeof(value2_text), "%g", value2);
+  prefs_save_internal(key1, value1_text, key2, value2_text);
 }
 
 bool prefs_contains(const char *key) {

@@ -120,7 +120,7 @@ private:
   uint64_t m_generation = 0;
   bool m_presented = false;
   ImageVisibility m_image_visibility;
-  int m_slot = -1, m_swap_interval = 1;
+  int m_slot = -1, m_swap_interval = 1, m_applied_swap_interval = -1;
 };
 Gpu &gpu();
 void invalidate_native_state();

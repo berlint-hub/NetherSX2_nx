@@ -26,6 +26,7 @@
 #include "imports.h"
 #include "jni_fake.h"
 #include "prefs.h"
+#include "saltysd_display.h"
 #include "libc_shim.h"
 #include "corelog.h"
 #include "pthr.h"
@@ -198,6 +199,11 @@ static void set_screen_size(int w, int h) {
 
 typedef unsigned char jbool;
 
+static void prefs_save_display_sync_safe(void);
+static void display_sync_poll_and_apply(void);
+static void display_sync_restore(void);
+static void display_sync_prepare_initial_rate(void);
+
 static struct {
   int  (*JNI_OnLoad)(void *vm, void *reserved);
   void (*JNI_OnUnload)(void *vm, void *reserved);
@@ -231,6 +237,88 @@ static struct {
   int (*getCheevoMaximumPointsForGame)(void *env, void *cls);
   void *(*getCheevoGameTitle)(void *env, void *cls);
 } nl;
+
+static float g_display_sync_base_pal;
+static float g_display_sync_base_ntsc;
+static float g_display_sync_last_rate;
+static float g_display_sync_last_surface_rate;
+static int g_display_sync_surface_forced;
+static int g_display_sync_overrides_rates;
+
+static void display_sync_restore(void) {
+  if (!g_display_sync_overrides_rates) return;
+  prefs_set_float("EmuCore/GS/FrameratePAL", g_display_sync_base_pal);
+  prefs_set_float("EmuCore/GS/FramerateNTSC", g_display_sync_base_ntsc);
+  g_display_sync_overrides_rates = 0;
+  g_display_sync_last_rate = 0.0f;
+}
+
+static void display_sync_prepare_initial_rate(void) {
+  if (!saltysd_display_sync_active()) return;
+  const float rate = saltysd_display_sync_rate();
+  if (rate < 20.0f || rate > 240.0f) return;
+  g_display_sync_base_pal = prefs_get_float("EmuCore/GS/FrameratePAL", 50.0f);
+  g_display_sync_base_ntsc = prefs_get_float("EmuCore/GS/FramerateNTSC", 59.94f);
+  g_display_sync_overrides_rates = 1;
+  g_display_sync_last_rate = rate;
+  prefs_set_float("EmuCore/GS/FrameratePAL", rate);
+  prefs_set_float("EmuCore/GS/FramerateNTSC", rate);
+}
+
+static void prefs_save_display_sync_safe(void) {
+  if (g_display_sync_overrides_rates) {
+    prefs_save_with_float_overrides("EmuCore/GS/FrameratePAL", g_display_sync_base_pal,
+                                    "EmuCore/GS/FramerateNTSC", g_display_sync_base_ntsc);
+  } else {
+    prefs_save();
+  }
+}
+
+static void display_sync_poll_and_apply(void) {
+  saltysd_display_sync_poll();
+  if (!saltysd_display_sync_active()) {
+    const int restore_core_rate = g_display_sync_overrides_rates;
+    const int restore_surface_rate = g_display_sync_surface_forced ||
+        (g_display_sync_last_surface_rate > 0.0f &&
+         fabsf(g_display_sync_last_surface_rate - 60.0f) >= 0.25f);
+    display_sync_restore();
+    if (restore_surface_rate && nl.changeSurface && NATIVE_CLASS) {
+      nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
+                       screen_width, screen_height, 60.0f);
+      g_display_sync_last_surface_rate = 60.0f;
+      g_display_sync_surface_forced = 0;
+    }
+    if ((restore_core_rate || restore_surface_rate) && nl.applySettings && NATIVE_CLASS)
+      nl.applySettings(fake_env, NATIVE_CLASS);
+    return;
+  }
+
+  const float rate = saltysd_display_sync_rate();
+  if (rate < 20.0f || rate > 240.0f) return;
+  if (!g_display_sync_overrides_rates) {
+    g_display_sync_base_pal = prefs_get_float("EmuCore/GS/FrameratePAL", 50.0f);
+    g_display_sync_base_ntsc = prefs_get_float("EmuCore/GS/FramerateNTSC", 59.94f);
+    g_display_sync_overrides_rates = 1;
+  }
+  if (g_display_sync_last_rate > 0.0f && fabsf(rate - g_display_sync_last_rate) < 0.25f)
+    return;
+
+  /* The core selects PAL or NTSC's limiter for the running title. Keep both
+   * targets in step so a region/title transition cannot leave a stale cap. */
+  prefs_set_float("EmuCore/GS/FrameratePAL", rate);
+  prefs_set_float("EmuCore/GS/FramerateNTSC", rate);
+  g_display_sync_last_rate = rate;
+  if (nl.changeSurface && NATIVE_CLASS &&
+      (!g_display_sync_surface_forced ||
+       fabsf(rate - g_display_sync_last_surface_rate) >= 0.25f)) {
+    nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
+                     screen_width, screen_height, rate);
+    g_display_sync_last_surface_rate = rate;
+    g_display_sync_surface_forced = 1;
+  }
+  if (nl.applySettings && NATIVE_CLASS)
+    nl.applySettings(fake_env, NATIVE_CLASS);
+}
 
 #define RESOLVE(field, sym) \
   nl.field = (void *)so_find_addr_rx(&emu_mod, sym)
@@ -471,7 +559,7 @@ static void run_startup_sequence(void) {
   prefs_set_string("Logging/EnableEEConsole", "0");
   prefs_set_string("Logging/EnableIOPConsole", "0");
 #endif
-  prefs_save();
+  prefs_save_display_sync_safe();
 
   if (!nl.isBIOSAvailable(fake_env, NATIVE_CLASS))
     fatal_error("No usable PS2 BIOS found in\n%s.", BIOS_DIR);
@@ -511,8 +599,11 @@ static void run_startup_sequence(void) {
   pthread_create_self_marker: pthr_create_self(&emu_thread, NULL, emu_thread_main, NULL);
 
   svcSleepThread(250000000ull);
-  nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
-                   screen_width, screen_height, 60.0f);
+  const float initial_display_rate = saltysd_display_sync_rate();
+  g_display_sync_last_surface_rate = initial_display_rate > 0.0f ? initial_display_rate : 60.0f;
+  g_display_sync_surface_forced = saltysd_display_sync_active();
+  nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE, screen_width, screen_height,
+                   g_display_sync_last_surface_rate);
   nl.applySettings(fake_env, NATIVE_CLASS);
 
   egl_gl_ownership_release();
@@ -1300,7 +1391,7 @@ static void quick_menu_close(void) {
   g_quick_menu_mode = QUICK_MENU_CLOSED;
   if (g_quick_menu_restore_messages) {
     prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
-    prefs_save();
+    prefs_save_display_sync_safe();
     nl.applySettings(fake_env, NATIVE_CLASS);
     g_quick_menu_restore_messages = 0;
   }
@@ -1418,7 +1509,7 @@ static void quick_menu_persist_game_crc(void) {
 static void quick_menu_save_prefs_preserving_messages(void) {
   if (g_quick_menu_restore_messages)
     prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
-  prefs_save();
+  prefs_save_display_sync_safe();
   if (g_quick_menu_restore_messages)
     prefs_set_bool("EmuCore/GS/OsdShowMessages", true);
 }
@@ -1958,6 +2049,10 @@ int main(void) {
 
   // settings store: load nethersx2.ini + seed OpenGL/folder defaults
   prefs_init(PREFS_PATH);
+  saltysd_display_sync_configure(
+      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false));
+  saltysd_display_sync_poll();
+  display_sync_prepare_initial_rate();
 #if GS_RENDERER == GS_RENDERER_OGL && !defined(USE_DEKO3D)
   // The unified Mesa SDK contains both the native NVC0 Gallium driver and Zink. Select Zink before
   // libemucore initializes EGL; leaving the override unset preserves Mesa's native default.
@@ -2230,6 +2325,7 @@ int main(void) {
       applet_running = appletMainLoop();
       if (!applet_running) break;
       quick_menu_persist_game_crc();
+      display_sync_poll_and_apply();
       update_touch();
 
       const int frame_count = FRAME_COUNT;
@@ -2292,6 +2388,7 @@ int main(void) {
 #endif
   libc_memory_shutdown();
   so_unload(&emu_mod);
+  display_sync_restore();
   prefs_save();
   const bool storage_socket = switchStorageSocketReady();
   switchStorageShutdown();

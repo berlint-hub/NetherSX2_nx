@@ -4,6 +4,7 @@
 #include "dk_boundary.h"
 #include "dk_presentation.h"
 #include "dk_transfer.h"
+#include "../saltysd_display.h"
 #include <lsfg/common/sha256.hpp>
 #include <array>
 #include <cstdio>
@@ -195,7 +196,8 @@ bool host_create(void *core, const WindowAbi *window, unsigned vsync) {
   wi.width = screen_width;
   wi.height = screen_height;
   wi.scale = window->scale > 0 ? window->scale : 1.0f;
-  wi.refresh_rate = 60.0f;
+  const float display_rate = saltysd_display_sync_rate();
+  wi.refresh_rate = display_rate > 0.0f ? display_rate : 60.0f;
   *reinterpret_cast<unsigned *>(static_cast<uint8_t *>(core) + 0x3c) = vsync;
   gpu().set_swap_interval(vsync ? 1 : 0);
 
@@ -264,10 +266,12 @@ bool classic_begin_present(void *core, bool skip) {
     reinterpret_cast<void (*)()>(core_address(profile->imgui_end_frame))();
   });
 }
-void host_end_present(void *) {
+void host_end_present(void *core) {
   reinterpret_cast<void (*)()>(core_address(profile->imgui_render))();
   ui_render();
   gpu().present();
+  const float display_rate = saltysd_display_sync_rate();
+  if (display_rate > 0.0f) window_info(core)->refresh_rate = display_rate;
   __atomic_add_fetch(&dk_present_count, 1, __ATOMIC_RELAXED);
 }
 void host_vsync(void *core, unsigned mode) {
@@ -281,7 +285,11 @@ void host_imgui_destroy(void *) { ui_shutdown(); }
 bool host_imgui_font(void *) {
   return ui_update_font();
 }
-bool host_refresh(void *, float *rate) { if (rate) *rate = 60; return true; }
+bool host_refresh(void *, float *rate) {
+  const float display_rate = saltysd_display_sync_rate();
+  if (rate) *rate = display_rate > 0.0f ? display_rate : 60.0f;
+  return true;
+}
 bool host_timing(void *, bool) { return false; }
 float host_gpu_time(void *) { return 0; }
 

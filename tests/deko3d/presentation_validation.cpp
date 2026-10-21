@@ -9,6 +9,8 @@ namespace {
 unsigned checked = 0, acquired = 0, copied = 0, next_slot = 0;
 int held_slot = -1;
 unsigned interval = 1;
+bool display_sync_active = false;
+unsigned sync_present_notifications = 0;
 bool fail_acquire = false;
 std::array<const DkImage *, 3> slots{};
 std::unordered_map<const DkImage *, unsigned> pixels;
@@ -24,6 +26,11 @@ void require(bool condition, const char *message) {
 }
 
 extern "C" {
+bool saltysd_display_sync_active(void) { return display_sync_active; }
+float saltysd_display_sync_rate(void) { return display_sync_active ? 50.0f : 0.0f; }
+void saltysd_display_sync_note_present(void) {
+  if (display_sync_active) ++sync_present_notifications;
+}
 int dkQueueAcquireImage(DkQueue, DkSwapchain) {
   require(held_slot < 0, "acquired a second display buffer before presenting the first");
   if (fail_acquire) return -1;
@@ -140,6 +147,20 @@ int main() {
     require(waited.front(), "initial presentation was submitted before initialization completed");
     for (size_t i = 1; i < waited.size(); ++i)
       require(!waited[i], "steady-state presentation introduced a CPU wait");
+
+    const unsigned notes_before_sync = sync_present_notifications;
+    display_sync_active = true;
+    render(16);
+    require(interval == 1 && presented.back().interval == 1,
+        "active display sync did not force swap interval one");
+    require(sync_present_notifications == notes_before_sync + 1,
+        "a successful synced present was not timestamped for fallback pacing");
+    display_sync_active = false;
+    render(17);
+    require(interval == 2 && presented.back().interval == 2,
+        "disabling display sync did not restore the configured swap interval");
+    require(sync_present_notifications == notes_before_sync + 1,
+        "present timestamps continued to be sampled after sync was disabled");
 
     const size_t previous_presented = presented.size();
     fail_acquire = true;

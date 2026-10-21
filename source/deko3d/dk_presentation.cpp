@@ -1,4 +1,5 @@
 #include "dk_gpu.h"
+#include "../saltysd_display.h"
 #include <algorithm>
 
 namespace nxdk {
@@ -10,14 +11,16 @@ Image *Gpu::backbuffer() {
 }
 
 void Gpu::present() {
+  set_swap_interval(m_swap_interval);
   Image *frame = backbuffer();
   if (!frame) return;
   const GeneratedFrame generated = lsfg_generate(*frame);
   if (generated.image) {
     m_swapchain.setSwapInterval(1);
+    m_applied_swap_interval = 1;
     present_image(*generated.image);
     present_image(*generated.source);
-    m_swapchain.setSwapInterval(m_swap_interval);
+    set_swap_interval(m_swap_interval);
   } else {
     present_backbuffer();
   }
@@ -39,12 +42,17 @@ void Gpu::present_backbuffer() {
   if (slot < 0) return;
   submit(!m_presented);
   m_queue.presentImage(m_swapchain, slot);
+  saltysd_display_sync_note_present();
   m_presented = true;
   m_slot = -1;
 }
 
 void Gpu::set_swap_interval(int interval) {
   m_swap_interval = std::max(0, interval);
-  if (m_swapchain) m_swapchain.setSwapInterval(m_swap_interval);
+  const int effective_interval = saltysd_display_sync_active() ? 1 : m_swap_interval;
+  if (m_swapchain && effective_interval != m_applied_swap_interval) {
+    m_swapchain.setSwapInterval(effective_interval);
+    m_applied_swap_interval = effective_interval;
+  }
 }
 }

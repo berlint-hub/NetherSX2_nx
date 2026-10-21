@@ -1,4 +1,5 @@
 #include "dk_gpu.h"
+#include "../saltysd_display.h"
 #include "dk_render_state.h"
 #include <algorithm>
 #include <cstdlib>
@@ -239,7 +240,8 @@ bool Gpu::create_window(void *window, uint32_t width, uint32_t height) {
 
   m_swapchain = dk::SwapchainMaker{m_device, window, images}.create();
   if (!m_swapchain) { destroy_window(); return false; }
-  m_swapchain.setSwapInterval(m_swap_interval);
+  m_applied_swap_interval = -1;
+  set_swap_interval(m_swap_interval);
 
   return true;
 }
@@ -248,6 +250,7 @@ void Gpu::destroy_window() {
   if (m_swapchain) finish();
   m_slot = -1;
   m_swapchain = nullptr;
+  m_applied_swap_interval = -1;
   m_backbuffers = {};
   invalidate_native_state();
 }

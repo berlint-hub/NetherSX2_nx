@@ -660,6 +660,7 @@ static const Opt S_framerate[] = {
   O_SCALED_RANGEG("Slow motion",  "Framerate/SlomoScalar",   10, 300, 1, "0.5", 100, "%", "EmuCore/GS/FrameLimitEnable", "false"),
   O_SCALED_RANGE("NTSC frame rate", "EmuCore/GS/FramerateNTSC", 15, 120, 1, "59.94", 1, " Hz"),
   O_SCALED_RANGE("PAL frame rate",  "EmuCore/GS/FrameratePAL",  12, 100, 1, "50", 1, " Hz"),
+  O_CHOICE("Sync frame limit to display refresh rate", "Wrapper/SyncFrameLimitToDisplay", C_bool, "false"),
 };
 static const Opt S_launcher[] = {
   O_CHOICE("Language",          "Wrapper/Language",       C_launcherLanguage, "system"),
@@ -711,6 +712,8 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Overrides the aspect ratio used for pre-rendered movie sequences independently of gameplay. Leave it Off unless a game's FMV is shown with the wrong shape."},
   {"EmuCore/GS/VsyncEnable", "Frame pacing / latency",
    "Synchronizes presentation with the Switch display to reduce tearing. It can add latency or reduce performance headroom; Adaptive synchronizes only when emulation can keep up."},
+  {"Wrapper/SyncFrameLimitToDisplay", "Frame pacing / latency",
+   "When SaltySD is available, samples display refresh about once per second, temporarily updates both PAL and NTSC frame-limiter targets, and forces one-vblank presentation. If the rate query fails while the service remains available, present timestamps are the fallback. Stored PAL/NTSC values are restored for saving and on exit. Off by default; without SaltySD this option is a no-op."},
   {"EmuCore/GS/SkipDuplicateFrames", "Performance / latency trade-off",
    "Avoids presenting unchanged frames in many 25/30 FPS games. This is not emulation frame skipping: the frame is still rendered. It can free GPU time and helps frame generation, but may worsen pacing or input latency."},
   {"EmuCore/GS/DisableThreadedPresentation", "Frame pacing / performance",
