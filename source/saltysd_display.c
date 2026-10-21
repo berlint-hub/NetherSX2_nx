@@ -21,6 +21,7 @@
 static volatile int s_enabled;
 static volatile int s_port_available;
 static volatile uint32_t s_service_rate;
+static volatile int s_last_query_status = -1;
 static volatile uint64_t s_last_present_tick;
 static volatile uint64_t s_present_period_ticks;
 static uint64_t s_next_query_tick;
@@ -83,6 +84,7 @@ void saltysd_display_sync_configure(bool enabled) {
   if (!enabled) {
     __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_last_query_status, -1, __ATOMIC_RELEASE);
   }
 }
 
@@ -97,6 +99,7 @@ void saltysd_display_sync_poll(void) {
 
   uint8_t rate = 0;
   const int query_status = saltysd_query_refresh_rate(&rate);
+  __atomic_store_n(&s_last_query_status, query_status, __ATOMIC_RELEASE);
   if (query_status == 2) {
     __atomic_store_n(&s_service_rate, rate, __ATOMIC_RELEASE);
     __atomic_store_n(&s_port_available, 1, __ATOMIC_RELEASE);
@@ -148,4 +151,12 @@ float saltysd_display_sync_rate(void) {
   if (!period)
     return 0.0f;
   return (float)armGetSystemTickFreq() / (float)period;
+}
+
+int saltysd_display_sync_query_status(void) {
+  return __atomic_load_n(&s_last_query_status, __ATOMIC_ACQUIRE);
+}
+
+unsigned saltysd_display_sync_service_rate(void) {
+  return __atomic_load_n(&s_service_rate, __ATOMIC_ACQUIRE);
 }

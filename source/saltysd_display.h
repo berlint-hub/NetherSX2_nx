@@ -14,6 +14,10 @@ void saltysd_display_sync_poll(void);
 void saltysd_display_sync_note_present(void);
 bool saltysd_display_sync_active(void);
 float saltysd_display_sync_rate(void);
+/* Last one-shot/query status: -1 not queried/disabled, 0 port absent,
+ * 1 port connected but query failed, 2 refresh-rate query succeeded. */
+int saltysd_display_sync_query_status(void);
+unsigned saltysd_display_sync_service_rate(void);
 
 #ifdef __cplusplus
 }

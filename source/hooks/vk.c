@@ -1245,6 +1245,13 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     reset_tracked_swapchain();
 
   VkSwapchainCreateInfoKHR modified = *create_info;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  vk_diag_note("display-sync swapchain query=%d active=%d service_rate=%u effective_rate=%.2f",
+               saltysd_display_sync_query_status(),
+               saltysd_display_sync_active() ? 1 : 0,
+               saltysd_display_sync_service_rate(),
+               saltysd_display_sync_rate());
+#endif
   const int force_vsync = saltysd_display_sync_active();
   int compatible = 0;
   const int requested = lsfg_requested();

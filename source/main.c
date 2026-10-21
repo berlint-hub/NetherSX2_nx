@@ -2049,9 +2049,18 @@ int main(void) {
 
   // settings store: load nethersx2.ini + seed OpenGL/folder defaults
   prefs_init(PREFS_PATH);
-  saltysd_display_sync_configure(
-      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false));
+  const bool display_sync_enabled =
+      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false);
+  saltysd_display_sync_configure(display_sync_enabled);
   saltysd_display_sync_poll();
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  vk_diag_note("display-sync enabled=%d query=%d active=%d service_rate=%u effective_rate=%.2f",
+               display_sync_enabled ? 1 : 0,
+               saltysd_display_sync_query_status(),
+               saltysd_display_sync_active() ? 1 : 0,
+               saltysd_display_sync_service_rate(),
+               saltysd_display_sync_rate());
+#endif
   display_sync_prepare_initial_rate();
 #if GS_RENDERER == GS_RENDERER_OGL && !defined(USE_DEKO3D)
   // The unified Mesa SDK contains both the native NVC0 Gallium driver and Zink. Select Zink before
