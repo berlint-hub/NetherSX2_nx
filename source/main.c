@@ -276,6 +276,40 @@ static void prefs_save_display_sync_safe(void) {
 
 static void display_sync_poll_and_apply(void) {
   saltysd_display_sync_poll();
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  /* The SaltySD server does not log GetDisplayRefreshRate requests, so record
+   * client-side state transitions. This is intentionally edge-triggered: the
+   * poll runs every frame, but the diagnostic should not spam the log. */
+  {
+    static int last_query_status = -2;
+    static int last_active = -1;
+    static unsigned last_connect_result;
+    static unsigned last_service_rate;
+    static float last_effective_rate = -1.0f;
+    const int query_status = saltysd_display_sync_query_status();
+    const int active = saltysd_display_sync_active();
+    const unsigned connect_result = saltysd_display_sync_connect_result();
+    const unsigned service_rate = saltysd_display_sync_service_rate();
+    const float effective_rate = saltysd_display_sync_rate();
+    if (query_status >= 0 &&
+        (query_status != last_query_status || active != last_active ||
+         connect_result != last_connect_result || service_rate != last_service_rate ||
+         last_effective_rate < 0.0f ||
+         fabsf(effective_rate - last_effective_rate) >= 0.25f)) {
+      const char *rate_source = service_rate ? "saltysd" :
+                                (effective_rate > 0.0f ? "present-cadence" : "none");
+      vk_diag_note("display-sync state query=%d active=%d connect_rc=0x%08x "
+                   "service_rate=%u effective_rate=%.2f source=%s",
+                   query_status, active, connect_result, service_rate,
+                   effective_rate, rate_source);
+      last_query_status = query_status;
+      last_active = active;
+      last_connect_result = connect_result;
+      last_service_rate = service_rate;
+      last_effective_rate = effective_rate;
+    }
+  }
+#endif
   if (!saltysd_display_sync_active()) {
     const int restore_core_rate = g_display_sync_overrides_rates;
     const int restore_surface_rate = g_display_sync_surface_forced ||
