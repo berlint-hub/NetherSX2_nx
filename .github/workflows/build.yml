@@ -177,14 +177,19 @@ jobs:
           # drzi jako binarni bloby a git clone pres github.com funguje; raw
           # contents API a Actions artefakty nejsou potřeba.
           rm -rf /tmp/TEST3
-          # Vetev, ne main: tegrax1 jadro i aktualni NXVK tarball ziji na
-          # arena/8b264db8-test3. Kdyby ref zmizel nebo se prejmenoval, clone
-          # spadne nahlas tady, ne az o tri minuty pozdeji na chybejicim souboru.
+          # Pin both the TEST3 ref and commit: its NXVK archive is a mutable
+          # uploaded blob, so cloning only the branch can silently select a
+          # newer driver whose SHA does not match this build's Makefile pin.
           TEST3_REF="arena/8b264db8-test3"
+          TEST3_COMMIT="b5c2ab61775e6b68aa1c1ed41eedd082802cde0e"
           git clone --depth 1 --branch "$TEST3_REF" \
             https://github.com/berlint-hub/TEST3.git /tmp/TEST3 \
             || { echo "::error::clone TEST3 selhal (ref $TEST3_REF)"; exit 1; }
-          echo "::notice::TEST3 ref $TEST3_REF commit $(git -C /tmp/TEST3 rev-parse --short HEAD)"
+          git -C /tmp/TEST3 fetch --depth 1 origin "$TEST3_COMMIT" \
+            || { echo "::error::fetch pinned TEST3 commit $TEST3_COMMIT selhal"; exit 1; }
+          git -C /tmp/TEST3 checkout --detach "$TEST3_COMMIT" \
+            || { echo "::error::checkout pinned TEST3 commit $TEST3_COMMIT selhal"; exit 1; }
+          echo "::notice::TEST3 ref $TEST3_REF pinned commit $(git -C /tmp/TEST3 rev-parse HEAD)"
 
           # 1) NXVK jako portlib balicek. switch/docs/bringing-an-application.md:
           #    tar -xzf ... -C "$DEVKITPRO/portlibs/switch". prefix v nxvk.pc je
