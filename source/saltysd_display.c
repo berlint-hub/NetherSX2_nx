@@ -143,7 +143,10 @@ static int saltysd_map_shared_memory(Handle session) {
   if (s_shared_memory_mapped)
     return 1;
   Handle shared_handle = INVALID_HANDLE;
-  if (!saltysd_send_query(session, SALTYSD_GET_SHARED_MEMORY_HANDLE, 16,
+  /* Match libnx's minimum CMIF request size: the 16-byte SFCI header plus
+   * its 16-byte IPC raw-data allowance. A 16-byte raw payload is too short for
+   * SaltyNX's ipcParse path and is misread as an unsupported command. */
+  if (!saltysd_send_query(session, SALTYSD_GET_SHARED_MEMORY_HANDLE, 32,
                           NULL, 2, &shared_handle))
     return 0;
 
