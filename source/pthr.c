@@ -40,6 +40,10 @@ int pthr_is_render_thread(void) {
 // ---------------------------------------------------------------------------
 
 static void install_fake_tls(int trace) {
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #4 TLS setup begin current=%p",
+                armGetTlsRw());
   uint8_t *tls = calloc(1, 0x200);
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",
