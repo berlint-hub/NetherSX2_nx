@@ -1266,7 +1266,6 @@ vkCreateSwapchainKHR_shim(VkDevice device,
                saltysd_display_sync_service_rate(),
                saltysd_display_sync_rate());
 #endif
-  const int force_vsync = saltysd_display_sync_active();
   int compatible = 0;
   const int requested = lsfg_requested();
   const int want_lsfg = lsfg_device_capable;
@@ -1310,10 +1309,11 @@ vkCreateSwapchainKHR_shim(VkDevice device,
   if (requested && want_lsfg && have_dll && !compatible)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-  if (force_vsync)
-    modified.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  /* Do not force the emulator's swapchain to follow the panel. The measured
+   * present cadence is published outward to FPSLocker; only LSFG's own
+   * compatibility path may select FIFO above. */
   const VkSwapchainCreateInfoKHR *selected_create_info =
-      (compatible || force_vsync) ? &modified : create_info;
+      compatible ? &modified : create_info;
   VkResult result = create_fn(device, selected_create_info, alloc, out);
   if (result == VK_SUCCESS) {
     reset_tracked_swapchain();

@@ -27,7 +27,6 @@
 #define PRESENT_INTERVAL_SAMPLES 16u
 
 static volatile int s_enabled;
-static volatile int s_port_available;
 static volatile uint32_t s_service_rate;
 static volatile uint32_t s_last_connect_result = UINT32_MAX;
 static volatile uint32_t s_nethfps_connect_result = UINT32_MAX;
@@ -256,7 +255,6 @@ void saltysd_display_sync_configure(bool enabled) {
   if (!enabled) {
     saltysd_display_sync_shutdown();
     __atomic_store_n(&s_enabled, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_query_status, -1, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
@@ -298,9 +296,8 @@ void saltysd_display_sync_poll(void) {
                      R_DESCRIPTION(connected) == KernelError_OutOfResource;
     const int query_status = busy ? 1 : 0;
     __atomic_store_n(&s_last_query_status, query_status, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_port_available, busy ? 1 : 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
-    if (busy)
+    if (s_shared_memory_mapped)
       publish_present_rate(); /* Reuse a previously mapped NX-FPS block. */
     return;
   }
@@ -308,7 +305,6 @@ void saltysd_display_sync_poll(void) {
   uint8_t rate = 0;
   const int query_ok = saltysd_query_refresh_rate(session, &rate);
   __atomic_store_n(&s_last_query_status, query_ok ? 2 : 1, __ATOMIC_RELEASE);
-  __atomic_store_n(&s_port_available, 1, __ATOMIC_RELEASE);
   __atomic_store_n(&s_service_rate, query_ok ? rate : 0, __ATOMIC_RELEASE);
 
   /* SaltySD returns the shared handle over the same short-lived session. */
@@ -342,7 +338,6 @@ void saltysd_display_sync_note_present(void) {
 
 void saltysd_display_sync_shutdown(void) {
   __atomic_store_n(&s_enabled, 0, __ATOMIC_RELEASE);
-  __atomic_store_n(&s_port_available, 0, __ATOMIC_RELEASE);
   if (s_fpslocked && s_saved_fpslocked_valid) {
     uint32_t magic = 0;
     memcpy(&magic, (const void *)(s_fpslocked - NX_FPS_TARGET_OFFSET),
@@ -362,8 +357,10 @@ void saltysd_display_sync_shutdown(void) {
 }
 
 bool saltysd_display_sync_active(void) {
+  /* A busy/missing IPC port is not a successful sync. Only activate cadence
+   * sampling once the FPSLocker target byte is actually mapped. */
   return __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE) &&
-         __atomic_load_n(&s_port_available, __ATOMIC_ACQUIRE);
+         __atomic_load_n(&s_target_ready, __ATOMIC_ACQUIRE);
 }
 
 float saltysd_display_sync_rate(void) {
