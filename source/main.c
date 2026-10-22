@@ -929,6 +929,7 @@ static int g_quick_menu_ee_cycle_rate;
 static int g_quick_menu_ee_cycle_skip;
 static int g_quick_menu_restore_messages;
 static int g_quick_menu_ready;
+static int g_quick_menu_save_pending;
 #ifdef USE_FRAME_GENERATION
 static int g_quick_menu_lsfg_enabled;
 #endif
@@ -1526,6 +1527,11 @@ static bool quick_menu_update(u64 down, u64 pressed) {
     quick_menu_open();
     return true;
   }
+  /* Diagnostic isolation: after requesting a state save, leave the visible
+   * menu OSD untouched but stop processing menu input until the app exits.
+   * This removes the overlay's polling/update lifecycle without invoking any
+   * close-time JNI or settings calls while serialization is in flight. */
+  if (g_quick_menu_save_pending) return true;
   if (chord) {
     quick_menu_close();
     return true;
@@ -1593,9 +1599,13 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           corelog_log(CORELOG_INFO, "SaveState",
                       "slot %d: saveStateSlot returned; leaving overlay open",
                       g_quick_menu_slot);
-          /* Keep the menu open. Do not post an OSD status message or call any
-           * other JNI entrypoint while the queued save is starting; the menu's
-           * existing selection remains visible as the diagnostic status. */
+          g_quick_menu_save_pending = 1;
+          corelog_log(CORELOG_INFO, "SaveState",
+                      "slot %d: quick-menu input/update suspended",
+                      g_quick_menu_slot);
+          /* Keep the menu OSD visible, but stop all menu input/update handling.
+           * Do not post a status message, close the menu, or call another JNI
+           * entrypoint while the queued save is starting. */
           return true;
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
