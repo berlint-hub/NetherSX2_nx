@@ -16,6 +16,13 @@
 - Once warm, long windows repeatedly settle around 50.17–50.29 FPS, consistent with the PAL cap. Heavy scenes still dip into the mid/high 40s and show CPU work on EE/GS/MTVU; queue-submit/present and GPU-fence waits are generally small. This does not prove a speedup versus the previous driver; the prior run also reached about 50.2 FPS and there is no matched A/B capture.
 - The shared target works, but it is not perfectly steady: `fpslocker_target` and SaltyNX refresh changes include 40/45/50/55/60 (and brief startup 25). That suggests the 16-present (~0.3 s at 50 FPS) estimator window plus two one-second observations can follow short scene/load dips. If visible refresh hunting is confirmed, test a longer estimator window and stronger hysteresis before changing driver code.
 
+### Save-state failure (reproduced with display sync disabled)
+
+- Device reproduced the app-level crash with `SyncFrameLimitToDisplay=false` (`display-sync enabled=0`), ruling out the FPSLocker IPC/publish path as a direct cause.
+- The core starts `SaveStateSlot0`, saves SPU2/PAD, logs `Saving GS`, then the host exception handler records a data abort: `pc=0x1ef7877c80`, `far=0x40`, `esr=0x92000005`. This is a null-adjacent translation fault during graphics-state serialization, not a console reset. `_SC_PHYS_PAGES` reports 3,185/3,285 MiB used, but the wrapper preallocates a ~2.9 GiB heap, so that figure is not free-heap headroom; an unchecked allocation failure cannot be ruled in or out from this log. The PC is outside the logged `libemucore.so` base.
+- Core warning immediately before serialization: `MTVU speedhack is enabled, saved states may not be stable`; the wrapper also applies VU cycle-steal level 2. Next isolation test: disable both `EmuCore/Speedhacks/vuThread` and `EmuCore/Speedhacks/vuCycleSteal`, then retry. Success would implicate MTVU/GS freeze; failure needs link-map symbolization of the host PC before selecting a renderer-side fix.
+- Overlay currently reports `State saved` immediately after requesting the save; the core log shows that serialization is asynchronous and has only just started. Treat that toast as inaccurate until a completion signal is available.
+
 ## Previous result
 
 - Repository: `berlint-hub/NetherSX2_nx`
