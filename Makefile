@@ -62,12 +62,12 @@ NXVK_PKG_CONFIG ?= $(PREFIX)pkg-config
 # happened, twice: the tarball moved arena/92b2b9eb-nxvk -> arena/068e6f2f-nxvk
 # and then back to arena/92b2b9eb-nxvk at a newer commit, each time changing
 # build run and toolchain image too. The cores are pinned the same way against
-# source/deko3d/dk_profiles.h, and CI fails loudly on both. Update this together
-# with a hardware-validated build, not before. Override with
-# NXVK_EXPECTED_SHA256= to test a new driver.
-# Pinned package: TEST3 branch arena/8b264db8-test3, nxvk commit
-# 38fbe01360448c5cb6bb7554c5480a398888f202, Mesa 26.2.2, build run 38966643931.
-NXVK_EXPECTED_SHA256 ?= dae2897b939a8a7d578f7b02cc35b64bcbfa159ec7dbc3205b26e51bf7e6492b
+# source/deko3d/dk_profiles.h, and CI fails loudly on both. This is the current
+# reproducible test candidate; hardware validation is still required before a
+# release recommendation. Override with NXVK_EXPECTED_SHA256= to test another.
+# Pinned candidate: TEST3 branch arena/8b264db8-test3, nxvk commit
+# b53eb3308c510dde96930c07090a907af92a696d, Mesa 26.2.2, build run 39497258880.
+NXVK_EXPECTED_SHA256 ?= 1480973e71cfd54eb430e7c6b48f9c5ce60a674e54bb6d44d0c1c8de412de0de
 ifneq ($(strip $(MESA_SDK_ROOT)),)
 ifneq ($(RENDERER),DK)
 DEFINES += -DUSE_UNIFIED_MESA

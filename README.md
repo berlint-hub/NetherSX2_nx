@@ -299,28 +299,23 @@ else. An older vendored tree under `vulkan/include` and `vulkan/lib` is still
 accepted as a fallback; it exports the public entry points itself, so the
 `NETHERSX2_NVK_ICD_ONLY` shim and loader stay off for it.
 
-`NXVK_EXPECTED_SHA256` in the Makefile pins the tarball this tree was validated
-against, and CI fails if `berlint-hub/TEST3` serves anything else — the same
-protection the core gets from `source/deko3d/dk_profiles.h`. CI clones a pinned
-ref (`TEST3_REF` in `.github/workflows/build.yml`, currently
-`arena/8b264db8-test3`), but a branch can still move or be force-pushed, so
-without a hash the driver can change between two builds of one repo commit. It
-did, twice: the tarball moved `arena/92b2b9eb-nxvk` → `arena/068e6f2f-nxvk` and
-then back to `arena/92b2b9eb-nxvk` at a newer commit, each time changing the
-build run and toolchain image too. Test a new driver with
-`make NXVK_EXPECTED_SHA256=<sha>`, and move the pin in the Makefile only after
-it has been verified on hardware.
+`NXVK_EXPECTED_SHA256` in the Makefile pins the exact candidate tarball used by
+CI; CI fails if `berlint-hub/TEST3` serves anything else. The core is pinned in
+`source/deko3d/dk_profiles.h`, with its GSDevice and HostDisplay vtables checked
+against the profile. CI clones the pinned ref `arena/8b264db8-test3`, but the
+branch can move independently, so both binary inputs are hash-checked for
+reproducibility. The current test candidate is NXVK commit
+`b53eb3308c510dde96930c07090a907af92a696d` (Mesa 26.2.2, build run
+39497258880) and `4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` (SHA-256
+`b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`). This
+candidate still needs an on-device test before it should be treated as a
+hardware-validated release combination.
 
-The core is `4248/arm64-v8a/libemucore_tegrax1.so` from that ref: the stock
-NetherSX2 v2.2n-4248 image plus five length-preserving Tegra X1 patches from
-[mininxd/NetherSX2-patch](https://github.com/mininxd/NetherSX2-patch) — the 0.5×
-GS multiplier floor removed, Full Texture Hash Cache on by default in both the
-preferences and `GSSettings::Load` paths, and two preset-reset sites NOPed so
-applying a performance preset no longer wipes memory cards, achievements and
-control bindings. Its sixteen port-patch sites are still pristine, so
-`patch_game()` in `source/hooks/patches.c` applies them at load time — the path
-that table was written for, since the previously shipped "baked" cores had them
-pre-applied and made it a no-op.
+The core is based on NetherSX2 v2.2n-4248 and includes the spin-relax variant
+plus five length-preserving Tegra X1 patches from
+[mininxd/NetherSX2-patch](https://github.com/mininxd/NetherSX2-patch). The
+profile check confirms all 29 GSDevice and 31 HostDisplay vtable entries match;
+`patch_game()` continues to apply the emulator patches at load time.
 
 Extract the 4248 APK into a folder named `NetherSX2-v2.2n-4248`, or set
 `CORES_DIR` to the folder containing it. `--apk-3668` is still accepted for a

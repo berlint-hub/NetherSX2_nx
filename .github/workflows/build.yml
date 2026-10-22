@@ -227,13 +227,12 @@ jobs:
           fi
 
           # 2) core: produkt je Vulkan-only s jednim jadrem. TEST3 ho drzi pod
-          #    4248/arm64-v8a/libemucore_tegrax1.so (stock v2.2n-4248 + pet
-          #    Tegra X1 patchu z mininxd/NetherSX2-patch), build_all.sh a
+          #    4248/arm64-v8a/libemucore_tegrax1_spinrelax.so; build_all.sh a
           #    check_deko3d_build.py ale cekaji rozbalene APK usporadani, takze
           #    se premapuje vedle repa (CORES_DIR="$(dirname $APP)").
           root="$(dirname "$PWD")"
-          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1.so"
-          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1.so"; exit 1; }
+          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"
+          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"; exit 1; }
           mkdir -p "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a"
           cp "$so" "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so"
           cp -r "/tmp/TEST3/assets_4248" "$root/NetherSX2-v2.2n-4248/assets"
@@ -853,7 +852,7 @@ jobs:
           # aditivne michanych svetel) nema zadnou opravu na strane CPU, takze
           # jedine zbyvajici paky jsou presunout praci z GPU nebo renderer
           # donutit necekat na readbacky. Kazdy klic byl pred vystavenim overen
-          # proti stringum pinateho libemucore_tegrax1.so: jadro sedi mezi dvema
+          # proti stringum pripnuteho spinrelax jadra: jadro sedi mezi dvema
           # upstream generacemi, takze napriklad UserHacks_AutoFlushLevel,
           # UserHacks_CPUSpriteRenderLevel, UserHacks_DisableRenderFixes a
           # UserHacks_DrawBuffering v nem nejsou a radka s takovym klicem by
