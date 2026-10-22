@@ -1593,10 +1593,9 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           corelog_log(CORELOG_INFO, "SaveState",
                       "slot %d: saveStateSlot returned; leaving overlay open",
                       g_quick_menu_slot);
-          /* The core queues serialization asynchronously. Keep the overlay open
-           * so quick_menu_close() cannot reapply GS settings before it finishes.
-           * Do not claim success here; the user can close the menu after waiting. */
-          quick_menu_status("Save requested; wait before closing the menu");
+          /* Keep the menu open. Do not post an OSD status message or call any
+           * other JNI entrypoint while the queued save is starting; the menu's
+           * existing selection remains visible as the diagnostic status. */
           return true;
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
