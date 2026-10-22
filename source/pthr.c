@@ -39,24 +39,9 @@ int pthr_is_render_thread(void) {
 // block is intentionally leaked: it must stay live for the thread's lifetime.
 // ---------------------------------------------------------------------------
 
-static void install_fake_tls(int trace) {
-  if (trace)
-    corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #4 TLS setup begin current=%p",
-                armGetTlsRw());
-  uint8_t *tls = calloc(1, 0x200);
-  if (trace)
-    corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #4 TLS calloc=%p", tls);
-  armSetTlsRw(tls);
-  if (trace)
-    corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #4 armSetTlsRw complete current=%p",
-                armGetTlsRw());
-}
-
 void pthr_install_fake_tls(void) {
-  install_fake_tls(0);
+  uint8_t *tls = calloc(1, 0x200);
+  armSetTlsRw(tls);
 }
 
 void pthr_ensure_fake_tls(void) {
@@ -686,6 +671,10 @@ typedef struct {
   void *(*start)(void *);
   void *arg;
   unsigned debug_id;
+  // Inline TLS storage is allocated by the parent and intentionally retained
+  // for the worker's lifetime. The child installs it before calling free/log/
+  // allocator code, avoiding libc work before its RW TLS is valid.
+  uint8_t fake_tls[0x200] __attribute__((aligned(16)));
 } ThreadStart;
 
 typedef struct DetachedThread {
@@ -726,29 +715,33 @@ static void *detach_reaper_main(void *unused) {
 }
 
 static void *thread_trampoline(void *p) {
-  ThreadStart s = *(ThreadStart *)p;
-  free(p);
-  const int trace = s.debug_id == 4;
+  ThreadStart *s = p;
+  void *(*start)(void *) = s->start;
+  void *arg = s->arg;
+  const unsigned debug_id = s->debug_id;
+  void *fake_tls = s->fake_tls;
+
+  // Install parent-allocated TLS before free(), logging, or any other libc call
+  // on the new thread. The backing ThreadStart is retained because fake_tls
+  // must remain live until the worker has fully exited.
+  armSetTlsRw(fake_tls);
+  const int trace = debug_id == 4;
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #%u entered target=0x%llx arg=%p",
-                s.debug_id, (unsigned long long)(uintptr_t)s.start, s.arg);
-  install_fake_tls(trace);
-  if (trace)
-    corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #%u fake TLS=%p",
-                s.debug_id, armGetTlsRw());
+                "pthread bridge #%u entered target=0x%llx arg=%p fake TLS=%p current=%p",
+                debug_id, (unsigned long long)(uintptr_t)start, arg,
+                fake_tls, armGetTlsRw());
   // Keep emulator workers off the EE and audio cores.
   assign_work_core();
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",
                 "pthread bridge #%u entering target routine",
-                s.debug_id);
-  void *ret = s.start(s.arg);
+                debug_id);
+  void *ret = start(arg);
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",
                 "pthread bridge #%u target returned=%p",
-                s.debug_id, ret);
+                debug_id, ret);
   // EGL ownership is thread-local.
   extern void egl_gl_ownership_release(void);
   egl_gl_ownership_release();
@@ -761,7 +754,7 @@ static void *thread_trampoline(void *p) {
 
 int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr,
                             void *(*start)(void *), void *param) {
-  ThreadStart *s = malloc(sizeof(*s));
+  ThreadStart *s = calloc(1, sizeof(*s));
   if (!s)
     return ENOMEM;
   s->start = start;
