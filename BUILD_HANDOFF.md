@@ -1,53 +1,33 @@
-# Handoff: build frame-pacing change
+# Handoff: TEST3 spinrelax + NXVK build
 
-## Current repository state
+## Current result
 
 - Repository: `berlint-hub/NetherSX2_nx`
-- Fixed session branch: `arena/2e44eb02-nethersx2-nx`
-- Implementation commit pushed to that branch: `b28b349` (`Add refresh-synced frame pacing`)
-- Worktree was clean after the commit. Do not switch branches or make a PR to `main`.
-- No `.nro` was produced in the sandbox.
+- Fixed branch: `arena/2e44eb02-nethersx2-nx`
+- Build commit: `2c4bac706902c40d42d8776141f59720adeb2ad9`
+- GitHub Actions run: `39789988729` — **host-tests and Switch build both passed**.
+- The successful run produced the `nethersx2-switch` artifact. This sandbox cannot retrieve it because GitHub redirects downloads to `productionresultssa15.blob.core.windows.net`, outside the allowed network hosts. Download it from the run's Artifacts section:
+  https://github.com/berlint-hub/NetherSX2_nx/actions/runs/39789988729
+- Device validation is still needed; this is a reproducible build candidate, not yet a hardware-validated release combination.
 
-## What was tried / why Actions has not run
+## Exact inputs in the build
 
-1. `bash build_all.sh` stops before compilation because the local APK core is absent:
-   `../NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so`.
-   The sandbox also has no devkitA64 cross compiler, libnx libraries, or Mesa NVK archive set, so a local Switch link is not possible.
-2. `gh auth status` says the configured GitHub account is `berlint-hub`, but
-   `gh workflow run build.yml --ref arena/2e44eb02-nethersx2-nx` returns:
-   `HTTP 403: Resource not accessible by integration` on the Actions workflow-dispatch endpoint.
-3. The push of `b28b349` succeeded, but it did not create a new Actions run. Do not mistake the old successful run `39510587447` for a build of this change: that run built commit `6245e78`.
-4. No credentials were requested or stored. Reconnect GitHub in Arena with permission to dispatch Actions workflows, or have an authorized repository user start the workflow in GitHub's Actions UI. A PAT/token pasted into chat is not needed and must not be requested.
+- Core: `TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so`
+  - SHA-256: `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`
+  - The build's profile check verified all 29 GSDevice and 31 HostDisplay vtable entries against `source/deko3d/dk_profiles.h`.
+- NXVK: `TEST3/nxvk-vulkan-tegra-x1.tar.gz`
+  - SHA-256: `1480973e71cfd54eb430e7c6b48f9c5ce60a674e54bb6d44d0c1c8de412de0de`
+  - NXVK commit `b53eb3308c510dde96930c07090a907af92a696d`, Mesa 26.2.2, build run `39497258880`.
+- Both are pinned in the repository and checked by CI. The resulting production bundle was 47,486,407 bytes; the Vulkan emulator NRO was 16,857,987 bytes and the Vulkan diagnostic NRO was 16,882,563 bytes.
 
-## Immediate Actions build instructions
+## Build history and checks
 
-After GitHub Actions permissions are fixed:
+- Run `39789339947` passed host tests but stopped before compilation because the supplied TEST3 NXVK tarball had SHA-256 `1480973e...` while the repository still pinned the older `dae2897b...` archive.
+- Commit `2c4bac7` updated the NXVK pin, selected the requested spinrelax core, and updated its profile hash. Run `39789988729` then passed the complete Switch build and all host tests.
+- Additional local checks passed: spinrelax core profile/vtable validation, launcher INI-key compatibility against the new core, input SHA verification, and `git diff --check`.
+- The sandbox has no local devkitA64/libnx/NVK toolchain, so the NRO was compiled on GitHub Actions rather than locally.
+- Use `gh run download 39789988729 --repo berlint-hub/NetherSX2_nx` from a network that can reach GitHub's artifact blob host, or download `nethersx2-switch` in the Actions UI.
 
-```sh
-gh auth status
-gh workflow run build.yml --ref arena/2e44eb02-nethersx2-nx
-gh run list --branch arena/2e44eb02-nethersx2-nx --limit 5 \
-  --json databaseId,headSha,status,conclusion,workflowName,createdAt
-```
+## Scope
 
-Confirm the new run's `headSha` is `b28b349...` (or a later commit containing it). The workflow has two jobs: `host-tests` and `switch`. Poll the concrete run using `gh run view <RUN_ID> --json status,conclusion,headSha,jobs` until `status` is `completed`; do not rely solely on `gh run watch` returning. If a job fails, use annotations (workflow logs/artifact blob downloads may be inaccessible from this sandbox):
-
-```sh
-gh api repos/berlint-hub/NetherSX2_nx/actions/runs/<RUN_ID>/jobs --jq '.jobs[].id'
-gh api repos/berlint-hub/NetherSX2_nx/check-runs/<JOB_ID>/annotations \
-  --jq '.[]|"[\(.annotation_level)] \(.message)"'
-```
-
-On success, the Actions artifact is named `nethersx2-switch`; the workflow uploads `NetherSX2.nro`, `NetherSX2-diag.nro`, `NetherSX2_nx_vk.nro`, `NetherSX2_nx_vk_diag.nro`, and `nxvk-BUILDINFO.txt`. Download the NRO in the GitHub Actions UI if this sandbox cannot reach the artifact blob host.
-
-The `switch` job clones the pinned `TEST3` branch `arena/8b264db8-test3`, verifies the pinned NXVK SHA (`dae2897b939a8a7d578f7b02cc35b64bcbfa159ec7dbc3205b26e51bf7e6492b`) and the core hash pinned in `source/deko3d/dk_profiles.h`, then builds the Vulkan-only shipped NRO and the final launcher bundle. It also runs `tools/check_ini_keys.py` against the bundled core. The runner provisions devkitPro and the inputs, so no local APK or token should be needed once Actions dispatch is authorized.
-
-## Important backend coverage caveat
-
-This repository's current production bundle is Vulkan-only. The `switch` job compiles the Vulkan production and diagnostic NROs, which exercise the shared SaltySD client, preferences, frontend polling, and Vulkan swapchain path. The host-test job compiles the Deko3D presentation harness (including `source/deko3d/dk_presentation.cpp`), but it does **not** build the complete `RENDERER=DK` emulator. The changed `dk_core.cpp` / `dk_gpu.cpp` therefore need a separate full Deko3D target build if the request is to validate that optional backend too. That target needs devkitA64/libnx/deko3d plus the three archives/objects listed in the Makefile under `DEKO3D_LIBS` (`liblsfg.a`, `liblsfg_spirv_cross.a`, `uam_isolated.o`); current `.github/workflows/build.yml` deliberately does not configure/build that target.
-
-## Already-passed local checks
-
-- All five Deko3D host harnesses passed: DMA/transfer (17), render-target (25), vertex format (16), render state (59), presentation (269).
-- `source/saltysd_display.c` and `source/prefs.c` passed host GCC syntax checks with `-Wall -Wextra -Werror` against the available libnx headers.
-- A focused prefs-save override test passed; `git diff --check` was clean before commit.
+This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The new build does not establish on-device RAM-bandwidth gains or FPSLocker behavior; test those on the Switch after downloading the artifact.
