@@ -8,7 +8,7 @@
 - GitHub Actions run: `39789988729` — **host-tests and Switch build both passed**.
 - The successful run produced the `nethersx2-switch` artifact. This sandbox cannot retrieve it because GitHub redirects downloads to `productionresultssa15.blob.core.windows.net`, outside the allowed network hosts. Download it from the run's Artifacts section:
   https://github.com/berlint-hub/NetherSX2_nx/actions/runs/39789988729
-- Device validation is still needed; this is a reproducible build candidate, not yet a hardware-validated release combination.
+- Device test with this build was successful for the IPC/shared-memory path: `active=1`, `nethfps_rc=0`, `shared_ready=1`; the published FPSLocker target reached 50 while PAL presentation settled around 50.2 FPS. On-device validation of the exact NXVK/core performance and physical panel response remains useful.
 
 ## Exact inputs in the build
 
@@ -19,6 +19,8 @@
   - SHA-256: `1480973e71cfd54eb430e7c6b48f9c5ce60a674e54bb6d44d0c1c8de412de0de`
   - NXVK commit `b53eb3308c510dde96930c07090a907af92a696d`, Mesa 26.2.2, build run `39497258880`.
 - Both are pinned in the repository and checked by CI. The resulting production bundle was 47,486,407 bytes; the Vulkan emulator NRO was 16,857,987 bytes and the Vulkan diagnostic NRO was 16,882,563 bytes.
+- Device log build `2c4bac7-run39789988729` reports `nethfps_rc=0`, `shared_ready=1`, and later `fpslocker_target=50` while PAL presentation settles near 50.2 FPS. This confirms the 32-byte `GetSharedMemoryHandle` request fixes the IPC handshake and publishes the emulator cadence without enabling Vsync.
+- On first launch, NVK rejected and removed the old pipeline/shader caches because the driver UUID changed. Startup shader compilation caused early hitches; later performance settled near 50 FPS.
 
 ## Build history and checks
 
@@ -30,4 +32,4 @@
 
 ## Scope
 
-This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The new build does not establish on-device RAM-bandwidth gains or FPSLocker behavior; test those on the Switch after downloading the artifact.
+This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The IPC/shared-memory publication has now been confirmed on-device; actual panel response should still be confirmed separately. The build does not establish RAM-bandwidth gains from the spinrelax core/NXVK combination.
