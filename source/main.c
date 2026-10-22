@@ -1591,15 +1591,12 @@ static bool quick_menu_update(u64 down, u64 pressed) {
                       g_quick_menu_slot);
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: saveStateSlot returned; waiting for flush",
+                      "slot %d: saveStateSlot returned; leaving overlay open",
                       g_quick_menu_slot);
-          /* Keep overlay settings from being reapplied while the save is pending. */
-          nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
-          corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: flush wait returned; closing overlay",
-                      g_quick_menu_slot);
-          quick_menu_close();
-          quick_menu_status("State saved");
+          /* The core queues serialization asynchronously. Keep the overlay open
+           * so quick_menu_close() cannot reapply GS settings before it finishes.
+           * Do not claim success here; the user can close the menu after waiting. */
+          quick_menu_status("Save requested; wait before closing the menu");
           return true;
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
