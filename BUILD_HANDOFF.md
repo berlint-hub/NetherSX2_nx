@@ -9,6 +9,13 @@
 - NetherSX2_nx build commit `1815b417ba455a51cb21d54afea88bf7ee58ca92`; GitHub Actions run `39795109390` completed successfully (host-tests and Switch build).
 - Artifact `nethersx2-switch` is available from the Actions run page below; uploaded ZIP size: 43,864,473 bytes. This is the new-driver package for the planned on-device A/B test.
 
+### Device log from the new driver
+
+- Diagnostic build `1815b41-run39795109390` boots Gran Turismo 3 (PAL) on Tegra X1/NVK gm20b. `active=1`, `nethfps_rc=0`, `shared_ready=1`; SaltyNX Core 2.1.11 accepts the client and returns the shared-memory handle. Vsync remains OFF and the core reports PAL mode.
+- The first run is cold: NVK rejects the old pipeline cache UUID and removes the old cache files; the shader cache starts empty. Early results (24.77 FPS, then 39.69/47.80) and shader/pipeline hitches are warm-up, not a steady-state driver comparison.
+- Once warm, long windows repeatedly settle around 50.17–50.29 FPS, consistent with the PAL cap. Heavy scenes still dip into the mid/high 40s and show CPU work on EE/GS/MTVU; queue-submit/present and GPU-fence waits are generally small. This does not prove a speedup versus the previous driver; the prior run also reached about 50.2 FPS and there is no matched A/B capture.
+- The shared target works, but it is not perfectly steady: `fpslocker_target` and SaltyNX refresh changes include 40/45/50/55/60 (and brief startup 25). That suggests the 16-present (~0.3 s at 50 FPS) estimator window plus two one-second observations can follow short scene/load dips. If visible refresh hunting is confirmed, test a longer estimator window and stronger hysteresis before changing driver code.
+
 ## Previous result
 
 - Repository: `berlint-hub/NetherSX2_nx`
