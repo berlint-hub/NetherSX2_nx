@@ -24,6 +24,7 @@
 #define NX_FPS_MAGIC 0x00465053u
 /* Packed NxFpsSharedBlock prefix: MAGIC(4), FPS(1), FPSavg(4), pluginActive(1), FPSlocked. */
 #define NX_FPS_TARGET_OFFSET 10u
+#define NX_FPS_AVG_OFFSET 5u
 #define PRESENT_INTERVAL_SAMPLES 16u
 
 static volatile int s_enabled;
@@ -44,6 +45,7 @@ static volatile int s_target_ready;
 static SharedMemory s_shared_memory;
 static int s_shared_memory_mapped;
 static volatile uint8_t *s_fpslocked;
+static volatile float *s_fpsavg;
 static uint8_t s_saved_fpslocked;
 static uint8_t s_last_written_fpslocked;
 static int s_saved_fpslocked_valid;
@@ -162,6 +164,7 @@ static int saltysd_map_shared_memory(Handle session) {
 
 static int saltysd_find_fpslocked(void) {
   s_fpslocked = NULL;
+  s_fpsavg = NULL;
   if (!s_shared_memory_mapped)
     return 0;
   const uint8_t *base = (const uint8_t *)shmemGetAddr(&s_shared_memory);
@@ -174,6 +177,7 @@ static int saltysd_find_fpslocked(void) {
     memcpy(&magic, base + offset, sizeof(magic));
     if (magic == NX_FPS_MAGIC) {
       s_fpslocked = (volatile uint8_t *)(base + offset + NX_FPS_TARGET_OFFSET);
+      s_fpsavg = (volatile float *)(base + offset + NX_FPS_AVG_OFFSET);
       __atomic_store_n(&s_target_ready, 1, __ATOMIC_RELEASE);
       if (!s_saved_fpslocked_valid) {
         s_saved_fpslocked = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
@@ -235,6 +239,16 @@ static void publish_present_rate(void) {
   if (!saltysd_find_fpslocked())
     return;
   const unsigned fps = estimate_present_fps();
+  /* NX-FPS installs its present hook by rewriting the game's import table;
+     this process resolves vkQueuePresentKHR at runtime through the Vulkan
+     wrapper instead, so the hooked copy is never called and NX-FPS never
+     writes FPSavg here. Publish our own measurement into that field so
+     SaltyNX fine mode has a rate to follow. The field is unaligned, hence
+     memcpy. */
+  if (fps && s_fpsavg) {
+    const float measured = (float)fps;
+    memcpy((void *)s_fpsavg, &measured, sizeof(measured));
+  }
   const unsigned target = fps ? quantize_fpslocker_target(fps) : 0;
   if (!target)
     return;
@@ -348,6 +362,12 @@ void saltysd_display_sync_shutdown(void) {
     const uint8_t current = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
     if (magic == NX_FPS_MAGIC && current == s_last_written_fpslocked)
       __atomic_store_n(s_fpslocked, s_saved_fpslocked, __ATOMIC_RELEASE);
+  }
+  if (s_fpsavg) {
+    /* 0.0 means "no measurement"; leave nothing stale behind. */
+    const float zero = 0.0f;
+    memcpy((void *)s_fpsavg, &zero, sizeof(zero));
+    s_fpsavg = NULL;
   }
   s_fpslocked = NULL;
   s_saved_fpslocked_valid = 0;
