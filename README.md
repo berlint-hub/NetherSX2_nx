@@ -305,11 +305,13 @@ CI; CI fails if `berlint-hub/TEST3` serves anything else. The core is pinned in
 against the profile. CI clones the pinned ref `arena/8b264db8-test3`, but the
 branch can move independently, so both binary inputs are hash-checked for
 reproducibility. The current test candidate is NXVK commit
-`b53eb3308c510dde96930c07090a907af92a696d` (Mesa 26.2.2, build run
-39497258880) and `4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` (SHA-256
-`b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`). This
-candidate still needs an on-device test before it should be treated as a
-hardware-validated release combination.
+`c3745fe5b797dde04745dae90fb96cda7add03c6` from NXVK branch
+`arena/92b2b9eb-nxvk` (Mesa 26.2.2, build run `39667587272`, tarball SHA-256
+`3942e4318ebbbd772d2d76ccfef4f376e8e194c942d4eba80444ea5e9abcc65f`) and
+`4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` (SHA-256
+`b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`). The
+new driver includes Tegra WSI swizzle and Horizon cache-worker changes; this
+combination is queued for an on-device A/B test and is not yet hardware-validated.
 
 The core is based on NetherSX2 v2.2n-4248 and includes the spin-relax variant
 plus five length-preserving Tegra X1 patches from

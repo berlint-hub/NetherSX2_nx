@@ -1,6 +1,14 @@
 # Handoff: TEST3 spinrelax + NXVK build
 
-## Current result
+## Follow-up candidate (2026-10-22)
+
+- Requested action: rebuild the Switch package against the updated NXVK supplied by TEST3 branch `arena/8b264db8-test3`.
+- NXVK source: `berlint-hub/nxvk` branch `arena/92b2b9eb-nxvk`, commit `c3745fe5b797dde04745dae90fb96cda7add03c6`; Mesa 26.2.2; source build run `39667587272`.
+- New `nxvk-vulkan-tegra-x1.tar.gz` SHA-256: `3942e4318ebbbd772d2d76ccfef4f376e8e194c942d4eba80444ea5e9abcc65f`.
+- Core remains the same spinrelax image, SHA-256 `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`; the TEST3 ref is now at `b5c2ab61775e6b68aa1c1ed41eedd082802cde0e`.
+- This follow-up rebuild is pending GitHub Actions; the earlier successful run below used the older NXVK package and remains the on-device baseline.
+
+## Previous result
 
 - Repository: `berlint-hub/NetherSX2_nx`
 - Fixed branch: `arena/2e44eb02-nethersx2-nx`
