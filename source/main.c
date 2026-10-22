@@ -2045,8 +2045,17 @@ int main(void) {
 
   // settings store: load nethersx2.ini + seed OpenGL/folder defaults
   prefs_init(PREFS_PATH);
+#if defined(USE_VULKAN)
+  const bool low_latency =
+      prefs_get_bool("EmuCore/GS/low_latency", false);
+  // NVK reads this during instance/device setup; set it only after the INI is
+  // loaded, but before the emulation core can touch Vulkan.
+  setenv("NVK_LOW_LATENCY", low_latency ? "1" : "0", 1);
+#else
+  const bool low_latency = false;
+#endif
   const bool display_sync_enabled =
-      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false);
+      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false) || low_latency;
   saltysd_display_sync_configure(display_sync_enabled);
   saltysd_display_sync_poll();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)

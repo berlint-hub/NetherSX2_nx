@@ -51,6 +51,10 @@ PREAMBLE = r"""
 #include <stdio.h>
 #include <stdarg.h>
 
+/* The extracted Vulkan fence shim also tracks the low-latency frame fence. */
+static PFN_vkWaitForFences real_wait_for_fences;
+static VkFence low_latency_pending_fence;
+
 static uint64_t fake_clock = 0;
 static uint64_t clock_step = 0;
 static uint64_t lsfg_monotonic_ns(void) {

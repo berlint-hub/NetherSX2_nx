@@ -65,10 +65,11 @@ NXVK_PKG_CONFIG ?= $(PREFIX)pkg-config
 # source/deko3d/dk_profiles.h, and CI fails loudly on both. This is the current
 # reproducible test candidate; hardware validation is still required before a
 # release recommendation. Override with NXVK_EXPECTED_SHA256= to test another.
-# Pinned candidate: TEST3 branch arena/8b264db8-test3, NXVK branch
-# arena/92b2b9eb-nxvk at c3745fe5b797dde04745dae90fb96cda7add03c6, Mesa 26.2.2,
-# build run 39667587272. This refreshes the WSI swizzle and cache-worker logic.
-NXVK_EXPECTED_SHA256 ?= 3942e4318ebbbd772d2d76ccfef4f376e8e194c942d4eba80444ea5e9abcc65f
+# Current tarball: TEST3 branch arena/8b264db8-test3 at
+# 41f2386e515ea65fde26398315c6ad78b853afcc. Pin the SHA256 of the tarball
+# itself (not the enclosing GitHub Actions artifact ZIP); refresh it whenever
+# TEST3 updates the NXVK package. Hardware validation is still required.
+NXVK_EXPECTED_SHA256 ?= 87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51
 ifneq ($(strip $(MESA_SDK_ROOT)),)
 ifneq ($(RENDERER),DK)
 DEFINES += -DUSE_UNIFIED_MESA

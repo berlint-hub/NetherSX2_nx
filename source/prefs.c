@@ -172,6 +172,10 @@ static void prefs_seed_defaults(void) {
   // "4:3", "16:9". Editable in nethersx2.ini.
   prefs_seed("EmuCore/GS/AspectRatio", "4:3");
   prefs_seed("EmuCore/GS/VsyncEnable", "0");
+  // Opt-in NVK low-latency presentation. The flat INI key corresponds to
+  // [EmuCore/GS] low_latency and is also exported as NVK_LOW_LATENCY before
+  // Vulkan initializes.
+  prefs_seed("EmuCore/GS/low_latency", "0");
   prefs_seed("Wrapper/SyncFrameLimitToDisplay", "false");
 #if GS_RENDERER == GS_RENDERER_VK
   // Keep presentation work off the GS thread by default. The two bundled cores

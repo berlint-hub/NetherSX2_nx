@@ -157,6 +157,8 @@ static uint32_t         lsfg_main_queue_family = VK_QUEUE_FAMILY_IGNORED;
 static VkSwapchainKHR tracked_swapchain;
 static VkExtent2D     tracked_swapchain_extent;
 static int            tracked_swapchain_lsfg_compatible;
+static VkFence        low_latency_pending_fence;
+static uint64_t       low_latency_next_vblank_ns;
 
 static LsfgNxRuntime *lsfg_runtime;
 static int lsfg_init_attempted;
@@ -190,10 +192,11 @@ static PFN_vkCreateSwapchainKHR real_create_swapchain;
 static PFN_vkGetSwapchainImagesKHR real_get_swapchain_images;
 static PFN_vkDestroySwapchainKHR real_destroy_swapchain;
 static PFN_vkDestroyDevice real_destroy_device;
-#ifdef NETHERSX2_VK_DIAGNOSTIC
 static PFN_vkQueueSubmit real_queue_submit;
 static PFN_vkQueueSubmit2 real_queue_submit2;
 static PFN_vkAcquireNextImageKHR real_acquire_next_image;
+static PFN_vkWaitForFences real_wait_for_fences;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
 static unsigned vk_diag_submit_calls;
 static unsigned vk_diag_submit2_calls;
 static unsigned vk_diag_acquire_calls;
@@ -203,6 +206,44 @@ static unsigned vk_diag_swapchain_image_calls;
 
 static int lsfg_requested(void) {
   return __atomic_load_n(&lsfg_enabled_requested, __ATOMIC_ACQUIRE);
+}
+
+static uint64_t lsfg_monotonic_ns(void);
+
+static int vk_low_latency_cached = -1;
+static int vk_low_latency_enabled(void) {
+  if (vk_low_latency_cached < 0)
+    vk_low_latency_cached = prefs_get_bool("EmuCore/GS/low_latency", false) ? 1 : 0;
+  return vk_low_latency_cached;
+}
+
+static uint64_t low_latency_period_ns(void) {
+  unsigned rate = saltysd_display_sync_service_rate();
+  if (rate < 20 || rate > 240) rate = 60;
+  return UINT64_C(1000000000) / rate;
+}
+
+/* Present returns quickly with MAILBOX, so pace each GPU submit against the
+ * next panel vblank. The existing SaltyNX display-sync query supplies the panel
+ * refresh rate; leave a 2 ms submission lead-in for NVK and the VI queue. */
+static uint64_t low_latency_pace_before_submit(void) {
+  if (!vk_low_latency_enabled() || !low_latency_next_vblank_ns)
+    return 0;
+  const uint64_t now = lsfg_monotonic_ns();
+  const uint64_t lead = UINT64_C(2000000);
+  uint64_t target = low_latency_next_vblank_ns > lead ?
+      low_latency_next_vblank_ns - lead : low_latency_next_vblank_ns;
+  const uint64_t period = low_latency_period_ns();
+  while (target <= now && low_latency_next_vblank_ns <= now && period) {
+    low_latency_next_vblank_ns += period;
+    target = low_latency_next_vblank_ns > lead ?
+        low_latency_next_vblank_ns - lead : low_latency_next_vblank_ns;
+  }
+  if (target <= now)
+    return 0;
+  const uint64_t wait_ns = target - now;
+  svcSleepThread((int64_t)wait_ns);
+  return wait_ns;
 }
 
 /* Pure so it can be tested without a GPU: given the frozen source rate and the
@@ -390,6 +431,8 @@ static VkResult find_lsfg_main_queue_family(
 static void reset_tracked_swapchain(void) {
   lsfg_destroy_runtime();
   tracked_swapchain = VK_NULL_HANDLE;
+  low_latency_pending_fence = VK_NULL_HANDLE;
+  low_latency_next_vblank_ns = 0;
   memset(&tracked_swapchain_extent, 0, sizeof(tracked_swapchain_extent));
   tracked_swapchain_lsfg_compatible = 0;
   lsfg_init_attempted = 0;
@@ -493,7 +536,6 @@ static double perf_worst_mean_ns(uint64_t *v, unsigned n, unsigned count) {
  * handing the core a shim for a function the driver does not have would be
  * worse than a branch that cannot run.
  */
-static PFN_vkWaitForFences real_wait_for_fences;
 static PFN_vkQueueWaitIdle real_queue_wait_idle;
 static PFN_vkCreateGraphicsPipelines real_create_graphics_pipelines;
 static PFN_vkCmdPipelineBarrier real_cmd_pipeline_barrier;
@@ -656,11 +698,33 @@ vkWaitForFences_shim(VkDevice device, uint32_t fence_count, const VkFence *fence
   if (!real_wait_for_fences) return VK_ERROR_INITIALIZATION_FAILED;
   if (timeout == 0) {
     gpu_note_count(&gpu_fence_polls);
-    return real_wait_for_fences(device, fence_count, fences, wait_all, timeout);
+    const VkResult r = real_wait_for_fences(device, fence_count, fences,
+                                            wait_all, timeout);
+    if (r == VK_SUCCESS && low_latency_pending_fence) {
+      for (uint32_t i = 0; i < fence_count; ++i) {
+        if (fences[i] == low_latency_pending_fence &&
+            real_wait_for_fences(device, 1, &low_latency_pending_fence,
+                                 VK_TRUE, 0) == VK_SUCCESS) {
+          low_latency_pending_fence = VK_NULL_HANDLE;
+          break;
+        }
+      }
+    }
+    return r;
   }
   const uint64_t t0 = lsfg_monotonic_ns();
   const VkResult r = real_wait_for_fences(device, fence_count, fences, wait_all, timeout);
   gpu_note_time(&gpu_fence_calls, &gpu_fence_ns, t0, lsfg_monotonic_ns());
+  if (r == VK_SUCCESS && low_latency_pending_fence) {
+    for (uint32_t i = 0; i < fence_count; ++i) {
+      if (fences[i] == low_latency_pending_fence) {
+        const VkFence pending = low_latency_pending_fence;
+        if (real_wait_for_fences(device, 1, &pending, VK_TRUE, 0) == VK_SUCCESS)
+          low_latency_pending_fence = VK_NULL_HANDLE;
+        break;
+      }
+    }
+  }
   return r;
 }
 
@@ -935,6 +999,28 @@ static void perf_observe_present(void) {
 }
 #endif /* NETHERSX2_VK_DIAGNOSTIC */
 
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+static VkResult VKAPI_CALL
+vkWaitForFences_shim(VkDevice device, uint32_t fence_count,
+                     const VkFence *fences, VkBool32 wait_all,
+                     uint64_t timeout) {
+  if (!real_wait_for_fences) return VK_ERROR_INITIALIZATION_FAILED;
+  const VkResult result = real_wait_for_fences(device, fence_count, fences,
+                                                wait_all, timeout);
+  if (result == VK_SUCCESS && low_latency_pending_fence) {
+    for (uint32_t i = 0; i < fence_count; ++i) {
+      if (fences[i] == low_latency_pending_fence) {
+        const VkFence pending = low_latency_pending_fence;
+        if (real_wait_for_fences(device, 1, &pending, VK_TRUE, 0) == VK_SUCCESS)
+          low_latency_pending_fence = VK_NULL_HANDLE;
+        break;
+      }
+    }
+  }
+  return result;
+}
+#endif
+
 static uint64_t lsfg_observe_source_present(void) {
   const uint64_t now = lsfg_monotonic_ns();
   uint64_t interval = 0;
@@ -1154,38 +1240,79 @@ vkGetDeviceQueue2_shim(VkDevice device, const VkDeviceQueueInfo2 *queue_info,
 #endif
 }
 
+static void low_latency_wait_pending_fence(const char *where) {
+  if (!vk_low_latency_enabled() || !low_latency_pending_fence ||
+      !tracked_device || !real_wait_for_fences)
+    return;
+  const VkFence fence = low_latency_pending_fence;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+  const uint64_t t0 = lsfg_monotonic_ns();
+#endif
+  const VkResult result = real_wait_for_fences(tracked_device, 1, &fence,
+                                                VK_TRUE, UINT64_MAX);
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  const uint64_t t1 = lsfg_monotonic_ns();
+  vk_diag_note("low-latency fence wait where=%s fence=%p result=%d wait_ms=%.3f",
+               where, (void *)fence, result,
+               t1 > t0 ? (double)(t1 - t0) / 1e6 : 0.0);
+#endif
+  if (result == VK_SUCCESS)
+    low_latency_pending_fence = VK_NULL_HANDLE;
+}
+
 static VkResult VKAPI_CALL
 vkQueueSubmit_shim(VkQueue queue, uint32_t submit_count,
                    const VkSubmitInfo *submits, VkFence fence) {
-  PFN_vkQueueSubmit submit = real_queue_submit ? real_queue_submit : vkQueueSubmit;
+  PFN_vkQueueSubmit submit = real_queue_submit;
+  if (!submit) return VK_ERROR_INITIALIZATION_FAILED;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  const uint64_t paced_ns = low_latency_pace_before_submit();
   const uint64_t t0 = lsfg_monotonic_ns();
-  VkResult result = submit(queue, submit_count, submits, fence);
+#else
+  (void)low_latency_pace_before_submit();
+#endif
+  const VkResult result = submit(queue, submit_count, submits, fence);
+#ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
     if (t1 > t0) { frame_sub_ns += t1 - t0; gpu_note_time(&gpu_sub_calls, &gpu_sub_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_submit_calls;
-  if (call <= 3 || result != VK_SUCCESS)
-    vk_diag_note("vkQueueSubmit call=%u count=%u fence=%p result=%d",
-                 call, submit_count, (void *)fence, result);
+  if (call <= 3 || result != VK_SUCCESS || paced_ns)
+    vk_diag_note("vkQueueSubmit call=%u count=%u fence=%p result=%d pace_ms=%.3f",
+                 call, submit_count, (void *)fence, result,
+                 (double)paced_ns / 1e6);
+#endif
+  if (vk_low_latency_enabled() && result == VK_SUCCESS && fence)
+    low_latency_pending_fence = fence;
   return result;
 }
 
 static VkResult VKAPI_CALL
 vkQueueSubmit2_shim(VkQueue queue, uint32_t submit_count,
                     const VkSubmitInfo2 *submits, VkFence fence) {
-  PFN_vkQueueSubmit2 submit = real_queue_submit2 ? real_queue_submit2 : vkQueueSubmit2;
+  PFN_vkQueueSubmit2 submit = real_queue_submit2;
+  if (!submit) return VK_ERROR_INITIALIZATION_FAILED;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  const uint64_t paced_ns = low_latency_pace_before_submit();
   const uint64_t t0 = lsfg_monotonic_ns();
-  VkResult result = submit(queue, submit_count, submits, fence);
+#else
+  (void)low_latency_pace_before_submit();
+#endif
+  const VkResult result = submit(queue, submit_count, submits, fence);
+#ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
     if (t1 > t0) { frame_sub_ns += t1 - t0; gpu_note_time(&gpu_sub_calls, &gpu_sub_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_submit2_calls;
-  if (call <= 3 || result != VK_SUCCESS)
-    vk_diag_note("vkQueueSubmit2 call=%u count=%u fence=%p result=%d",
-                 call, submit_count, (void *)fence, result);
+  if (call <= 3 || result != VK_SUCCESS || paced_ns)
+    vk_diag_note("vkQueueSubmit2 call=%u count=%u fence=%p result=%d pace_ms=%.3f",
+                 call, submit_count, (void *)fence, result,
+                 (double)paced_ns / 1e6);
+#endif
+  if (vk_low_latency_enabled() && result == VK_SUCCESS && fence)
+    low_latency_pending_fence = fence;
   return result;
 }
 
@@ -1193,25 +1320,45 @@ static VkResult VKAPI_CALL
 vkAcquireNextImageKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
                            uint64_t timeout, VkSemaphore semaphore,
                            VkFence fence, uint32_t *image_index) {
-  PFN_vkAcquireNextImageKHR acquire = real_acquire_next_image ?
-      real_acquire_next_image : vkAcquireNextImageKHR;
+  PFN_vkAcquireNextImageKHR acquire = real_acquire_next_image;
+  if (!acquire) return VK_ERROR_INITIALIZATION_FAILED;
+  low_latency_wait_pending_fence("before-acquire");
+#ifdef NETHERSX2_VK_DIAGNOSTIC
   const uint64_t t0 = lsfg_monotonic_ns();
+#endif
+  unsigned retries = 0;
   VkResult result = acquire(device, swapchain, timeout, semaphore, fence,
                             image_index);
+  if (vk_low_latency_enabled() && timeout == 0 && result == VK_NOT_READY) {
+    const uint64_t deadline = lsfg_monotonic_ns() + UINT64_C(50000000);
+    do {
+      svcSleepThread(200000);
+      ++retries;
+      result = acquire(device, swapchain, timeout, semaphore, fence, image_index);
+    } while (result == VK_NOT_READY && lsfg_monotonic_ns() < deadline);
+  }
+#ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
     if (t1 > t0) { frame_acq_ns += t1 - t0; gpu_note_time(&gpu_acq_calls, &gpu_acq_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_acquire_calls;
-  if (call <= 4 || (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR))
-    vk_diag_note("vkAcquireNextImageKHR call=%u result=%d image=%u semaphore=%p fence=%p",
+  if (call <= 4 || (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) || retries)
+    vk_diag_note("vkAcquireNextImageKHR call=%u result=%d image=%u retries=%u elapsed_ms=%.3f semaphore=%p fence=%p",
                  call, result,
                  image_index && (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) ?
                      *image_index : UINT32_MAX,
+                 retries, (double)(lsfg_monotonic_ns() - t0) / 1e6,
                  (void *)semaphore, (void *)fence);
+#endif
   return result;
 }
 
+__attribute__((used)) static const PFN_vkQueueSubmit low_latency_sig_submit = vkQueueSubmit_shim;
+__attribute__((used)) static const PFN_vkQueueSubmit2 low_latency_sig_submit2 = vkQueueSubmit2_shim;
+__attribute__((used)) static const PFN_vkAcquireNextImageKHR low_latency_sig_acquire = vkAcquireNextImageKHR_shim;
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
 static VkResult VKAPI_CALL
 vkGetSwapchainImagesKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
                              uint32_t *count, VkImage *images) {
@@ -1225,6 +1372,49 @@ vkGetSwapchainImagesKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
   return result;
 }
 #endif
+
+static const char *vk_present_mode_name(VkPresentModeKHR mode) {
+  switch (mode) {
+    case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX";
+    case VK_PRESENT_MODE_IMMEDIATE_KHR: return "IMMEDIATE";
+    case VK_PRESENT_MODE_FIFO_KHR: return "FIFO";
+    default: return "OTHER";
+  }
+}
+
+static int vk_low_latency_select_mode(VkSurfaceKHR surface,
+                                      VkPresentModeKHR *out_mode) {
+  uint32_t count = 0;
+  if (vkGetPhysicalDeviceSurfacePresentModesKHR(tracked_physical_device,
+          surface, &count, NULL) != VK_SUCCESS || count == 0)
+    return 0;
+  VkPresentModeKHR *modes = calloc(count, sizeof(*modes));
+  if (!modes) return 0;
+  const VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(
+      tracked_physical_device, surface, &count, modes);
+  if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+    free(modes);
+    return 0;
+  }
+  const VkPresentModeKHR preference[] = {
+    VK_PRESENT_MODE_MAILBOX_KHR,
+    VK_PRESENT_MODE_IMMEDIATE_KHR,
+    VK_PRESENT_MODE_FIFO_KHR,
+  };
+  int found = 0;
+  for (unsigned i = 0; i < sizeof(preference) / sizeof(preference[0]); ++i) {
+    for (uint32_t j = 0; j < count; ++j) {
+      if (modes[j] == preference[i]) {
+        *out_mode = preference[i];
+        found = 1;
+        break;
+      }
+    }
+    if (found) break;
+  }
+  free(modes);
+  return found;
+}
 
 static VkResult VKAPI_CALL
 vkCreateSwapchainKHR_shim(VkDevice device,
@@ -1241,8 +1431,10 @@ vkCreateSwapchainKHR_shim(VkDevice device,
   PFN_vkCreateSwapchainKHR create_fn = real_create_swapchain ?
       real_create_swapchain : vkCreateSwapchainKHR;
 
-  if (create_info->oldSwapchain == tracked_swapchain)
+  if (create_info->oldSwapchain == tracked_swapchain) {
+    low_latency_wait_pending_fence("before-swapchain-recreate");
     reset_tracked_swapchain();
+  }
 
   /* SaltyNX may still be bringing its Core up during early wrapper startup.
    * The frontend's first nonblocking SaltySD attempt happens before the VM and
@@ -1267,15 +1459,16 @@ vkCreateSwapchainKHR_shim(VkDevice device,
                saltysd_display_sync_rate());
 #endif
   int compatible = 0;
+  const int low_latency = vk_low_latency_enabled();
   const int requested = lsfg_requested();
   const int want_lsfg = lsfg_device_capable;
   const char *dll_path = lsfg_dll_path();
   const int have_dll = want_lsfg && file_readable(dll_path);
 
-  if (requested && (!want_lsfg || !have_dll))
+  if (requested && !low_latency && (!want_lsfg || !have_dll))
     return VK_ERROR_FEATURE_NOT_PRESENT;
 
-  if (have_dll) {
+  if (!low_latency && have_dll) {
     VkSurfaceCapabilitiesKHR capabilities;
     VkFormatProperties swapchain_properties;
     VkFormatProperties rgba_properties;
@@ -1306,14 +1499,40 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     }
   }
 
-  if (requested && want_lsfg && have_dll && !compatible)
+  if (requested && !low_latency && want_lsfg && have_dll && !compatible)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-  /* Do not force the emulator's swapchain to follow the panel. The measured
-   * present cadence is published outward to FPSLocker; only LSFG's own
-   * compatibility path may select FIFO above. */
+  if (low_latency) {
+    VkSurfaceCapabilitiesKHR capabilities;
+    const VkResult cap_result = tracked_physical_device ?
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(tracked_physical_device,
+            create_info->surface, &capabilities) : VK_ERROR_INITIALIZATION_FAILED;
+    VkPresentModeKHR selected_mode = create_info->presentMode;
+    const int mode_found = tracked_physical_device &&
+        vk_low_latency_select_mode(create_info->surface, &selected_mode);
+    if (cap_result == VK_SUCCESS) {
+      uint32_t image_count = 2;
+      if (image_count < capabilities.minImageCount)
+        image_count = capabilities.minImageCount;
+      if (capabilities.maxImageCount && image_count > capabilities.maxImageCount)
+        image_count = capabilities.maxImageCount;
+      modified.minImageCount = image_count;
+    }
+    if (mode_found)
+      modified.presentMode = selected_mode;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+    vk_diag_note("swapchain low_latency=%d images=%u mode=%s caps=%d modes=%d min=%u max=%u",
+                 low_latency, modified.minImageCount,
+                 vk_present_mode_name(modified.presentMode), cap_result,
+                 mode_found, cap_result == VK_SUCCESS ? capabilities.minImageCount : 0,
+                 cap_result == VK_SUCCESS ? capabilities.maxImageCount : 0);
+#endif
+  }
+
+  /* Low latency takes priority over the LSFG FIFO path. Otherwise leave the
+   * emulator's swapchain alone; FPSLocker consumes the measured cadence. */
   const VkSwapchainCreateInfoKHR *selected_create_info =
-      compatible ? &modified : create_info;
+      (low_latency || compatible) ? &modified : create_info;
   VkResult result = create_fn(device, selected_create_info, alloc, out);
   if (result == VK_SUCCESS) {
     reset_tracked_swapchain();
@@ -1325,8 +1544,8 @@ vkCreateSwapchainKHR_shim(VkDevice device,
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   vk_diag_note("vkCreateSwapchainKHR end result=%d swapchain=%p compatible=%d actual_usage=0x%x actual_images=%u actual_mode=%u",
                result, out && result == VK_SUCCESS ? (void *)*out : NULL,
-               compatible, compatible ? modified.imageUsage : create_info->imageUsage,
-               compatible ? modified.minImageCount : create_info->minImageCount,
+               compatible, (low_latency || compatible) ? modified.imageUsage : create_info->imageUsage,
+               (low_latency || compatible) ? modified.minImageCount : create_info->minImageCount,
                selected_create_info->presentMode);
 #endif
   return result;
@@ -1350,6 +1569,9 @@ vkDestroyDevice_shim(VkDevice device, const VkAllocationCallbacks *alloc) {
   vk_diag_note("vkDestroyDevice device=%p", (void *)device);
 #endif
   if (device == tracked_device) {
+    low_latency_wait_pending_fence("device-destroy");
+    low_latency_pending_fence = VK_NULL_HANDLE;
+    low_latency_next_vblank_ns = 0;
     reset_tracked_swapchain();
     tracked_device = VK_NULL_HANDLE;
     tracked_physical_device = VK_NULL_HANDLE;
@@ -1374,6 +1596,8 @@ vkQueuePresentKHR_native(VkQueue queue, const VkPresentInfoKHR *present_info) {
   VkResult result = present(queue, present_info);
   /* Timestamp the completed present call rather than source-frame entry. */
   saltysd_display_sync_note_present();
+  if (vk_low_latency_enabled())
+    low_latency_next_vblank_ns = lsfg_monotonic_ns() + low_latency_period_ns();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
@@ -1454,6 +1678,8 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
                  vk_present_count, pi ? pi->waitSemaphoreCount : 0,
                  pi ? pi->swapchainCount : 0, lsfg_requested());
 #endif
+  if (vk_low_latency_enabled())
+    return vkQueuePresentKHR_native(q, pi);
   const int requested = lsfg_requested();
   uint64_t source_interval = 0;
 
@@ -1629,14 +1855,13 @@ static PFN_vkVoidFunction VKAPI_CALL
 vk_gdpa_hook(VkDevice dev, const char *name) {
   PFN_vkVoidFunction fn = vkGetDeviceProcAddr(dev, name);
   if (!name) return fn;
-#ifdef NETHERSX2_VK_DIAGNOSTIC
-  {
-    PFN_vkVoidFunction probe = gpu_probe_lookup(name, fn);
-    if (probe) return probe;
+  if (!strcmp(name, "vkWaitForFences")) {
+    real_wait_for_fences = (PFN_vkWaitForFences)fn;
+    return fn ? (PFN_vkVoidFunction)vkWaitForFences_shim : NULL;
   }
   if (!strcmp(name, "vkQueueSubmit")) {
     real_queue_submit = (PFN_vkQueueSubmit)fn;
-    return (PFN_vkVoidFunction)vkQueueSubmit_shim;
+    return fn ? (PFN_vkVoidFunction)vkQueueSubmit_shim : NULL;
   }
   if (!strcmp(name, "vkQueueSubmit2") || !strcmp(name, "vkQueueSubmit2KHR")) {
     real_queue_submit2 = (PFN_vkQueueSubmit2)fn;
@@ -1644,7 +1869,12 @@ vk_gdpa_hook(VkDevice dev, const char *name) {
   }
   if (!strcmp(name, "vkAcquireNextImageKHR")) {
     real_acquire_next_image = (PFN_vkAcquireNextImageKHR)fn;
-    return (PFN_vkVoidFunction)vkAcquireNextImageKHR_shim;
+    return fn ? (PFN_vkVoidFunction)vkAcquireNextImageKHR_shim : NULL;
+  }
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  {
+    PFN_vkVoidFunction probe = gpu_probe_lookup(name, fn);
+    if (probe) return probe;
   }
 #endif
   if (!strcmp(name, "vkGetDeviceQueue")) {
@@ -1813,15 +2043,13 @@ vk_gipa_hook(VkInstance inst, const char *name) {
       return (PFN_vkVoidFunction)vkCreateAndroidSurfaceKHR_shim;
     if (!strcmp(name, "vkGetDeviceProcAddr"))
       return (PFN_vkVoidFunction)vk_gdpa_hook;
-#ifdef NETHERSX2_VK_DIAGNOSTIC
-    {
-      PFN_vkVoidFunction probe =
-          gpu_probe_lookup(name, vkGetInstanceProcAddr(inst, name));
-      if (probe) return probe;
+    if (!strcmp(name, "vkWaitForFences")) {
+      real_wait_for_fences = (PFN_vkWaitForFences)vkGetInstanceProcAddr(inst, name);
+      return real_wait_for_fences ? (PFN_vkVoidFunction)vkWaitForFences_shim : NULL;
     }
     if (!strcmp(name, "vkQueueSubmit")) {
       real_queue_submit = (PFN_vkQueueSubmit)vkGetInstanceProcAddr(inst, name);
-      return (PFN_vkVoidFunction)vkQueueSubmit_shim;
+      return real_queue_submit ? (PFN_vkVoidFunction)vkQueueSubmit_shim : NULL;
     }
     if (!strcmp(name, "vkQueueSubmit2") || !strcmp(name, "vkQueueSubmit2KHR")) {
       real_queue_submit2 = (PFN_vkQueueSubmit2)vkGetInstanceProcAddr(inst, name);
@@ -1830,7 +2058,14 @@ vk_gipa_hook(VkInstance inst, const char *name) {
     if (!strcmp(name, "vkAcquireNextImageKHR")) {
       real_acquire_next_image =
           (PFN_vkAcquireNextImageKHR)vkGetInstanceProcAddr(inst, name);
-      return (PFN_vkVoidFunction)vkAcquireNextImageKHR_shim;
+      return real_acquire_next_image ?
+          (PFN_vkVoidFunction)vkAcquireNextImageKHR_shim : NULL;
+    }
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+    {
+      PFN_vkVoidFunction probe =
+          gpu_probe_lookup(name, vkGetInstanceProcAddr(inst, name));
+      if (probe) return probe;
     }
 #endif
     if (!strcmp(name, "vkCreateDevice")) {

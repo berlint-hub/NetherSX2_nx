@@ -12,6 +12,7 @@
 #include <switch/arm/counter.h>
 
 #include "saltysd_display.h"
+#include "prefs.h"
 
 #define SALTYSD_PORT "NethFPS"
 #define SALTYSD_LEGACY_PORT "SaltySD"
@@ -239,6 +240,22 @@ static void publish_present_rate(void) {
   if (!saltysd_find_fpslocked())
     return;
   const unsigned fps = estimate_present_fps();
+  /* Low-latency mode uses a fixed 60 Hz presentation target; do not let the
+   * adaptive cadence estimator ratchet FPSLocker down to 50/45 on transient
+   * emulator load. Keep publishing the measured average for diagnostics. */
+  if (prefs_get_bool("EmuCore/GS/low_latency", false)) {
+    if (__atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE) != 60)
+      __atomic_store_n(s_fpslocked, 60, __ATOMIC_RELEASE);
+    s_last_written_fpslocked = 60;
+    __atomic_store_n(&s_published_target, 60, __ATOMIC_RELEASE);
+    s_candidate_target = 60;
+    s_candidate_observations = 0;
+    if (fps && s_fpsavg) {
+      const float measured = (float)fps;
+      memcpy((void *)s_fpsavg, &measured, sizeof(measured));
+    }
+    return;
+  }
   /* NX-FPS installs its present hook by rewriting the game's import table;
      this process resolves vkQueuePresentKHR at runtime through the Vulkan
      wrapper instead, so the hooked copy is never called and NX-FPS never

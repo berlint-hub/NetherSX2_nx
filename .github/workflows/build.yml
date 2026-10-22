@@ -181,7 +181,7 @@ jobs:
           # uploaded blob, so cloning only the branch can silently select a
           # newer driver whose SHA does not match this build's Makefile pin.
           TEST3_REF="arena/8b264db8-test3"
-          TEST3_COMMIT="b5c2ab61775e6b68aa1c1ed41eedd082802cde0e"
+          TEST3_COMMIT="41f2386e515ea65fde26398315c6ad78b853afcc"
           git clone --depth 1 --branch "$TEST3_REF" \
             https://github.com/berlint-hub/TEST3.git /tmp/TEST3 \
             || { echo "::error::clone TEST3 selhal (ref $TEST3_REF)"; exit 1; }
