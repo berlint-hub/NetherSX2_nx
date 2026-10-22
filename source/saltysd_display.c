@@ -30,6 +30,10 @@ static volatile int s_enabled;
 static volatile int s_port_available;
 static volatile uint32_t s_service_rate;
 static volatile uint32_t s_last_connect_result = UINT32_MAX;
+static volatile uint32_t s_nethfps_connect_result = UINT32_MAX;
+static volatile uint32_t s_legacy_connect_result = UINT32_MAX;
+/* 0 = no successful port, 1 = NethFPS, 2 = legacy SaltySD. */
+static volatile unsigned s_connect_port;
 static volatile int s_last_query_status = -1;
 static volatile uint64_t s_last_present_tick;
 static volatile uint64_t s_present_intervals[PRESENT_INTERVAL_SAMPLES];
@@ -106,10 +110,23 @@ static int saltysd_send_query(Handle session, uint32_t command_id,
 
 static Result saltysd_connect(Handle *session) {
   Result connected = svcConnectToNamedPort(session, SALTYSD_PORT);
-  if (R_SUCCEEDED(connected))
+  __atomic_store_n(&s_nethfps_connect_result, (uint32_t)connected,
+                   __ATOMIC_RELEASE);
+  __atomic_store_n(&s_legacy_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
+  if (R_SUCCEEDED(connected)) {
+    __atomic_store_n(&s_connect_port, 1, __ATOMIC_RELEASE);
     return connected;
-  /* Older SaltyNX builds lack the dedicated concurrent client endpoint. */
-  return svcConnectToNamedPort(session, SALTYSD_LEGACY_PORT);
+  }
+
+  /* Older SaltyNX builds lack the dedicated concurrent client endpoint. Keep
+   * the fallback, but expose both results so its error cannot hide a
+   * NethFPS-specific connection failure in device diagnostics. */
+  connected = svcConnectToNamedPort(session, SALTYSD_LEGACY_PORT);
+  __atomic_store_n(&s_legacy_connect_result, (uint32_t)connected,
+                   __ATOMIC_RELEASE);
+  __atomic_store_n(&s_connect_port, R_SUCCEEDED(connected) ? 2 : 0,
+                   __ATOMIC_RELEASE);
+  return connected;
 }
 
 static int saltysd_query_refresh_rate(Handle session, uint8_t *rate) {
@@ -243,6 +260,9 @@ void saltysd_display_sync_configure(bool enabled) {
     __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_query_status, -1, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_nethfps_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_legacy_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_connect_port, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_last_present_tick, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_present_interval_count, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_next_query_tick, 0, __ATOMIC_RELEASE);
@@ -362,6 +382,18 @@ unsigned saltysd_display_sync_service_rate(void) {
 
 unsigned saltysd_display_sync_connect_result(void) {
   return __atomic_load_n(&s_last_connect_result, __ATOMIC_ACQUIRE);
+}
+
+unsigned saltysd_display_sync_nethfps_connect_result(void) {
+  return __atomic_load_n(&s_nethfps_connect_result, __ATOMIC_ACQUIRE);
+}
+
+unsigned saltysd_display_sync_legacy_connect_result(void) {
+  return __atomic_load_n(&s_legacy_connect_result, __ATOMIC_ACQUIRE);
+}
+
+unsigned saltysd_display_sync_connect_port(void) {
+  return __atomic_load_n(&s_connect_port, __ATOMIC_ACQUIRE);
 }
 
 unsigned saltysd_display_sync_published_target(void) {

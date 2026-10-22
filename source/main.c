@@ -255,35 +255,45 @@ static void display_sync_poll_and_apply(void) {
     static int last_query_status = -2;
     static int last_active = -1;
     static unsigned last_connect_result;
+    static unsigned last_nethfps_result;
+    static unsigned last_legacy_result;
+    static unsigned last_connect_port;
     static unsigned last_service_rate;
     static unsigned last_published_target;
     static int last_target_ready = -1;
-    static float last_effective_rate = -1.0f;
     const int query_status = saltysd_display_sync_query_status();
     const int active = saltysd_display_sync_active();
     const unsigned connect_result = saltysd_display_sync_connect_result();
+    const unsigned nethfps_result = saltysd_display_sync_nethfps_connect_result();
+    const unsigned legacy_result = saltysd_display_sync_legacy_connect_result();
+    const unsigned connect_port = saltysd_display_sync_connect_port();
     const unsigned service_rate = saltysd_display_sync_service_rate();
     const unsigned published_target = saltysd_display_sync_published_target();
     const int target_ready = saltysd_display_sync_target_ready();
     const float effective_rate = saltysd_display_sync_rate();
     if (query_status >= 0 &&
         (query_status != last_query_status || active != last_active ||
-         connect_result != last_connect_result || service_rate != last_service_rate ||
-         published_target != last_published_target || target_ready != last_target_ready ||
-         last_effective_rate < 0.0f ||
-         fabsf(effective_rate - last_effective_rate) >= 0.25f)) {
+         connect_result != last_connect_result ||
+         nethfps_result != last_nethfps_result ||
+         legacy_result != last_legacy_result || connect_port != last_connect_port ||
+         service_rate != last_service_rate || published_target != last_published_target ||
+         target_ready != last_target_ready)) {
       vk_diag_note("display-sync state query=%d active=%d connect_rc=0x%08x "
+                   "nethfps_rc=0x%08x legacy_rc=0x%08x port=%u "
                    "display_rate=%u present_fps=%.2f shared_ready=%d "
                    "fpslocker_target=%u",
-                   query_status, active, connect_result, service_rate,
-                   effective_rate, target_ready, published_target);
+                   query_status, active, connect_result, nethfps_result,
+                   legacy_result, connect_port, service_rate, effective_rate,
+                   target_ready, published_target);
       last_query_status = query_status;
       last_active = active;
       last_connect_result = connect_result;
+      last_nethfps_result = nethfps_result;
+      last_legacy_result = legacy_result;
+      last_connect_port = connect_port;
       last_service_rate = service_rate;
       last_published_target = published_target;
       last_target_ready = target_ready;
-      last_effective_rate = effective_rate;
     }
   }
 #endif
@@ -2023,12 +2033,16 @@ int main(void) {
   saltysd_display_sync_poll();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   vk_diag_note("display-sync enabled=%d query=%d active=%d connect_rc=0x%08x "
+               "nethfps_rc=0x%08x legacy_rc=0x%08x port=%u "
                "display_rate=%u present_fps=%.2f shared_ready=%d "
                "fpslocker_target=%u",
                display_sync_enabled ? 1 : 0,
                saltysd_display_sync_query_status(),
                saltysd_display_sync_active() ? 1 : 0,
                saltysd_display_sync_connect_result(),
+               saltysd_display_sync_nethfps_connect_result(),
+               saltysd_display_sync_legacy_connect_result(),
+               saltysd_display_sync_connect_port(),
                saltysd_display_sync_service_rate(),
                saltysd_display_sync_rate(),
                saltysd_display_sync_target_ready(),
