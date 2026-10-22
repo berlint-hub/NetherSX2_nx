@@ -930,6 +930,8 @@ static int g_quick_menu_ee_cycle_skip;
 static int g_quick_menu_restore_messages;
 static int g_quick_menu_ready;
 static int g_quick_menu_save_pending;
+static unsigned g_quick_menu_save_hold_polls;
+#define QUICK_MENU_SAVE_QUIET_POLLS 500
 #ifdef USE_FRAME_GENERATION
 static int g_quick_menu_lsfg_enabled;
 #endif
@@ -1527,10 +1529,9 @@ static bool quick_menu_update(u64 down, u64 pressed) {
     quick_menu_open();
     return true;
   }
-  /* Diagnostic isolation: after requesting a state save, leave the visible
-   * menu OSD untouched but stop processing menu input until the app exits.
-   * This removes the overlay's polling/update lifecycle without invoking any
-   * close-time JNI or settings calls while serialization is in flight. */
+  /* During the diagnostic save quiet window, keep input routed away from the
+   * game and do not execute any quick-menu operations. The host loop itself is
+   * parked for the window below, so this is only a defensive fallback. */
   if (g_quick_menu_save_pending) return true;
   if (chord) {
     quick_menu_close();
@@ -1600,9 +1601,10 @@ static bool quick_menu_update(u64 down, u64 pressed) {
                       "slot %d: saveStateSlot returned; leaving overlay open",
                       g_quick_menu_slot);
           g_quick_menu_save_pending = 1;
+          g_quick_menu_save_hold_polls = QUICK_MENU_SAVE_QUIET_POLLS;
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: quick-menu input/update suspended",
-                      g_quick_menu_slot);
+                      "slot %d: host input/poll loop paused for %u polls",
+                      g_quick_menu_slot, QUICK_MENU_SAVE_QUIET_POLLS);
           /* Keep the menu OSD visible, but stop all menu input/update handling.
            * Do not post a status message, close the menu, or call another JNI
            * entrypoint while the queued save is starting. */
@@ -2331,6 +2333,18 @@ int main(void) {
   while (applet_running && !g_quick_menu_exit_requested) {
     if (crash_in_progress())
       for (;;) svcSleepThread(1000000000ULL);
+
+    if (g_quick_menu_save_hold_polls > 0) {
+      --g_quick_menu_save_hold_polls;
+      svcSleepThread(input_poll_interval_ns);
+      ++input_polls;
+      continue;
+    }
+    if (g_quick_menu_save_pending) {
+      g_quick_menu_save_pending = 0;
+      corelog_log(CORELOG_INFO, "SaveState",
+                  "host input/poll loop resumed after diagnostic quiet window");
+    }
 
     if ((input_polls % housekeeping_divisor) == 0) {
       applet_running = appletMainLoop();
