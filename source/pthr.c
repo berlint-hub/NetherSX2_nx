@@ -39,9 +39,20 @@ int pthr_is_render_thread(void) {
 // block is intentionally leaked: it must stay live for the thread's lifetime.
 // ---------------------------------------------------------------------------
 
-void pthr_install_fake_tls(void) {
+static void install_fake_tls(int trace) {
   uint8_t *tls = calloc(1, 0x200);
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #4 TLS calloc=%p", tls);
   armSetTlsRw(tls);
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #4 armSetTlsRw complete current=%p",
+                armGetTlsRw());
+}
+
+void pthr_install_fake_tls(void) {
+  install_fake_tls(0);
 }
 
 void pthr_ensure_fake_tls(void) {
@@ -718,7 +729,7 @@ static void *thread_trampoline(void *p) {
     corelog_log(CORELOG_INFO, "Wrapper",
                 "pthread bridge #%u entered target=0x%llx arg=%p",
                 s.debug_id, (unsigned long long)(uintptr_t)s.start, s.arg);
-  pthr_install_fake_tls();
+  install_fake_tls(trace);
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",
                 "pthread bridge #%u fake TLS=%p",
