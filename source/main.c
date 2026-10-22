@@ -1588,6 +1588,9 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           return true;
         case QUICK_ITEM_SAVE_STATE:
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
+          /* SaveStateSlot queues serialization; wait before quick_menu_close()
+           * can reapply GS settings while the GS state is being captured. */
+          nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
           quick_menu_close();
           quick_menu_status("State saved");
           return true;
