@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <time.h>
+#include <stdint.h>
 #include <switch.h>
 
 #include "pthr.h"
@@ -669,6 +670,7 @@ void pthr_pin_by_name(const char *name) {
 typedef struct {
   void *(*start)(void *);
   void *arg;
+  unsigned debug_id;
 } ThreadStart;
 
 typedef struct DetachedThread {
@@ -682,6 +684,7 @@ static DetachedThread *detach_head;
 static DetachedThread *detach_tail;
 static pthread_t detach_reaper;
 static unsigned active_core_threads;
+static unsigned core_thread_created;
 static int detach_reaper_started;
 static int detach_reaper_stop;
 
@@ -710,10 +713,27 @@ static void *detach_reaper_main(void *unused) {
 static void *thread_trampoline(void *p) {
   ThreadStart s = *(ThreadStart *)p;
   free(p);
+  const int trace = s.debug_id == 4;
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #%u entered target=0x%llx arg=%p",
+                s.debug_id, (unsigned long long)(uintptr_t)s.start, s.arg);
   pthr_install_fake_tls();
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #%u fake TLS=%p",
+                s.debug_id, armGetTlsRw());
   // Keep emulator workers off the EE and audio cores.
   assign_work_core();
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #%u entering target routine",
+                s.debug_id);
   void *ret = s.start(s.arg);
+  if (trace)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #%u target returned=%p",
+                s.debug_id, ret);
   // EGL ownership is thread-local.
   extern void egl_gl_ownership_release(void);
   egl_gl_ownership_release();
@@ -746,10 +766,16 @@ int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr
 
   pthread_mutex_lock(&thread_lock);
   active_core_threads++;
+  s->debug_id = ++core_thread_created;
+  const unsigned debug_id = s->debug_id;
   pthread_mutex_unlock(&thread_lock);
 
   int ret = pthr_create_self(thread, &a, thread_trampoline, s);
   pthread_attr_destroy(&a);
+  if (debug_id == 4)
+    corelog_log(CORELOG_INFO, "Wrapper",
+                "pthread bridge #%u create returned rc=%d",
+                debug_id, ret);
   if (ret != 0) {
     pthread_mutex_lock(&thread_lock);
     active_core_threads--;
