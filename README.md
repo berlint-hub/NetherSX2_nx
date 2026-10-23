@@ -140,16 +140,25 @@ forwarding through it, and `source/nvk_libc_stubs.c` supplies the POSIX calls
 Mesa expects that newlib does not have. The SDL launcher uses its own graphics
 runtime and exits before the emulator starts.
 
-Experimental low-latency presentation is opt-in: set either the flat key
-`EmuCore/GS/low_latency = 1` or the conventional INI form `[EmuCore/GS]`
-followed by `low_latency = 1` in `nethersx2.ini`. The setting exports
-`NVK_LOW_LATENCY=1` before Vulkan initializes, requests a 2-image swapchain
-when surface limits permit, and prefers MAILBOX presentation. FPSLocker's cap
-stays fixed at 60 so it does not chase transient dips. NetherSX2 publishes its
-measured FPS to the NX-FPS shared block for the overlay; FPSLocker changes the
-panel rate through `FPSlocked` (not `FPSavg`). Enable FPSLocker's Handheld
-Display Sync toggle, which creates `sdmc:/SaltySD/flags/displaysync.flag`, for
-the panel-rate change to take effect.
+FPSLocker/NX-FPS synchronization is automatic by default when NetherSX2 finds
+its shared block at startup. Set `Wrapper/AutoSyncFPSLocker = false` in
+`nethersx2.ini` to opt out. When detected, NetherSX2 enables the display-cadence
+bridge and publishes measured FPS so FPSLocker can follow a stable game cadence.
+On Vulkan it also enables the low-latency pacing path: prefer MAILBOX (falling
+back to FIFO) and pace submissions against panel refresh. Deko3D follows the
+panel with swap interval 1. It does not change
+FPSLocker's `patchApplied` or `FPSmode`, and it only updates `FPSlocked` while
+the bridge still owns that target. NetherSX2 writes `pluginActive` only after a
+real present rate has been measured. Enable FPSLocker's Handheld Display Sync
+toggle, which creates `sdmc:/SaltySD/flags/displaysync.flag`, for panel-rate
+changes to take effect.
+
+The manual `EmuCore/GS/low_latency = 1` option remains available if automatic
+NX-FPS detection is disabled. It exports `NVK_LOW_LATENCY=1` before Vulkan
+initializes and requests a 2-image swapchain when surface limits permit. Low
+latency takes precedence over FPSLocker's buffer-count request. Surface limits
+can prevent a requested count from being applied; NetherSX2 reports the actual
+swapchain image count back through FPSLocker's `Buffers` field.
 
 Three things about the Horizon environment need papering over for the core to
 work at all, all of them in the POSIX shim rather than in the emulator:

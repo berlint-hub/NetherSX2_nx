@@ -197,6 +197,9 @@ static void prefs_seed_defaults(void) {
   // NVK_LOW_LATENCY before Vulkan initializes.
   prefs_seed("EmuCore/GS/low_latency", "0");
   prefs_seed("Wrapper/SyncFrameLimitToDisplay", "false");
+  // Automatically use the SaltyNX/FPSLocker cadence bridge and low-latency
+  // presentation when its shared block is detected. Set false to opt out.
+  prefs_seed("Wrapper/AutoSyncFPSLocker", "true");
 #if GS_RENDERER == GS_RENDERER_VK
   // Keep presentation work off the GS thread by default. The two bundled cores
   // use opposite names for the same state.

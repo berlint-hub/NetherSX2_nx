@@ -45,6 +45,8 @@ int main(void) {
   prefs_init(path);
   CHECK(prefs_get_bool("EmuCore/GS/low_latency", false),
         "sectioned low_latency=1 maps to EmuCore/GS/low_latency");
+  CHECK(prefs_get_bool("Wrapper/AutoSyncFPSLocker", false),
+        "auto FPSLocker sync defaults to enabled");
   CHECK(prefs_get_float("EmuCore/GS/upscale_multiplier", 0.0f) == 2.0f,
         "other section keys are flattened with their section name");
   CHECK(strcmp(prefs_get_string("Other/value", ""), "sectioned") == 0,
@@ -56,6 +58,14 @@ int main(void) {
   prefs_init(path);
   CHECK(!prefs_get_bool("EmuCore/GS/low_latency", true),
         "sectioned low_latency=0 overrides the seeded default");
+
+  CHECK(write_fixture(path,
+      "[Wrapper]\n"
+      "AutoSyncFPSLocker = false\n"),
+      "write auto-sync opt-out fixture");
+  prefs_init(path);
+  CHECK(!prefs_get_bool("Wrapper/AutoSyncFPSLocker", true),
+        "sectioned AutoSyncFPSLocker=false opts out");
 
   CHECK(write_fixture(path,
       "EmuCore/GS/low_latency = 1\n"

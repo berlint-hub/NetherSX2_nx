@@ -2059,26 +2059,45 @@ int main(void) {
 
   // settings store: load nethersx2.ini + seed OpenGL/folder defaults
   prefs_init(PREFS_PATH);
-#if defined(USE_VULKAN)
-  const bool low_latency =
-      prefs_get_bool("EmuCore/GS/low_latency", false);
-  // NVK reads this during instance/device setup; set it only after the INI is
-  // loaded, but before the emulation core can touch Vulkan.
-  setenv("NVK_LOW_LATENCY", low_latency ? "1" : "0", 1);
+#if defined(USE_VULKAN) || defined(USE_DEKO3D)
+  const bool auto_fpslocker_sync =
+      prefs_get_bool("Wrapper/AutoSyncFPSLocker", true);
 #else
-  const bool low_latency = false;
+  const bool auto_fpslocker_sync = false;
 #endif
+#if defined(USE_VULKAN)
+  const bool manual_low_latency =
+      prefs_get_bool("EmuCore/GS/low_latency", false);
+#else
+  const bool manual_low_latency = false;
+#endif
+  /* Auto mode probes the NX-FPS shared block during startup. If it is present,
+   * the existing display-cadence bridge becomes active; if absent, no pacing or
+   * panel settings are changed. */
   const bool display_sync_enabled =
-      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false) || low_latency;
+      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false) ||
+      manual_low_latency || auto_fpslocker_sync;
   saltysd_display_sync_configure(display_sync_enabled);
 #if defined(USE_VULKAN)
-  /* FPSLocker buffer selection is independent of display-sync pacing. Keep
-   * its shared-block request available even when Wrapper sync is disabled. */
+  /* Configure after display-sync shutdown/configuration so an explicit opt-out
+   * of auto-sync does not disable the independent FPSLocker buffer bridge. */
   saltysd_fpslocker_buffers_configure(true);
 #endif
   saltysd_display_sync_poll();
+  const bool auto_fpslocker_sync_active =
+      auto_fpslocker_sync && saltysd_display_sync_active();
+  const bool low_latency = manual_low_latency || auto_fpslocker_sync_active;
+#if defined(USE_VULKAN)
+  /* NVK reads this during instance/device setup. Resolve auto detection before
+   * the first Vulkan instance so its WSI can select the low-latency path. */
+  setenv("NVK_LOW_LATENCY", low_latency ? "1" : "0", 1);
+#endif
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   const char *low_latency_env = getenv("NVK_LOW_LATENCY");
+  vk_diag_note("fpslocker-auto-sync requested=%d detected=%d low_latency=%d",
+               auto_fpslocker_sync ? 1 : 0,
+               auto_fpslocker_sync_active ? 1 : 0,
+               low_latency ? 1 : 0);
   vk_diag_note("low-latency enabled=%d NVK_LOW_LATENCY=%s",
                low_latency ? 1 : 0,
                low_latency_env ? low_latency_env : "<unset>");

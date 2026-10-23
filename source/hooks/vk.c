@@ -215,7 +215,16 @@ static int lsfg_requested(void) {
 static uint64_t lsfg_monotonic_ns(void);
 
 static int vk_low_latency_cached = -1;
+static int vk_auto_sync_pref_cached = -1;
 static int vk_low_latency_enabled(void) {
+  if (vk_auto_sync_pref_cached < 0)
+    vk_auto_sync_pref_cached =
+        prefs_get_bool("Wrapper/AutoSyncFPSLocker", true) ? 1 : 0;
+  /* Auto mode is gated by the detected NX-FPS shared block. Checking here as
+   * well as before vkCreateInstance lets a late SaltyNX startup activate our
+   * own pacing hooks on a later swapchain without changing FPSLocker fields. */
+  if (vk_auto_sync_pref_cached && saltysd_display_sync_active())
+    return 1;
   if (vk_low_latency_cached < 0)
     vk_low_latency_cached = prefs_get_bool("EmuCore/GS/low_latency", false) ? 1 : 0;
   return vk_low_latency_cached;
