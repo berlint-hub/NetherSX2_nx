@@ -12,6 +12,7 @@
 #include "corelog.h"
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
 #include "hooks/vk.h"
+#include "pthr.h"
 #endif
 
 #define EXCEPTION_SLOT_COUNT 8
@@ -168,7 +169,8 @@ real_crash:
   }
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   vk_diag_exception(ctx->pc.x, ctx->far.x, ctx->esr, ctx->sp.x,
-                    ctx->fp.x, ctx->lr.x);
+                    ctx->fp.x, ctx->lr.x, (uint32_t)threadGetCurHandle(),
+                    pthr_debug_bridge4_stage());
 #endif
   // svcExitProcess() below bypasses atexit, so the core console buffer never
   // flushes on this path. This marker is raw write() and needs no flushing.

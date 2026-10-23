@@ -205,15 +205,42 @@ void pthr_pin_ee_core(void) {
 // "how many threads are there", so an approximate count would answer nothing.
 static int work_assigned;
 
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+// Written only by bridge thread #4; sampled by the exception handler so a
+// fault inside the pre-target path is still attributable if the logger itself
+// is the thing that faulted.
+static volatile unsigned pthr_bridge4_stage;
+
+static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
+  if (debug_id == 4)
+    __atomic_store_n(&pthr_bridge4_stage, stage, __ATOMIC_RELAXED);
+}
+
+unsigned pthr_debug_bridge4_stage(void) {
+  return __atomic_load_n(&pthr_bridge4_stage, __ATOMIC_RELAXED);
+}
+#else
+static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
+  (void)debug_id;
+  (void)stage;
+}
+#endif
+
 static int current_priority(void);
 
-static void assign_work_core(void) {
+static void assign_work_core(unsigned debug_id) {
+  pthr_bridge4_set_stage(debug_id, 3); // entering core_lock
   mutexLock(&core_lock);
+  pthr_bridge4_set_stage(debug_id, 4); // core_lock acquired
   core_init_once();
+  pthr_bridge4_set_stage(debug_id, 5); // core pool initialized
   const int core = work_list[work_rr++ % (unsigned)work_count]; const unsigned m = work_mask;
   const int n = ++work_assigned;
+  pthr_bridge4_set_stage(debug_id, 6); // assignment selected
   mutexUnlock(&core_lock);
+  pthr_bridge4_set_stage(debug_id, 7); // core_lock released
   svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, m);
+  pthr_bridge4_set_stage(debug_id, 8); // affinity syscall returned
   // This runs for EVERY thread the core creates, before it has a name -- so it
   // is the only place that can show the ones that never call prctl(PR_SET_NAME)
   // and therefore never reach pthr_pin_by_name(). Those keep this assignment for
@@ -237,11 +264,13 @@ static void assign_work_core(void) {
   // would share the core with GS/MTVU at equal priority, and Horizon does not
   // time-slice between equal priorities; at 59 it is below everything and only
   // ever runs in their gaps.
-  if (n <= 16 || (n % 16) == 0)
+  if (n <= 16 || (n % 16) == 0) {
+    pthr_bridge4_set_stage(debug_id, 9); // entering assignment log
     corelog_log(CORELOG_INFO, "Wrapper",
                 "worker thread #%d -> work pool core %d, mask 0x%x, inherited priority %d (PROVISIONAL -- if a named role line follows, that one already replaced core, mask and priority)",
                 n, core, m, current_priority());
-}
+  }
+  pthr_bridge4_set_stage(debug_id, 10); // assignment complete
 
 // background threads (audio, etc.): the dedicated bg core if we have one, else
 // share the work pool. For threads our vendored code spawns directly through
@@ -726,19 +755,24 @@ static void *thread_trampoline(void *p) {
   // must remain live until the worker has fully exited.
   armSetTlsRw(fake_tls);
   const int trace = debug_id == 4;
-  if (trace)
+  pthr_bridge4_set_stage(debug_id, 1); // TLS installed
+  if (trace) {
     corelog_log(CORELOG_INFO, "Wrapper",
                 "pthread bridge #%u entered target=0x%llx arg=%p fake TLS=%p current=%p",
                 debug_id, (unsigned long long)(uintptr_t)start, arg,
                 fake_tls, armGetTlsRw());
+    pthr_bridge4_set_stage(debug_id, 2); // entry marker logged
+  }
   // Keep emulator workers off the EE and audio cores.
-  assign_work_core();
-  if (trace)
-    // This marker is intentionally text-only. corelog_log() runs vsnprintf()
-    // before taking the logger mutex; avoid another formatted-libc call in the
-    // narrow pre-target path that the device trace localized here.
+  assign_work_core(debug_id);
+  pthr_bridge4_set_stage(debug_id, 11); // assignment returned
+  if (trace) {
+    // Text-only so this pre-target marker does not call vsnprintf().
     corelog_text(CORELOG_INFO, "Wrapper",
                  "pthread bridge #4 entering target routine");
+    pthr_bridge4_set_stage(debug_id, 12); // pre-target marker logged
+  }
+  pthr_bridge4_set_stage(debug_id, 13); // immediately before start(arg)
   void *ret = start(arg);
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",

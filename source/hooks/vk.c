@@ -117,16 +117,18 @@ vk_diag_note(const char *format, ...) {
 
 void
 vk_diag_exception(uint64_t pc, uint64_t far, uint32_t esr,
-                  uint64_t sp, uint64_t frame_pointer, uint64_t link_register) {
+                  uint64_t sp, uint64_t frame_pointer, uint64_t link_register,
+                  uint32_t thread_handle, unsigned bridge4_stage) {
   char report[512];
   const int length = snprintf(
       report, sizeof(report),
       "NetherSX2 fatal CPU exception\n"
       "pc=0x%016llx far=0x%016llx esr=0x%08x\n"
-      "sp=0x%016llx fp=0x%016llx lr=0x%016llx\n",
+      "sp=0x%016llx fp=0x%016llx lr=0x%016llx\n"
+      "thread_handle=0x%08x bridge4_stage=%u\n",
       (unsigned long long)pc, (unsigned long long)far, esr,
       (unsigned long long)sp, (unsigned long long)frame_pointer,
-      (unsigned long long)link_register);
+      (unsigned long long)link_register, thread_handle, bridge4_stage);
   const int fd = open(DATA_ROOT "/nethersx2-exception.log",
                       O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd >= 0) {

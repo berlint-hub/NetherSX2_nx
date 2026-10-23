@@ -99,6 +99,14 @@ void pthr_ensure_fake_tls(void);
 int pthr_cpu_time_report(char *buf, size_t len);
 
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+// Last completed stage of save-state worker bridge #4, sampled by the fatal
+// exception report. Values: 0 none; 1 TLS installed; 2 entry log returned; 3
+// before core_lock; 4 lock acquired; 5 pool initialized; 6 assignment selected;
+// 7 lock released; 8 affinity syscall returned; 9 assignment log started; 10
+// assignment complete; 11 assignment function returned; 12 pre-target marker
+// returned; 13 immediately before start(arg).
+unsigned pthr_debug_bridge4_stage(void);
+
 // Per-frame sampling of the same three roles, for the hitch line in vk.c.
 // pthr_cpu_time_report() consumes its own baselines (it is a rate), which is
 // wrong for a single frame: a 82 ms frame is 1.4% of a 6 s window, so the
