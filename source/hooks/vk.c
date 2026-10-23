@@ -1555,6 +1555,13 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     saltysd_display_sync_poll();
 
   VkSwapchainCreateInfoKHR modified = *create_info;
+  /* If FPSLocker has selected the active panel cadence, present through FIFO
+   * rather than inheriting the frontend's IMMEDIATE mode. A matching emulator
+   * limiter alone does not phase-lock presents to vblank; FIFO does. This only
+   * changes the WSI presentation mode, not the emulator's frame-rate limit. */
+  const int display_sync_mode_override = saltysd_display_sync_active();
+  if (display_sync_mode_override)
+    modified.presentMode = VK_PRESENT_MODE_FIFO_KHR;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   vk_diag_note("display-sync swapchain query=%d active=%d connect_rc=0x%08x "
                "nethfps_rc=0x%08x legacy_rc=0x%08x port=%u service_rate=%u "
@@ -1666,8 +1673,8 @@ vkCreateSwapchainKHR_shim(VkDevice device,
    * path. Otherwise FPSLocker's requested base count is honored, with LSFG
    * adding its own image headroom when the surface supports it. */
   const VkSwapchainCreateInfoKHR *selected_create_info =
-      (low_latency || compatible || fpslocker_buffer_override) ?
-          &modified : create_info;
+      (low_latency || compatible || fpslocker_buffer_override ||
+       display_sync_mode_override) ? &modified : create_info;
   VkResult result = create_fn(device, selected_create_info, alloc, out);
   uint32_t actual_image_count = 0;
   VkResult actual_image_count_result = VK_ERROR_INITIALIZATION_FAILED;
