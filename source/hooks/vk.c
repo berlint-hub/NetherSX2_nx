@@ -1373,6 +1373,7 @@ vkGetSwapchainImagesKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
 }
 #endif
 
+#ifdef NETHERSX2_VK_DIAGNOSTIC
 static const char *vk_present_mode_name(VkPresentModeKHR mode) {
   switch (mode) {
     case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX";
@@ -1381,17 +1382,22 @@ static const char *vk_present_mode_name(VkPresentModeKHR mode) {
     default: return "OTHER";
   }
 }
+#endif
 
 static int vk_low_latency_select_mode(VkSurfaceKHR surface,
                                       VkPresentModeKHR *out_mode) {
+  PFN_vkGetPhysicalDeviceSurfacePresentModesKHR get_modes = tracked_instance ?
+      (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)vkGetInstanceProcAddr(
+          tracked_instance, "vkGetPhysicalDeviceSurfacePresentModesKHR") : NULL;
+  if (!get_modes)
+    return 0;
   uint32_t count = 0;
-  if (vkGetPhysicalDeviceSurfacePresentModesKHR(tracked_physical_device,
-          surface, &count, NULL) != VK_SUCCESS || count == 0)
+  if (get_modes(tracked_physical_device, surface, &count, NULL) != VK_SUCCESS ||
+      count == 0)
     return 0;
   VkPresentModeKHR *modes = calloc(count, sizeof(*modes));
   if (!modes) return 0;
-  const VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(
-      tracked_physical_device, surface, &count, modes);
+  const VkResult result = get_modes(tracked_physical_device, surface, &count, modes);
   if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
     free(modes);
     return 0;
