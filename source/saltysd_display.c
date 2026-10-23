@@ -250,13 +250,13 @@ static void publish_present_rate(void) {
     __atomic_store_n(&s_published_target, 60, __ATOMIC_RELEASE);
     s_candidate_target = 60;
     s_candidate_observations = 0;
-    /* SaltyNX fine mode follows FPSavg itself, not only FPSlocked. Keep both
-     * shared values at the fixed target or it will still retune the panel to
-     * 50/45 Hz while low-latency mode is active. NetherSX2's real cadence stays
-     * available through saltysd_display_sync_rate() and the Vulkan diagnostics. */
-    if (s_fpsavg) {
-      const float fixed_target = 60.0f;
-      memcpy((void *)s_fpsavg, &fixed_target, sizeof(fixed_target));
+    /* FPSLocker uses FPSlocked as its cap; SaltyNX fine sync independently
+     * follows FPSavg to adapt the panel to the measured game cadence. Keep the
+     * cap fixed at 60, but don't lie about FPSavg or PAL/other rates won't match
+     * the panel even though SaltyNX's fine-rate path is enabled. */
+    if (fps && s_fpsavg) {
+      const float measured = (float)fps;
+      memcpy((void *)s_fpsavg, &measured, sizeof(measured));
     }
     return;
   }
