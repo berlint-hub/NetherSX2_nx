@@ -895,6 +895,17 @@ jobs:
             exit 1
           fi
 
+      # Preserve the exact diagnostic link map used by the tested NRO. The
+      # device exception gives an ASLR PC and a GIPA function pointer; this map
+      # is needed to relate their relative distance back to a linked symbol.
+      - name: VK diagnostic link map
+        uses: actions/upload-artifact@v4
+        with:
+          name: nethersx2-vk-link-map
+          path: build-vk-diag/NetherSX2_nx_vk_diag.map
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Artefakty
         uses: actions/upload-artifact@v4
         with:
