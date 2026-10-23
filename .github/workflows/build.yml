@@ -553,10 +553,11 @@ jobs:
           # stranku, ale velikost nic nedokazuje -- ani rozdil, ani jeho absence.
           regd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "mmap RX (recompiler/JIT)" || true)
           regp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "mmap RX (recompiler/JIT)" || true)
-          # Tenhle format je naopak JEN v produkci (cutoff INFO je v diag buildu
-          # vypnuty), takze jeho pritomnost dokazuje, ze #ifndef zabral.
-          cutp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "INFO and below dropped" || true)
-          cutd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "INFO and below dropped" || true)
+          # Recent-context ring je naopak JEN v produkci (soft cutoff INFO je
+          # v diag buildu vypnuty), takze jeho pritomnost dokazuje, ze #ifndef
+          # zabral a ze produkce uchovava pozdni INFO kontext v RAM.
+          cutp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "128 KiB recent-context buffer" || true)
+          cutd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "128 KiB recent-context buffer" || true)
           # Synteticke /sys a /proc soubory pro cpuinfo nejsou za zadnym
           # #ifdef, takze musi byt v obou binarkach. "CPU implementer" je kus
           # formatovaciho retezce /proc/cpuinfo; strings ho ukaze jako vlastni
