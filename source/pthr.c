@@ -734,9 +734,11 @@ static void *thread_trampoline(void *p) {
   // Keep emulator workers off the EE and audio cores.
   assign_work_core();
   if (trace)
-    corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #%u entering target routine",
-                debug_id);
+    // This marker is intentionally text-only. corelog_log() runs vsnprintf()
+    // before taking the logger mutex; avoid another formatted-libc call in the
+    // narrow pre-target path that the device trace localized here.
+    corelog_text(CORELOG_INFO, "Wrapper",
+                 "pthread bridge #4 entering target routine");
   void *ret = start(arg);
   if (trace)
     corelog_log(CORELOG_INFO, "Wrapper",
