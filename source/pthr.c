@@ -271,6 +271,7 @@ static void assign_work_core(unsigned debug_id) {
                 n, core, m, current_priority());
   }
   pthr_bridge4_set_stage(debug_id, 10); // assignment complete
+}
 
 // background threads (audio, etc.): the dedicated bg core if we have one, else
 // share the work pool. For threads our vendored code spawns directly through
