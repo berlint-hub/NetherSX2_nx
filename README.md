@@ -145,9 +145,11 @@ Experimental low-latency presentation is opt-in: set either the flat key
 followed by `low_latency = 1` in `nethersx2.ini`. The setting exports
 `NVK_LOW_LATENCY=1` before Vulkan initializes, requests a 2-image swapchain
 when surface limits permit, and prefers MAILBOX presentation. FPSLocker's cap
-stays fixed at 60 so it does not chase transient dips; measured cadence is still
-published to SaltyNX fine sync, which can match the panel to the game when
-supported.
+stays fixed at 60 so it does not chase transient dips. NetherSX2 publishes its
+measured FPS to the NX-FPS shared block for the overlay; FPSLocker changes the
+panel rate through `FPSlocked` (not `FPSavg`). Enable FPSLocker's Handheld
+Display Sync toggle, which creates `sdmc:/SaltySD/flags/displaysync.flag`, for
+the panel-rate change to take effect.
 
 Three things about the Horizon environment need papering over for the core to
 work at all, all of them in the POSIX shim rather than in the emulator:

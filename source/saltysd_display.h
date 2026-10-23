@@ -32,6 +32,7 @@ unsigned saltysd_display_sync_legacy_connect_result(void);
 unsigned saltysd_display_sync_connect_port(void);
 unsigned saltysd_display_sync_published_target(void);
 bool saltysd_display_sync_target_ready(void);
+unsigned saltysd_display_sync_session_limit_result(void);
 
 #ifdef __cplusplus
 }
