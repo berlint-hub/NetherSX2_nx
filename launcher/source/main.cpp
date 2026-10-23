@@ -191,7 +191,8 @@ static bool normalizeLsfgStore(Store &store) {
   if (storeHas(store, "Wrapper/LSFGFlowScale")) {
     const double flow = std::strtod(
         storeGet(store, "Wrapper/LSFGFlowScale", "0.25"), nullptr);
-    const char *normalized = flow > 0.375 ? "0.5" : "0.25";
+    const char *normalized = flow == 0.125 ? "0.125" :
+                            flow == 0.5 ? "0.5" : "0.25";
     if (strcmp(storeGet(store, "Wrapper/LSFGFlowScale", "0.25"), normalized)) {
       storeSet(store, "Wrapper/LSFGFlowScale", normalized);
       changed = true;

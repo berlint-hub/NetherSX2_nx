@@ -1322,33 +1322,29 @@ vkAcquireNextImageKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
                            VkFence fence, uint32_t *image_index) {
   PFN_vkAcquireNextImageKHR acquire = real_acquire_next_image;
   if (!acquire) return VK_ERROR_INITIALIZATION_FAILED;
-  low_latency_wait_pending_fence("before-acquire");
+  /* Preserve the application's timeout contract. In particular, timeout=0 is
+   * an explicit poll: don't wait for the previous frame's fence or turn
+   * VK_NOT_READY into a 50 ms retry loop. MAILBOX plus the next-frame pacing
+   * path already bounds queue depth without blocking a nonblocking acquire. */
+  if (timeout != 0)
+    low_latency_wait_pending_fence("before-acquire");
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   const uint64_t t0 = lsfg_monotonic_ns();
 #endif
-  unsigned retries = 0;
-  VkResult result = acquire(device, swapchain, timeout, semaphore, fence,
-                            image_index);
-  if (vk_low_latency_enabled() && timeout == 0 && result == VK_NOT_READY) {
-    const uint64_t deadline = lsfg_monotonic_ns() + UINT64_C(50000000);
-    do {
-      svcSleepThread(200000);
-      ++retries;
-      result = acquire(device, swapchain, timeout, semaphore, fence, image_index);
-    } while (result == VK_NOT_READY && lsfg_monotonic_ns() < deadline);
-  }
+  const VkResult result = acquire(device, swapchain, timeout, semaphore, fence,
+                                  image_index);
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   {
     const uint64_t t1 = lsfg_monotonic_ns();
     if (t1 > t0) { frame_acq_ns += t1 - t0; gpu_note_time(&gpu_acq_calls, &gpu_acq_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_acquire_calls;
-  if (call <= 4 || (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) || retries)
-    vk_diag_note("vkAcquireNextImageKHR call=%u result=%d image=%u retries=%u elapsed_ms=%.3f semaphore=%p fence=%p",
+  if (call <= 4 || (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR))
+    vk_diag_note("vkAcquireNextImageKHR call=%u result=%d image=%u elapsed_ms=%.3f semaphore=%p fence=%p",
                  call, result,
                  image_index && (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) ?
                      *image_index : UINT32_MAX,
-                 retries, (double)(lsfg_monotonic_ns() - t0) / 1e6,
+                 (double)(lsfg_monotonic_ns() - t0) / 1e6,
                  (void *)semaphore, (void *)fence);
 #endif
   return result;
@@ -1404,8 +1400,10 @@ static int vk_low_latency_select_mode(VkSurfaceKHR surface,
   }
   const VkPresentModeKHR preference[] = {
     VK_PRESENT_MODE_MAILBOX_KHR,
-    VK_PRESENT_MODE_IMMEDIATE_KHR,
+    /* Keep the On setting tear-free when MAILBOX is unavailable. IMMEDIATE is
+     * an explicit last resort only when the surface exposes no FIFO mode. */
     VK_PRESENT_MODE_FIFO_KHR,
+    VK_PRESENT_MODE_IMMEDIATE_KHR,
   };
   int found = 0;
   for (unsigned i = 0; i < sizeof(preference) / sizeof(preference[0]); ++i) {
@@ -1647,7 +1645,7 @@ static int lsfg_try_create(VkQueue queue) {
   }
 
   float flow_scale = prefs_get_float("Wrapper/LSFGFlowScale", 0.25f);
-  if (flow_scale != 0.25f && flow_scale != 0.5f)
+  if (flow_scale != 0.125f && flow_scale != 0.25f && flow_scale != 0.5f)
     flow_scale = 0.25f;
 
   LsfgNxCreateInfo info = {
@@ -1756,18 +1754,20 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   }
 
   if (requested != lsfg_previous_requested) {
-    if (requested) {
-      lsfg_rate_decision = lsfg_source_samples >= 8 ?
-          (lsfg_source_is_high_rate() ? 1 : 0) : -1;
-      lsfg_high_fps_slow_samples = 0;
-    } else {
-      lsfg_rate_decision = -1;
-      lsfg_last_source_present_ns = 0;
-      lsfg_source_interval_ns = 0.0;
-      lsfg_source_samples = 0;
-      lsfg_at_cap_run = 0;
-      lsfg_high_fps_slow_samples = 0;
-    }
+    /* A quick-menu toggle is not a swapchain transition. Clear all rate and
+     * fractional-scheduler state here as well, so re-enabling LSFG cannot reuse
+     * a source-rate latch from the previous session/scene. */
+    lsfg_last_source_present_ns = 0;
+    lsfg_source_interval_ns = 0.0;
+    lsfg_source_samples = 0;
+    lsfg_at_cap_run = 0;
+    lsfg_high_fps_slow_samples = 0;
+    lsfg_fractional_ready = 0;
+    lsfg_frozen_source_fps = 0.0;
+    lsfg_gen_phase = 0.0;
+    lsfg_native_gap = 0;
+    lsfg_init_attempted = 0;
+    lsfg_rate_decision = -1;
     lsfg_previous_requested = requested;
   }
 

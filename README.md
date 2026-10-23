@@ -218,10 +218,18 @@ calls `abort()` or trips the stack protector, rendering an address inside
 the core's behalf — the recompiler's RX cache, the fastmem mirror, the ashmem
 PS2 RAM regions — by naming that region instead of printing a bare pointer.
 
-The file is line-buffered and capped (2 MiB in the shipping build, 8 MiB in the
-diagnostic one). Hitting the cap stops `INFO` and below but leaves the file open,
-so errors and the death note are always recorded; they are flushed and `fsync`ed
-as they are written, so they survive a crash.
+The file is line-buffered and capped (2 MiB soft chatter limit in the shipping
+build, 8 MiB in the diagnostic build, with bounded hard-cap headroom). In the
+shipping build, reaching the soft limit sends later INFO-and-below lines to a
+128 KiB in-memory recent-context buffer instead of writing them to the SD card.
+That buffer is appended before an explicit wrapper ERROR/FATAL message or the
+wrapper's death note, preserving the most recent context without unbounded log
+growth. PCSX2 can flatten its own console severities to INFO, so this preserves
+recent context, not every earlier core error. The lock-free CPU-exception marker
+is still written directly and does not flush this buffer. The diagnostic build
+keeps the core console enabled and removes the soft cutoff, while honoring the
+same hard file-size cap. Messages written as ERROR/FATAL are flushed and
+`fsync`ed as they are written.
 
 CI additionally publishes `NetherSX2-diag.nro` — the same launcher and the same
 cores, with the emulator built with `NETHERSX2_VK_DIAGNOSTIC=1`. Install it as

@@ -127,7 +127,7 @@ static void synfile_build(void) {
       break;
     off += (size_t)w;
   }
-  g_syn_ready = 1;
+  __atomic_store_n(&g_syn_ready, 1, __ATOMIC_RELEASE);
 
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   corelog_log(CORELOG_INFO, "host",
@@ -145,9 +145,9 @@ static const char *synfile_content(const char *path, size_t *out_len) {
    * forces that, and two threads building the same static buffers could hand
    * out a half-written string. Safe to lock here because every caller reaches
    * synfile_content() before taking g_synfile_lock, never while holding it. */
-  if (!g_syn_ready) {
+  if (!__atomic_load_n(&g_syn_ready, __ATOMIC_ACQUIRE)) {
     mutexLock(&g_synfile_lock);
-    if (!g_syn_ready)
+    if (!__atomic_load_n(&g_syn_ready, __ATOMIC_RELAXED))
       synfile_build();
     mutexUnlock(&g_synfile_lock);
   }
@@ -442,8 +442,13 @@ long sysconf_fake(int name) {
     case BIONIC_SC_PAGE_SIZE:
       return 0x1000;
     case BIONIC_SC_NPROCESSORS_CONF:
-    case BIONIC_SC_NPROCESSORS_ONLN:
-      return 3;
+    case BIONIC_SC_NPROCESSORS_ONLN: {
+      /* Keep Bionic's sysconf answers consistent with the synthetic /proc and
+       * sysfs CPU topology built from Horizon's actual process core mask. */
+      size_t ignored_len = 0;
+      (void)synfile_content("/proc/cpuinfo", &ignored_len);
+      return g_syn_ncpu ? (long)g_syn_ncpu : 3;
+    }
     case BIONIC_SC_PHYS_PAGES:
       return (3ll * 1024 * 1024 * 1024) / 0x1000;
     default:
@@ -1138,9 +1143,10 @@ static unsigned g_fastmem_live_pages;
 // FASTMEM_MAPPED_PAGE_LIMIT a new page is NOT mapped: the fault goes to the
 // core's handler, which backpatches that access onto the slow path for good.
 // None of that was visible anywhere, so "fastmem is on" could not be told from
-// "fastmem is on but half the hot pages fell off the fast path". Written under
-// g_fastmem_lock where the state is, atomically elsewhere; read racily by the
-// reporter, which only needs a per-window delta.
+// "fastmem is on but half the hot pages fell off the fast path". Mapping
+// counters are written under g_fastmem_lock and copied under the same lock;
+// exception-dispatch counters are atomic so the reporter can sample them
+// without taking a lock in the fault path.
 static unsigned long long g_fastmem_stat_lazy_faults;   // faults resolved by mapping
 static unsigned long long g_fastmem_stat_lazy_pages;    // pages mapped by those faults
 static unsigned long long g_fastmem_stat_limit_hits;    // lazy fault refused: page limit
@@ -1155,15 +1161,22 @@ static void fastmem_live_pages_note_peak(void) {
 }
 
 void fastmem_stats_snapshot(FastmemStats *out) {
-  out->lazy_faults  = __atomic_load_n(&g_fastmem_stat_lazy_faults, __ATOMIC_RELAXED);
-  out->lazy_pages   = __atomic_load_n(&g_fastmem_stat_lazy_pages, __ATOMIC_RELAXED);
-  out->limit_hits   = __atomic_load_n(&g_fastmem_stat_limit_hits, __ATOMIC_RELAXED);
-  out->map_failures = __atomic_load_n(&g_fastmem_stat_map_failures, __ATOMIC_RELAXED);
+  if (!out)
+    return;
+  /* The mapping counters are updated under this lock, not atomically; reading
+   * them with __atomic_load_n alone still races with those plain writes. */
+  mutexLock(&g_fastmem_lock);
+  out->lazy_faults  = g_fastmem_stat_lazy_faults;
+  out->lazy_pages   = g_fastmem_stat_lazy_pages;
+  out->limit_hits   = g_fastmem_stat_limit_hits;
+  out->map_failures = g_fastmem_stat_map_failures;
+  out->live_pages   = g_fastmem_live_pages;
+  out->peak_pages   = g_fastmem_live_pages_peak;
+  out->page_limit   = FASTMEM_MAPPED_PAGE_LIMIT;
+  mutexUnlock(&g_fastmem_lock);
+  /* These are incremented from the exception dispatch path and remain atomic. */
   out->to_core      = __atomic_load_n(&g_fastmem_stat_to_core, __ATOMIC_RELAXED);
   out->to_core_prot = __atomic_load_n(&g_fastmem_stat_to_core_prot, __ATOMIC_RELAXED);
-  out->live_pages   = __atomic_load_n(&g_fastmem_live_pages, __ATOMIC_RELAXED);
-  out->peak_pages   = __atomic_load_n(&g_fastmem_live_pages_peak, __ATOMIC_RELAXED);
-  out->page_limit   = FASTMEM_MAPPED_PAGE_LIMIT;
 }
 static char g_smc_reason[128] = "not configured";
 

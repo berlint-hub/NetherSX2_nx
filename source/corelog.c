@@ -39,33 +39,32 @@
 extern so_module emu_mod;
 
 #define CORELOG_PATH   DATA_ROOT "/nethersx2-core.log"
-/* Two caps, because the tail of this file is the part that matters.
+/* The shipping build stops writing chatter at CORELOG_LIMIT but keeps a
+ * 128 KiB ring of later INFO context in RAM. A wrapper ERROR/FATAL or death note
+ * flushes that recent context into the reserved hard-cap headroom before the
+ * message itself. This retains useful context without letting an unlimited
+ * stream fill the SD card. PCSX2 can flatten its own console levels to INFO, so
+ * this is a recent-context guarantee, not a promise to retain every old core
+ * error.
  *
- * CORELOG_LIMIT stops the chatter: with Logging/EnableVerbose on (the
- * diagnostic build) PCSX2 emits far more than the old flat 2 MiB allowance, and
- * the previous code fclose()d the stream the moment it was reached -- which
- * discarded every later ERROR, the abort() reason and the death note, i.e.
- * exactly the lines the file exists to preserve.
- *
- * So chatter now stops at CORELOG_LIMIT but the file stays open, and anything at
- * CORELOG_ERROR or above keeps recording up to CORELOG_HARD.
- *
- * The diagnostic build has no chatter cutoff at all and a larger cap: PCSX2's
- * console sink flattens every Log:: level to ANDROID_LOG_INFO, so an ERROR is
- * indistinguishable from chatter by priority alone, and cutting INFO off would
- * cut off the very message being hunted for. Everything up to CORELOG_HARD is
- * written and the line-buffered stream carries it to the card. */
+ * The diagnostic build has no chatter cutoff and a larger cap: cutting INFO off
+ * there would discard the core messages being investigated. Both builds keep a
+ * bounded hard limit and a smaller additional budget for error-priority output. */
 #ifdef NETHERSX2_VK_DIAGNOSTIC
 #define CORELOG_LIMIT  (8 * 1024 * 1024)
 #else
 #define CORELOG_LIMIT  (2 * 1024 * 1024)
 #endif
 #define CORELOG_HARD   (CORELOG_LIMIT + 256 * 1024)
-// Chatter stops at CORELOG_HARD, but ERROR and above keep this much past it.
-// The cap used to block everything, death note included, so a session long
-// enough to fill the file lost exactly the line explaining why the process
-// died -- which is the only line the file exists for.
+// ERROR/FATAL-priority messages may extend this far beyond CORELOG_HARD. The
+// context ring itself is written only inside CORELOG_HARD's reserved headroom.
 #define CORELOG_TAIL   (64 * 1024)
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+// Recent INFO context is retained in RAM after the soft cutoff and appended
+// when a wrapper error or death note arrives. This stays inside CORELOG_HARD's
+// existing 256 KiB headroom, so the on-card log remains bounded.
+#define CORELOG_CONTEXT_TAIL (128 * 1024)
+#endif
 #define CORELOG_LINE   1024
 
 // A line at INFO or below whose exact text was already written within the last
@@ -94,8 +93,127 @@ static int   corelog_recent_next;
 static long  corelog_repeats;
 static char  corelog_repeat_text[CORELOG_LINE];
 #ifndef NETHERSX2_VK_DIAGNOSTIC
-static int   corelog_chatter_stopped; // soft cap hit; only >= ERROR still writes
+static int   corelog_chatter_stopped; // soft cap hit; later INFO is kept in RAM
+static char  corelog_context_tail[CORELOG_CONTEXT_TAIL];
+static size_t corelog_context_start;
+static size_t corelog_context_size;
 #endif
+
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+// Caller holds corelog_mutex. Drop one complete oldest line from the context
+// ring so the next append always preserves line boundaries.
+static void
+corelog_context_drop_oldest_locked(void) {
+  if (!corelog_context_size)
+    return;
+  size_t dropped = 0;
+  while (dropped < corelog_context_size) {
+    const size_t index = (corelog_context_start + dropped) % CORELOG_CONTEXT_TAIL;
+    dropped++;
+    if (corelog_context_tail[index] == '\n')
+      break;
+  }
+  corelog_context_start = (corelog_context_start + dropped) % CORELOG_CONTEXT_TAIL;
+  corelog_context_size -= dropped;
+}
+
+static void
+corelog_context_append_locked(const char *line, size_t length) {
+  if (!length)
+    return;
+  if (length >= CORELOG_CONTEXT_TAIL) {
+    line += length - (CORELOG_CONTEXT_TAIL - 1);
+    length = CORELOG_CONTEXT_TAIL - 1;
+    corelog_context_start = 0;
+    corelog_context_size = 0;
+  }
+  while (CORELOG_CONTEXT_TAIL - corelog_context_size < length)
+    corelog_context_drop_oldest_locked();
+
+  size_t end = (corelog_context_start + corelog_context_size) % CORELOG_CONTEXT_TAIL;
+  size_t first = CORELOG_CONTEXT_TAIL - end;
+  if (first > length)
+    first = length;
+  memcpy(corelog_context_tail + end, line, first);
+  if (length > first)
+    memcpy(corelog_context_tail, line + first, length - first);
+  corelog_context_size += length;
+}
+
+// Caller holds corelog_mutex. The 256 KiB hard-cap headroom reserves enough
+// room for this 128 KiB context ring and the triggering error/death note.
+static void
+corelog_context_flush_locked(void) {
+  size_t available = corelog_written < CORELOG_HARD ?
+      (size_t)(CORELOG_HARD - corelog_written) : 0;
+  while (corelog_context_size > available)
+    corelog_context_drop_oldest_locked();
+
+  if (corelog_context_size) {
+    size_t first = CORELOG_CONTEXT_TAIL - corelog_context_start;
+    if (first > corelog_context_size)
+      first = corelog_context_size;
+    size_t written = fwrite(corelog_context_tail + corelog_context_start,
+                            1, first, corelog_file);
+    if (written == first && corelog_context_size > first)
+      written += fwrite(corelog_context_tail, 1,
+                        corelog_context_size - first, corelog_file);
+    corelog_written += (long)written;
+    if (written) {
+      fflush(corelog_file);
+      fsync(fileno(corelog_file));
+    }
+  }
+  corelog_context_start = 0;
+  corelog_context_size = 0;
+}
+
+// Format a record into the bounded context buffer without allocating memory.
+static void
+corelog_context_record_locked(int priority, const char *tag, const char *text) {
+  char line[CORELOG_LINE + 256];
+  struct timespec time;
+  clock_gettime(CLOCK_MONOTONIC, &time);
+  const char *level =
+      (priority >= 0 && priority <= 8) ? corelog_priority[priority] : "?";
+  const int has_tag = (tag && *tag);
+  int n = snprintf(line, sizeof(line), "[%lld.%03lld] [%s] %s%s%s\n",
+                   (long long)time.tv_sec,
+                   (long long)(time.tv_nsec / 1000000),
+                   level, has_tag ? tag : "", has_tag ? ": " : "", text);
+  if (n <= 0)
+    return;
+  size_t length = (size_t)n;
+  if (length >= sizeof(line))
+    length = sizeof(line) - 1;
+  if (length && line[length - 1] != '\n') {
+    if (length == sizeof(line) - 1)
+      line[length - 1] = '\n';
+    else
+      line[length++] = '\n';
+  }
+  corelog_context_append_locked(line, length);
+}
+#endif
+
+// Caller holds corelog_mutex. Count these summary bytes too; otherwise a
+// continuously repeated INFO line bypasses the configured file-size ceiling.
+static void
+corelog_repeat_summary_locked(void) {
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+  if (corelog_chatter_stopped) {
+    char summary[CORELOG_LINE + 64];
+    snprintf(summary, sizeof(summary), "-- %ld repeats suppressed, last: %s --",
+             corelog_repeats, corelog_repeat_text);
+    corelog_context_record_locked(CORELOG_INFO, NULL, summary);
+    return;
+  }
+#endif
+  const int n = fprintf(corelog_file, "-- %ld repeats suppressed, last: %s --\n",
+                        corelog_repeats, corelog_repeat_text);
+  if (n > 0)
+    corelog_written += n;
+}
 
 // Caller holds corelog_mutex.
 static void
@@ -104,12 +222,6 @@ corelog_emit_locked(int priority, const char *tag, const char *text) {
 
   if (!corelog_file)
     return;
-  if (corelog_written >= CORELOG_HARD + (important ? CORELOG_TAIL : 0))
-    return;
-#ifndef NETHERSX2_VK_DIAGNOSTIC
-  if (!important && corelog_chatter_stopped)
-    return;
-#endif
 
   if (!important) {
     int seen = 0;
@@ -121,18 +233,33 @@ corelog_emit_locked(int priority, const char *tag, const char *text) {
       corelog_repeats++;
       snprintf(corelog_repeat_text, sizeof corelog_repeat_text, "%s", text);
       if (corelog_repeats % CORELOG_REPEAT_REPORT == 0)
-        fprintf(corelog_file, "-- %ld repeats suppressed, last: %s --\n",
-                corelog_repeats, corelog_repeat_text);
+        corelog_repeat_summary_locked();
       return;
     }
     if (corelog_repeats) {
-      fprintf(corelog_file, "-- %ld repeats suppressed, last: %s --\n",
-              corelog_repeats, corelog_repeat_text);
+      corelog_repeat_summary_locked();
       corelog_repeats = 0;
     }
     snprintf(corelog_recent[corelog_recent_next], CORELOG_LINE, "%s", text);
     corelog_recent_next = (corelog_recent_next + 1) % CORELOG_REPEAT_WINDOW;
   }
+
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+  if (!important && corelog_chatter_stopped) {
+    corelog_context_record_locked(priority, tag, text);
+    return;
+  }
+#endif
+  if (important && corelog_repeats) {
+    corelog_repeat_summary_locked();
+    corelog_repeats = 0;
+  }
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+  if (important && corelog_chatter_stopped)
+    corelog_context_flush_locked();
+#endif
+  if (corelog_written >= CORELOG_HARD + (important ? CORELOG_TAIL : 0))
+    return;
 
   struct timespec time;
   clock_gettime(CLOCK_MONOTONIC, &time);
@@ -157,10 +284,13 @@ corelog_emit_locked(int priority, const char *tag, const char *text) {
 #ifndef NETHERSX2_VK_DIAGNOSTIC
   if (!important && !corelog_chatter_stopped && corelog_written >= CORELOG_LIMIT) {
     corelog_chatter_stopped = 1;
-    fprintf(corelog_file,
-            "-- core log: %ld bytes written, INFO and below dropped from here "
-            "on; errors and the death note are still recorded --\n",
+    const int notice = fprintf(corelog_file,
+            "-- core log: %ld bytes written, INFO and below kept in a "
+            "128 KiB recent-context buffer; wrapper errors and death notes "
+            "are retained --\n",
             corelog_written);
+    if (notice > 0)
+      corelog_written += notice;
     fflush(corelog_file);
   }
 #endif
@@ -195,6 +325,14 @@ corelog_open(void) {
     corelog_file = NULL;
   }
   corelog_written = 0;
+  memset(corelog_recent, 0, sizeof(corelog_recent));
+  corelog_recent_next = 0;
+#ifndef NETHERSX2_VK_DIAGNOSTIC
+  corelog_context_start = 0;
+  corelog_context_size = 0;
+#endif
+  corelog_repeats = 0;
+  corelog_repeat_text[0] = '\0';
 #ifndef NETHERSX2_VK_DIAGNOSTIC
   corelog_chatter_stopped = 0;
 #endif
@@ -290,24 +428,59 @@ corelog_death(const char *reason, const void *called_from) {
   mutexUnlock(&corelog_mutex);
 }
 
+static char *corelog_append_literal(char *out, const char *text) {
+  while (*text)
+    *out++ = *text++;
+  return out;
+}
+
+static char *corelog_append_hex(char *out, uintptr_t value) {
+  static const char digits[] = "0123456789abcdef";
+  char reverse[sizeof(value) * 2];
+  size_t count = 0;
+  do {
+    reverse[count++] = digits[value & 0xfu];
+    value >>= 4;
+  } while (value);
+  while (count)
+    *out++ = reverse[--count];
+  return out;
+}
+
+static char *corelog_append_crash_address(char *out, uintptr_t address) {
+  const uintptr_t base = (uintptr_t)emu_mod.load_base;
+  if (base && address >= base && address - base < emu_mod.load_size) {
+    out = corelog_append_literal(out, "core+0x");
+    return corelog_append_hex(out, address - base);
+  }
+  out = corelog_append_literal(out, "0x");
+  return corelog_append_hex(out, address);
+}
+
 void
 corelog_crash_marker(unsigned long long pc, unsigned long long lr) {
-  char pc_where[64], lr_where[64];
-  corelog_format_address(pc_where, sizeof(pc_where), (const void *)(uintptr_t)pc);
-  corelog_format_address(lr_where, sizeof(lr_where), (const void *)(uintptr_t)lr);
+  /* Keep this exception path independent of stdio, the corelog mutex and the
+   * mmap-region table. If the fault involved the heap/stack, best-effort raw
+   * addresses are safer than resolving a descriptive label before recording. */
+  char line[160];
+  char *out = line;
+  out = corelog_append_literal(out, "[F] [NetherSX2]: *** CPU exception, pc=");
+  out = corelog_append_crash_address(out, (uintptr_t)pc);
+  out = corelog_append_literal(out, " lr=");
+  out = corelog_append_crash_address(out, (uintptr_t)lr);
+  out = corelog_append_literal(out, " ***\n");
+  const size_t length = (size_t)(out - line);
 
-  char line[256];
-  const int length = snprintf(line, sizeof(line),
-      "[F] [NetherSX2]: *** CPU exception, pc=%s lr=%s ***\n", pc_where, lr_where);
-  if (length <= 0)
-    return;
-
-  // Raw and mutex-free: this runs on the exception stack, and the crashing
-  // thread may itself be inside corelog_emit_locked().
+  /* Raw and mutex-free: the crashing thread may itself be inside the logger. */
   const int fd = open(CORELOG_PATH, O_WRONLY | O_APPEND | O_CREAT, 0666);
   if (fd >= 0) {
-    (void)write(fd, line, (size_t)length < sizeof(line) ? (size_t)length
-                                                        : sizeof(line) - 1);
+    size_t written = 0;
+    while (written < length) {
+      const ssize_t n = write(fd, line + written, length - written);
+      if (n <= 0)
+        break;
+      written += (size_t)n;
+    }
     fsync(fd);
     close(fd);
   }
