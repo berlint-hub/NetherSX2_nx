@@ -248,6 +248,7 @@ static void display_sync_restore(void) {
 
 static void display_sync_poll_and_apply(void) {
   saltysd_display_sync_poll();
+  saltysd_display_sync_publish();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   /* Log state changes only. SaltySD's GetDisplayRefreshRate handler is silent,
    * so this shows the source cadence and the target published for FPSLocker. */
@@ -280,7 +281,7 @@ static void display_sync_poll_and_apply(void) {
          target_ready != last_target_ready)) {
       vk_diag_note("display-sync state query=%d active=%d connect_rc=0x%08x "
                    "nethfps_rc=0x%08x legacy_rc=0x%08x port=%u "
-                   "display_rate=%u present_fps=%.2f shared_ready=%d "
+                   "display_rate=%u present_fps=%.0f shared_ready=%d "
                    "fpslocker_target=%u",
                    query_status, active, connect_result, nethfps_result,
                    legacy_result, connect_port, service_rate, effective_rate,
@@ -2065,7 +2066,7 @@ int main(void) {
                low_latency_env ? low_latency_env : "<unset>");
   vk_diag_note("display-sync enabled=%d query=%d active=%d connect_rc=0x%08x "
                "nethfps_rc=0x%08x legacy_rc=0x%08x port=%u "
-               "display_rate=%u present_fps=%.2f shared_ready=%d "
+               "display_rate=%u present_fps=%.0f shared_ready=%d "
                "fpslocker_target=%u",
                display_sync_enabled ? 1 : 0,
                saltysd_display_sync_query_status(),

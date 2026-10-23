@@ -13,6 +13,8 @@ extern "C" {
  * NetherSX2. SaltySD IPC is throttled to about once per second. */
 void saltysd_display_sync_configure(bool enabled);
 void saltysd_display_sync_poll(void);
+/* Publish the latest integer cadence to SaltyNX at 10 Hz, without doing IPC. */
+void saltysd_display_sync_publish(void);
 void saltysd_display_sync_shutdown(void);
 void saltysd_display_sync_note_present(void);
 bool saltysd_display_sync_active(void);

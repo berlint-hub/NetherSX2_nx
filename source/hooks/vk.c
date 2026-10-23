@@ -853,8 +853,8 @@ static void perf_report(uint64_t now) {
   if (n && !tail) tail = 1;
   const double worst_mean = perf_worst_mean_ns(scratch, n, tail);
 
-  vk_diag_note("perf: %u presents / %.3f s = %.2f fps | worst %.1f ms | 1%% low %.2f fps"
-               " | stalls %u | lsfg %s src=%.1f target=%.0f gen=%llu",
+  vk_diag_note("perf: %u presents / %.3f s = %.0f fps | worst %.1f ms | 1%% low %.0f fps"
+               " | stalls %u | lsfg %s src=%.0f target=%.0f gen=%llu",
                perf_window_presents, seconds, avg_fps,
                (double)worst / 1e6, worst_mean > 0.0 ? 1e9 / worst_mean : 0.0,
                perf_stalls,
@@ -1821,7 +1821,7 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
     if (consumed) {
 #ifdef NETHERSX2_VK_DIAGNOSTIC
       if (vk_present_count <= 4 || result != VK_SUCCESS)
-        vk_diag_note("lsfg present call=%d result=%d generate=%d src=%.1ffps target=%.0ffps",
+        vk_diag_note("lsfg present call=%d result=%d generate=%d src=%.0ffps target=%.0ffps",
                      vk_present_count, result, generate, lsfg_frozen_source_fps,
                      target_fps);
 #endif
