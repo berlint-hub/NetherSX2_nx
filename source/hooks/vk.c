@@ -397,8 +397,6 @@ static int extension_enabled(const VkDeviceCreateInfo *create_info,
   return 0;
 }
 
-
-
 static VkResult find_lsfg_main_queue_family(
     VkPhysicalDevice physical_device,
     const VkDeviceCreateInfo *create_info,
@@ -1430,7 +1428,7 @@ vkCreateSwapchainKHR_shim(VkDevice device,
                           const VkAllocationCallbacks *alloc,
                           VkSwapchainKHR *out) {
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-  vk_diag_note("vkCreateSwapchainKHR begin old=%p extent=%ux%u format=%u usage=0x%x images=%u mode=%u",
+  vk_diag_note("vkCreateSwapchainKHR begin old=%p extent=%ux%u format=%u usage=0x%x requested_min_images=%u mode=%u",
                (void *)create_info->oldSwapchain,
                create_info->imageExtent.width, create_info->imageExtent.height,
                create_info->imageFormat, create_info->imageUsage,
@@ -1472,6 +1470,29 @@ vkCreateSwapchainKHR_shim(VkDevice device,
   const int want_lsfg = lsfg_device_capable;
   const char *dll_path = lsfg_dll_path();
   const int have_dll = want_lsfg && file_readable(dll_path);
+  const unsigned fpslocker_buffer_request =
+      saltysd_fpslocker_buffers_request();
+  int fpslocker_buffer_override = 0;
+
+  /* FPSLocker owns the per-title SetBuffers request. Apply it only at Vulkan
+   * swapchain creation, after clamping to this surface's supported range.
+   * NetherSX2 low-latency mode deliberately takes precedence; LSFG headroom is
+   * added below on top of the selected base count. */
+  if (fpslocker_buffer_request && !low_latency && tracked_physical_device) {
+    VkSurfaceCapabilitiesKHR buffer_capabilities;
+    const VkResult buffer_cap_result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        tracked_physical_device, create_info->surface, &buffer_capabilities);
+    if (buffer_cap_result == VK_SUCCESS) {
+      uint32_t image_count = fpslocker_buffer_request;
+      if (image_count < buffer_capabilities.minImageCount)
+        image_count = buffer_capabilities.minImageCount;
+      if (buffer_capabilities.maxImageCount &&
+          image_count > buffer_capabilities.maxImageCount)
+        image_count = buffer_capabilities.maxImageCount;
+      modified.minImageCount = image_count;
+      fpslocker_buffer_override = 1;
+    }
+  }
 
   if (requested && !low_latency && (!want_lsfg || !have_dll))
     return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -1529,7 +1550,7 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     if (mode_found)
       modified.presentMode = selected_mode;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-    vk_diag_note("swapchain low_latency=%d images=%u mode=%s caps=%d modes=%d min=%u max=%u",
+    vk_diag_note("swapchain low_latency=%d min_images=%u mode=%s caps=%d modes=%d min=%u max=%u",
                  low_latency, modified.minImageCount,
                  vk_present_mode_name(modified.presentMode), cap_result,
                  mode_found, cap_result == VK_SUCCESS ? capabilities.minImageCount : 0,
@@ -1537,12 +1558,25 @@ vkCreateSwapchainKHR_shim(VkDevice device,
 #endif
   }
 
-  /* Low latency takes priority over the LSFG FIFO path. Otherwise leave the
-   * emulator's swapchain alone; FPSLocker consumes the measured cadence. */
+  /* Low latency takes priority over FPSLocker buffering and the LSFG FIFO
+   * path. Otherwise FPSLocker's requested base count is honored, with LSFG
+   * adding its own image headroom when the surface supports it. */
   const VkSwapchainCreateInfoKHR *selected_create_info =
-      (low_latency || compatible) ? &modified : create_info;
+      (low_latency || compatible || fpslocker_buffer_override) ?
+          &modified : create_info;
   VkResult result = create_fn(device, selected_create_info, alloc, out);
-  if (result == VK_SUCCESS) {
+  uint32_t actual_image_count = 0;
+  VkResult actual_image_count_result = VK_ERROR_INITIALIZATION_FAILED;
+  if (result == VK_SUCCESS && out && *out) {
+    PFN_vkGetSwapchainImagesKHR get_images = real_get_swapchain_images ?
+        real_get_swapchain_images : vkGetSwapchainImagesKHR;
+    if (get_images) {
+      actual_image_count_result = get_images(device, *out,
+                                             &actual_image_count, NULL);
+      if ((actual_image_count_result == VK_SUCCESS ||
+           actual_image_count_result == VK_INCOMPLETE) && actual_image_count)
+        saltysd_fpslocker_buffers_report_actual(actual_image_count);
+    }
     reset_tracked_swapchain();
     tracked_swapchain = *out;
     tracked_swapchain_extent = create_info->imageExtent;
@@ -1550,11 +1584,11 @@ vkCreateSwapchainKHR_shim(VkDevice device,
     __atomic_store_n(&lsfg_runtime_available, compatible, __ATOMIC_RELEASE);
   }
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-  vk_diag_note("vkCreateSwapchainKHR end result=%d swapchain=%p compatible=%d actual_usage=0x%x actual_images=%u actual_mode=%u",
+  vk_diag_note("vkCreateSwapchainKHR end result=%d swapchain=%p compatible=%d buffer_request=%u buffer_override=%d requested_min_images=%u actual_image_query=%d actual_images=%u selected_mode=%u",
                result, out && result == VK_SUCCESS ? (void *)*out : NULL,
-               compatible, (low_latency || compatible) ? modified.imageUsage : create_info->imageUsage,
-               (low_latency || compatible) ? modified.minImageCount : create_info->minImageCount,
-               selected_create_info->presentMode);
+               compatible, fpslocker_buffer_request, fpslocker_buffer_override,
+               selected_create_info->minImageCount, actual_image_count_result,
+               actual_image_count, selected_create_info->presentMode);
 #endif
   return result;
 }

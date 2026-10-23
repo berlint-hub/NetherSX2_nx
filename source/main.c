@@ -2071,6 +2071,11 @@ int main(void) {
   const bool display_sync_enabled =
       prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false) || low_latency;
   saltysd_display_sync_configure(display_sync_enabled);
+#if defined(USE_VULKAN)
+  /* FPSLocker buffer selection is independent of display-sync pacing. Keep
+   * its shared-block request available even when Wrapper sync is disabled. */
+  saltysd_fpslocker_buffers_configure(true);
+#endif
   saltysd_display_sync_poll();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   const char *low_latency_env = getenv("NVK_LOW_LATENCY");

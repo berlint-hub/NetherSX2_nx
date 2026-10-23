@@ -12,6 +12,11 @@ extern "C" {
  * to the SaltyNX shared FPSLocker target so FPSLocker can sync the display to
  * NetherSX2. SaltySD IPC is throttled to about once per second. */
 void saltysd_display_sync_configure(bool enabled);
+/* FPSLocker owns SetBuffers; the Vulkan backend only reads this boot-time
+ * request and reports the actual swapchain image count through Buffers. */
+void saltysd_fpslocker_buffers_configure(bool enabled);
+unsigned saltysd_fpslocker_buffers_request(void);
+void saltysd_fpslocker_buffers_report_actual(unsigned image_count);
 void saltysd_display_sync_poll(void);
 /* Publish the latest integer cadence to SaltyNX at 10 Hz, without doing IPC. */
 void saltysd_display_sync_publish(void);

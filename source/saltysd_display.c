@@ -1,7 +1,7 @@
-/* SaltySD bridge for publishing NetherSX2's measured presentation cadence to
- * FPSLocker. This process defines Vulkan entry points internally, so NX-FPS's
- * import-replacement hook does not see vkQueuePresentKHR; publish its shared
- * block fields directly instead. */
+/* SaltySD bridge for FPSLocker display cadence and Vulkan buffer settings.
+ * This process defines Vulkan entry points internally, so NX-FPS's
+ * import-replacement hook does not see vkQueuePresentKHR; publish cadence and
+ * buffer status through the shared block without hooking the present entry. */
 #include <stdint.h>
 #include <string.h>
 #include <switch/types.h>
@@ -29,6 +29,8 @@
 #define NX_FPS_PLUGIN_OFFSET 9u
 #define NX_FPS_TARGET_OFFSET 10u
 #define NX_FPS_API_OFFSET 14u
+#define NX_FPS_BUFFERS_OFFSET 55u
+#define NX_FPS_SET_BUFFERS_OFFSET 56u
 #define NX_FPS_API_VULKAN 3u
 #define RESOURCE_LIMIT_SESSION_COUNT_MAX 4u
 #define RESOURCE_LIMIT_SESSION_COUNT_VALUE 32u
@@ -38,6 +40,7 @@
 #define FPSLOCKER_TARGET_STABLE_MS 2000u
 
 static volatile int s_enabled;
+static volatile int s_buffers_enabled;
 static volatile uint32_t s_service_rate;
 static volatile uint32_t s_last_connect_result = UINT32_MAX;
 static volatile uint32_t s_nethfps_connect_result = UINT32_MAX;
@@ -204,47 +207,54 @@ static int saltysd_map_shared_memory(Handle session) {
   return 1;
 }
 
+static volatile uint8_t *saltysd_find_shared_block(void) {
+  if (!__atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE))
+    return NULL;
+  const uint8_t *base = (const uint8_t *)shmemGetAddr(&s_shared_memory);
+  if (!base)
+    return NULL;
+
+  for (size_t offset = 0; offset + NX_FPS_SET_BUFFERS_OFFSET + 1 <=
+                           SALTYSD_SHARED_MEMORY_SIZE; offset += 4) {
+    uint32_t magic;
+    memcpy(&magic, base + offset, sizeof(magic));
+    if (magic == NX_FPS_MAGIC)
+      return (volatile uint8_t *)(base + offset);
+  }
+  return NULL;
+}
+
 static int saltysd_find_fpslocked(void) {
   s_fps = NULL;
   s_fpsavg = NULL;
   s_plugin_active = NULL;
   s_fpslocked = NULL;
   s_api = NULL;
-  if (!__atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE))
+  volatile uint8_t *block = saltysd_find_shared_block();
+  if (!block) {
+    s_saved_fpslocked_valid = 0;
+    s_fpslocker_owns_target = 0;
+    __atomic_store_n(&s_target_ready, 0, __ATOMIC_RELEASE);
+    s_candidate_target = 0;
+    s_candidate_since_tick = 0;
+    __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
     return 0;
-  const uint8_t *base = (const uint8_t *)shmemGetAddr(&s_shared_memory);
-  if (!base)
-    return 0;
-
-  for (size_t offset = 0; offset + NX_FPS_API_OFFSET + 1 <=
-                           SALTYSD_SHARED_MEMORY_SIZE; offset += 4) {
-    uint32_t magic;
-    memcpy(&magic, base + offset, sizeof(magic));
-    if (magic == NX_FPS_MAGIC) {
-      s_fps = (volatile uint8_t *)(base + offset + NX_FPS_FPS_OFFSET);
-      s_fpsavg = (volatile float *)(base + offset + NX_FPS_AVG_OFFSET);
-      s_plugin_active =
-          (volatile uint8_t *)(base + offset + NX_FPS_PLUGIN_OFFSET);
-      s_fpslocked = (volatile uint8_t *)(base + offset + NX_FPS_TARGET_OFFSET);
-      s_api = (volatile uint8_t *)(base + offset + NX_FPS_API_OFFSET);
-      __atomic_store_n(&s_target_ready, 1, __ATOMIC_RELEASE);
-      if (!s_saved_fpslocked_valid) {
-        s_saved_fpslocked = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
-        s_last_written_fpslocked = s_saved_fpslocked;
-        s_saved_fpslocked_valid = 1;
-        s_fpslocker_owns_target = 0;
-        __atomic_store_n(&s_published_target, s_saved_fpslocked, __ATOMIC_RELEASE);
-      }
-      return 1;
-    }
   }
-  s_saved_fpslocked_valid = 0;
-  s_fpslocker_owns_target = 0;
-  __atomic_store_n(&s_target_ready, 0, __ATOMIC_RELEASE);
-  s_candidate_target = 0;
-  s_candidate_since_tick = 0;
-  __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
-  return 0;
+
+  s_fps = block + NX_FPS_FPS_OFFSET;
+  s_fpsavg = (volatile float *)(block + NX_FPS_AVG_OFFSET);
+  s_plugin_active = block + NX_FPS_PLUGIN_OFFSET;
+  s_fpslocked = block + NX_FPS_TARGET_OFFSET;
+  s_api = block + NX_FPS_API_OFFSET;
+  __atomic_store_n(&s_target_ready, 1, __ATOMIC_RELEASE);
+  if (!s_saved_fpslocked_valid) {
+    s_saved_fpslocked = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
+    s_last_written_fpslocked = s_saved_fpslocked;
+    s_saved_fpslocked_valid = 1;
+    s_fpslocker_owns_target = 0;
+    __atomic_store_n(&s_published_target, s_saved_fpslocked, __ATOMIC_RELEASE);
+  }
+  return 1;
 }
 
 static unsigned estimate_present_fps(void) {
@@ -430,6 +440,33 @@ static void publish_present_rate(uint64_t now, uint64_t frequency) {
   s_candidate_since_tick = 0;
 }
 
+void saltysd_fpslocker_buffers_configure(bool enabled) {
+  __atomic_store_n(&s_buffers_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
+  if (enabled)
+    saltysd_raise_session_limit_once();
+}
+
+unsigned saltysd_fpslocker_buffers_request(void) {
+  if (!__atomic_load_n(&s_buffers_enabled, __ATOMIC_ACQUIRE))
+    return 0;
+  volatile uint8_t *block = saltysd_find_shared_block();
+  if (!block)
+    return 0;
+  const uint8_t requested = __atomic_load_n(
+      block + NX_FPS_SET_BUFFERS_OFFSET, __ATOMIC_ACQUIRE);
+  return requested >= 2 && requested <= 4 ? requested : 0;
+}
+
+void saltysd_fpslocker_buffers_report_actual(unsigned image_count) {
+  if (!image_count || image_count > UINT8_MAX ||
+      !__atomic_load_n(&s_buffers_enabled, __ATOMIC_ACQUIRE))
+    return;
+  volatile uint8_t *block = saltysd_find_shared_block();
+  if (block)
+    __atomic_store_n(block + NX_FPS_BUFFERS_OFFSET, (uint8_t)image_count,
+                     __ATOMIC_RELEASE);
+}
+
 void saltysd_display_sync_configure(bool enabled) {
   if (!enabled) {
     saltysd_display_sync_shutdown();
@@ -455,7 +492,16 @@ void saltysd_display_sync_configure(bool enabled) {
 }
 
 void saltysd_display_sync_poll(void) {
-  if (!__atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE))
+  const int sync_enabled = __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE);
+  const int buffers_enabled =
+      __atomic_load_n(&s_buffers_enabled, __ATOMIC_ACQUIRE);
+  if (!sync_enabled && !buffers_enabled)
+    return;
+  /* Buffer-only mode needs one successful shared-block discovery, not a
+   * one-hertz service connection for the rest of the emulation session. */
+  if (!sync_enabled && buffers_enabled &&
+      __atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE) &&
+      saltysd_find_shared_block() != NULL)
     return;
 
   const uint64_t now = armGetSystemTick();
@@ -473,28 +519,36 @@ void saltysd_display_sync_poll(void) {
   const Result connected = saltysd_connect(&session);
   __atomic_store_n(&s_last_connect_result, (uint32_t)connected, __ATOMIC_RELEASE);
   if (R_FAILED(connected)) {
-    const int busy = R_MODULE(connected) == Module_Kernel &&
-                     R_DESCRIPTION(connected) == KernelError_OutOfResource;
-    const int query_status = busy ? 1 : 0;
-    __atomic_store_n(&s_last_query_status, query_status, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
+    if (sync_enabled) {
+      const int busy = R_MODULE(connected) == Module_Kernel &&
+                       R_DESCRIPTION(connected) == KernelError_OutOfResource;
+      const int query_status = busy ? 1 : 0;
+      __atomic_store_n(&s_last_query_status, query_status, __ATOMIC_RELEASE);
+      __atomic_store_n(&s_service_rate, 0, __ATOMIC_RELEASE);
+    }
     return;
   }
 
-  uint8_t rate = 0;
-  const int query_ok = saltysd_query_refresh_rate(session, &rate);
-  __atomic_store_n(&s_last_query_status, query_ok ? 2 : 1, __ATOMIC_RELEASE);
-  __atomic_store_n(&s_service_rate, query_ok ? rate : 0, __ATOMIC_RELEASE);
+  if (sync_enabled) {
+    uint8_t rate = 0;
+    const int query_ok = saltysd_query_refresh_rate(session, &rate);
+    __atomic_store_n(&s_last_query_status, query_ok ? 2 : 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_service_rate, query_ok ? rate : 0, __ATOMIC_RELEASE);
+  }
 
   /* SaltySD returns the shared handle over the same short-lived session. */
   if (!__atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE))
     saltysd_map_shared_memory(session);
   svcCloseHandle(session);
 
-  /* Discover the FPS block during the 1 Hz IPC poll. The 10 Hz publisher is
-   * gated on s_target_ready and must not be the first code that sets it. */
-  if (__atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE))
-    saltysd_find_fpslocked();
+  /* The buffer-only bridge must not claim FPSLocker target/measurement fields.
+   * Display sync discovers those fields only when it is explicitly enabled. */
+  if (__atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE)) {
+    if (sync_enabled)
+      saltysd_find_fpslocked();
+    else
+      (void)saltysd_find_shared_block();
+  }
 }
 
 void saltysd_display_sync_publish(void) {
@@ -542,6 +596,7 @@ void saltysd_display_sync_note_present(void) {
 
 void saltysd_display_sync_shutdown(void) {
   __atomic_store_n(&s_enabled, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_buffers_enabled, 0, __ATOMIC_RELEASE);
 
   uint32_t magic = 0;
   if (s_fpslocked)
