@@ -117,6 +117,7 @@ static unsigned long long gpu_copyimg_calls, gpu_blit_calls;
 static unsigned long long gpu_acq_calls, gpu_acq_ns;
 static unsigned long long gpu_sub_calls, gpu_sub_ns;
 static unsigned long long gpu_pres_calls, gpu_pres_ns;
+static uint64_t frame_ll_pace_ns, frame_ll_fence_ns;
 
 /* ---- window machinery perf_observe_present lives among (vk.c lines above the
    extracted block; values must match or the rollover cases test nothing) ---- */
@@ -193,12 +194,14 @@ int main(void) {
   g_log[0]=0;
   for (int i=0;i<10;++i) frame(MS(20),400,35,4,8192,MS(1),19200*14,0,MS(1),0);
   /* the hitch frame: distinctive numbers on every channel */
+  frame_ll_pace_ns=MS(14); frame_ll_fence_ns=MS(2);
   frame(MS(82.4),412,38,3,98304,MS(61.2),19200*51,MS(2),MS(3),MS(4));
   for (int i=0;i<10;++i) frame(MS(20),400,35,4,8192,MS(1),19200*14,0,MS(1),0);
   ck(hitch_count==1,"exactly one frame over the threshold");
   report_window();
   ckhas("perf: hitch 82.4 ms (1 frame(s) over 40 ms this window)","interval + count");
   ckhas("vk acquire 2.0 submit 3.0 present 4.0 ms","per-frame vk times (present = previous frame's)");
+  ckhas("sync pace 14.0 fence 2.0 ms","per-frame sync waits are attributed to the hitch");
   ckhas("cmds barrier 412 copyimg 38 copy2buf 0 blit 0","per-frame command deltas");
   ckhas("cpu EE 51.0 GS 25.5 MTVU 12.8 ms","per-frame cpu time");
   ckhas("io read 3 x 96 KiB blocked 61.2 ms","per-frame io");

@@ -7,10 +7,9 @@
 extern "C" {
 #endif
 
-/* Opt-in display pacing bridge. Present backends feed their presentation
- * timestamps to this client; once a stable cadence is measured it is published
- * to the SaltyNX shared FPSLocker target so FPSLocker can sync the display to
- * NetherSX2. SaltySD IPC is throttled to about once per second. */
+/* Opt-in FPSLocker bridge. Present backends feed timestamps; stable cadence is
+ * published as a handheld-only FPSlocked panel request, not an emulator cap.
+ * FPSLocker owns the display-sync toggle; SaltySD IPC is throttled to ~1 Hz. */
 void saltysd_display_sync_configure(bool enabled);
 /* FPSLocker owns SetBuffers; the Vulkan backend only reads this boot-time
  * request and reports the actual swapchain image count through Buffers. */

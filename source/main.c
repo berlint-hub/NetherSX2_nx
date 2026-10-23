@@ -263,6 +263,7 @@ static void display_sync_poll_and_apply(void) {
     static unsigned last_published_target;
     static unsigned last_session_limit_result = UINT32_MAX;
     static int last_target_ready = -1;
+    static int last_effective_rate_bucket = -1;
     const int query_status = saltysd_display_sync_query_status();
     const int active = saltysd_display_sync_active();
     const unsigned connect_result = saltysd_display_sync_connect_result();
@@ -275,6 +276,8 @@ static void display_sync_poll_and_apply(void) {
         saltysd_display_sync_session_limit_result();
     const int target_ready = saltysd_display_sync_target_ready();
     const float effective_rate = saltysd_display_sync_rate();
+    const int effective_rate_bucket = effective_rate > 0.0f ?
+        (int)(effective_rate / 5.0f + 0.5f) : 0;
     if (query_status >= 0 &&
         (query_status != last_query_status || active != last_active ||
          connect_result != last_connect_result ||
@@ -282,14 +285,17 @@ static void display_sync_poll_and_apply(void) {
          legacy_result != last_legacy_result || connect_port != last_connect_port ||
          service_rate != last_service_rate || published_target != last_published_target ||
          session_limit_result != last_session_limit_result ||
-         target_ready != last_target_ready)) {
+         target_ready != last_target_ready ||
+         effective_rate_bucket != last_effective_rate_bucket)) {
       vk_diag_note("display-sync state query=%d active=%d connect_rc=0x%08x "
                    "session_limit_rc=0x%08x nethfps_rc=0x%08x "
                    "legacy_rc=0x%08x port=%u display_rate=%u "
-                   "present_fps=%.0f shared_ready=%d fpslocker_target=%u",
+                   "present_fps=%.0f present_bucket=%d shared_ready=%d "
+                   "fpslocker_target=%u",
                    query_status, active, connect_result, session_limit_result,
                    nethfps_result, legacy_result, connect_port, service_rate,
-                   effective_rate, target_ready, published_target);
+                   effective_rate, effective_rate_bucket, target_ready,
+                   published_target);
       last_query_status = query_status;
       last_active = active;
       last_connect_result = connect_result;
@@ -300,6 +306,7 @@ static void display_sync_poll_and_apply(void) {
       last_published_target = published_target;
       last_session_limit_result = session_limit_result;
       last_target_ready = target_ready;
+      last_effective_rate_bucket = effective_rate_bucket;
     }
   }
 #endif
@@ -2068,15 +2075,12 @@ int main(void) {
 #if defined(USE_VULKAN)
   const bool manual_low_latency =
       prefs_get_bool("EmuCore/GS/low_latency", false);
-#else
-  const bool manual_low_latency = false;
 #endif
-  /* Auto mode probes the NX-FPS shared block during startup. If it is present,
-   * the existing display-cadence bridge becomes active; if absent, no pacing or
-   * panel settings are changed. */
+  /* Auto mode probes the NX-FPS shared block during startup. Low-latency is
+   * independent: it must not activate the FPSLocker shared-block publisher. */
   const bool display_sync_enabled =
       prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false) ||
-      manual_low_latency || auto_fpslocker_sync;
+      auto_fpslocker_sync;
   saltysd_display_sync_configure(display_sync_enabled);
 #if defined(USE_VULKAN)
   /* Configure after display-sync shutdown/configuration so an explicit opt-out
@@ -2084,15 +2088,18 @@ int main(void) {
   saltysd_fpslocker_buffers_configure(true);
 #endif
   saltysd_display_sync_poll();
-  const bool auto_fpslocker_sync_active =
-      auto_fpslocker_sync && saltysd_display_sync_active();
-  const bool low_latency = manual_low_latency || auto_fpslocker_sync_active;
 #if defined(USE_VULKAN)
-  /* NVK reads this during instance/device setup. Resolve auto detection before
-   * the first Vulkan instance so its WSI can select the low-latency path. */
+  const bool display_sync_active = saltysd_display_sync_active();
+  /* The user's low-latency preference is independent from auto-sync. If both
+   * are requested, panel/display sync wins and NVK keeps its FIFO path. */
+  const bool low_latency = manual_low_latency && !display_sync_active;
+  /* NVK reads this during WSI setup. Auto-sync never enables it; when a shared
+   * display-sync block is active, display sync takes priority. */
   setenv("NVK_LOW_LATENCY", low_latency ? "1" : "0", 1);
 #endif
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  const bool auto_fpslocker_sync_active =
+      auto_fpslocker_sync && saltysd_display_sync_active();
   const char *low_latency_env = getenv("NVK_LOW_LATENCY");
   vk_diag_note("fpslocker-auto-sync requested=%d detected=%d low_latency=%d",
                auto_fpslocker_sync ? 1 : 0,

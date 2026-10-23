@@ -2,6 +2,7 @@
  * This process defines Vulkan entry points internally, so NX-FPS's
  * import-replacement hook does not see vkQueuePresentKHR; publish cadence and
  * buffer status through the shared block without hooking the present entry. */
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <switch/types.h>
@@ -12,7 +13,7 @@
 #include <switch/arm/counter.h>
 
 #include "saltysd_display.h"
-#include "prefs.h"
+#include "saltysd_fps_policy.h"
 
 #define SALTYSD_PORT "NethFPS"
 #define SALTYSD_LEGACY_PORT "SaltySD"
@@ -34,9 +35,10 @@
 #define NX_FPS_API_VULKAN 3u
 #define RESOURCE_LIMIT_SESSION_COUNT_MAX 4u
 #define RESOURCE_LIMIT_SESSION_COUNT_VALUE 32u
-#define PRESENT_INTERVAL_SAMPLES 16u
+#define PRESENT_INTERVAL_SAMPLES 64u
+#define PRESENT_MIN_VALID_SAMPLES 60u
 #define PRESENT_PUBLISH_INTERVAL_MS 100u
-#define PRESENT_STALE_MS 250u
+#define PRESENT_STALE_MS 1000u
 #define FPSLOCKER_TARGET_STABLE_MS 2000u
 
 static volatile int s_enabled;
@@ -55,20 +57,22 @@ static volatile uint64_t s_next_query_tick;
 static volatile uint64_t s_last_publish_tick;
 static volatile unsigned s_published_target;
 static volatile int s_target_ready;
+static volatile int s_published_measurement;
 
 static SharedMemory s_shared_memory;
 static int s_shared_memory_mapped;
-static volatile uint8_t *s_fps;
-static volatile float *s_fpsavg;
-static volatile uint8_t *s_plugin_active;
-static volatile uint8_t *s_fpslocked;
-static volatile uint8_t *s_api;
+static volatile int s_shared_memory_mapping;
+static volatile int s_shutdown_in_progress;
+/* Publish/replace the block as one atomic pointer; individual field pointers
+ * are derived from a local block snapshot and are never cleared separately. */
+static volatile uint8_t * volatile s_fpslocker_block;
 static volatile uint32_t s_session_limit_result = UINT32_MAX;
 static int s_session_limit_attempted;
 static uint8_t s_saved_fpslocked;
 static uint8_t s_last_written_fpslocked;
 static int s_saved_fpslocked_valid;
 static int s_fpslocker_owns_target;
+static uint64_t s_fpslocker_zero_since_tick;
 static unsigned s_candidate_target;
 static uint64_t s_candidate_since_tick;
 
@@ -155,24 +159,47 @@ static int saltysd_send_query(Handle session, uint32_t command_id,
 }
 
 static Result saltysd_connect(Handle *session) {
-  Result connected = svcConnectToNamedPort(session, SALTYSD_PORT);
-  __atomic_store_n(&s_nethfps_connect_result, (uint32_t)connected,
-                   __ATOMIC_RELEASE);
-  __atomic_store_n(&s_legacy_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
-  if (R_SUCCEEDED(connected)) {
-    __atomic_store_n(&s_connect_port, 1, __ATOMIC_RELEASE);
-    return connected;
+  const unsigned preferred =
+      __atomic_load_n(&s_connect_port, __ATOMIC_ACQUIRE);
+  Result nethfps = 0;
+  Result legacy = 0;
+  int tried_nethfps = 0;
+  int tried_legacy = 0;
+
+  /* Remember the working endpoint. In particular, once stock SaltyNX is
+   * selected, do not retry the fork-only NethFPS port every second. */
+  if (preferred == 2) {
+    legacy = svcConnectToNamedPort(session, SALTYSD_LEGACY_PORT);
+    tried_legacy = 1;
+    __atomic_store_n(&s_legacy_connect_result, (uint32_t)legacy,
+                     __ATOMIC_RELEASE);
+    if (R_SUCCEEDED(legacy))
+      return legacy;
+  }
+  if (preferred == 1 || preferred == 0 || preferred == 2) {
+    nethfps = svcConnectToNamedPort(session, SALTYSD_PORT);
+    tried_nethfps = 1;
+    __atomic_store_n(&s_nethfps_connect_result, (uint32_t)nethfps,
+                     __ATOMIC_RELEASE);
+    if (R_SUCCEEDED(nethfps)) {
+      __atomic_store_n(&s_legacy_connect_result, UINT32_MAX, __ATOMIC_RELEASE);
+      __atomic_store_n(&s_connect_port, 1, __ATOMIC_RELEASE);
+      return nethfps;
+    }
+  }
+  if (!tried_legacy) {
+    legacy = svcConnectToNamedPort(session, SALTYSD_LEGACY_PORT);
+    tried_legacy = 1;
+    __atomic_store_n(&s_legacy_connect_result, (uint32_t)legacy,
+                     __ATOMIC_RELEASE);
+    if (R_SUCCEEDED(legacy)) {
+      __atomic_store_n(&s_connect_port, 2, __ATOMIC_RELEASE);
+      return legacy;
+    }
   }
 
-  /* Older SaltyNX builds lack the dedicated concurrent client endpoint. Keep
-   * the fallback, but expose both results so its error cannot hide a
-   * NethFPS-specific connection failure in device diagnostics. */
-  connected = svcConnectToNamedPort(session, SALTYSD_LEGACY_PORT);
-  __atomic_store_n(&s_legacy_connect_result, (uint32_t)connected,
-                   __ATOMIC_RELEASE);
-  __atomic_store_n(&s_connect_port, R_SUCCEEDED(connected) ? 2 : 0,
-                   __ATOMIC_RELEASE);
-  return connected;
+  __atomic_store_n(&s_connect_port, 0, __ATOMIC_RELEASE);
+  return tried_legacy ? legacy : nethfps;
 }
 
 static int saltysd_query_refresh_rate(Handle session, uint8_t *rate) {
@@ -187,23 +214,44 @@ static int saltysd_query_refresh_rate(Handle session, uint8_t *rate) {
 }
 
 static int saltysd_map_shared_memory(Handle session) {
+  if (__atomic_load_n(&s_shutdown_in_progress, __ATOMIC_ACQUIRE))
+    return 0;
   if (__atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE))
     return 1;
+  int expected = 0;
+  if (!__atomic_compare_exchange_n(&s_shared_memory_mapping, &expected, 1,
+                                   false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    return __atomic_load_n(&s_shared_memory_mapped, __ATOMIC_ACQUIRE) != 0;
+  if (__atomic_load_n(&s_shutdown_in_progress, __ATOMIC_ACQUIRE)) {
+    __atomic_store_n(&s_shared_memory_mapping, 0, __ATOMIC_RELEASE);
+    return 0;
+  }
+
   Handle shared_handle = INVALID_HANDLE;
   /* Match libnx's minimum CMIF request size: the 16-byte SFCI header plus
    * its 16-byte IPC raw-data allowance. A 16-byte raw payload is too short for
    * SaltyNX's ipcParse path and is misread as an unsupported command. */
   if (!saltysd_send_query(session, SALTYSD_GET_SHARED_MEMORY_HANDLE, 32,
-                          NULL, 2, &shared_handle))
+                          NULL, 2, &shared_handle)) {
+    __atomic_store_n(&s_shared_memory_mapping, 0, __ATOMIC_RELEASE);
     return 0;
+  }
 
   shmemLoadRemote(&s_shared_memory, shared_handle,
                   SALTYSD_SHARED_MEMORY_SIZE, Perm_Rw);
   if (R_FAILED(shmemMap(&s_shared_memory))) {
     shmemClose(&s_shared_memory);
+    __atomic_store_n(&s_shared_memory_mapping, 0, __ATOMIC_RELEASE);
+    return 0;
+  }
+  if (__atomic_load_n(&s_shutdown_in_progress, __ATOMIC_ACQUIRE)) {
+    shmemClose(&s_shared_memory);
+    memset(&s_shared_memory, 0, sizeof(s_shared_memory));
+    __atomic_store_n(&s_shared_memory_mapping, 0, __ATOMIC_RELEASE);
     return 0;
   }
   __atomic_store_n(&s_shared_memory_mapped, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_shared_memory_mapping, 0, __ATOMIC_RELEASE);
   return 1;
 }
 
@@ -224,151 +272,164 @@ static volatile uint8_t *saltysd_find_shared_block(void) {
   return NULL;
 }
 
-static int saltysd_find_fpslocked(void) {
-  s_fps = NULL;
-  s_fpsavg = NULL;
-  s_plugin_active = NULL;
-  s_fpslocked = NULL;
-  s_api = NULL;
+static volatile uint8_t *saltysd_find_fpslocked(void) {
   volatile uint8_t *block = saltysd_find_shared_block();
   if (!block) {
-    s_saved_fpslocked_valid = 0;
-    s_fpslocker_owns_target = 0;
     __atomic_store_n(&s_target_ready, 0, __ATOMIC_RELEASE);
-    s_candidate_target = 0;
-    s_candidate_since_tick = 0;
-    __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
-    return 0;
+    __atomic_store_n(&s_fpslocker_block, NULL, __ATOMIC_RELEASE);
+    return NULL;
   }
 
-  s_fps = block + NX_FPS_FPS_OFFSET;
-  s_fpsavg = (volatile float *)(block + NX_FPS_AVG_OFFSET);
-  s_plugin_active = block + NX_FPS_PLUGIN_OFFSET;
-  s_fpslocked = block + NX_FPS_TARGET_OFFSET;
-  s_api = block + NX_FPS_API_OFFSET;
+  /* Publish the mapping as one release-store. Callers keep this local snapshot
+   * and derive fields directly from it instead of sharing torn field pointers. */
+  __atomic_store_n(&s_fpslocker_block, block, __ATOMIC_RELEASE);
   __atomic_store_n(&s_target_ready, 1, __ATOMIC_RELEASE);
-  if (!s_saved_fpslocked_valid) {
-    s_saved_fpslocked = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
-    s_last_written_fpslocked = s_saved_fpslocked;
-    s_saved_fpslocked_valid = 1;
-    s_fpslocker_owns_target = 0;
-    __atomic_store_n(&s_published_target, s_saved_fpslocked, __ATOMIC_RELEASE);
-  }
-  return 1;
+  return block;
 }
 
-static unsigned estimate_present_fps(void) {
+static unsigned estimate_present_fps(unsigned *p90_fps) {
   const uint64_t frequency = armGetSystemTickFreq();
   uint32_t count = __atomic_load_n(&s_present_interval_count, __ATOMIC_ACQUIRE);
   if (count > PRESENT_INTERVAL_SAMPLES)
     count = PRESENT_INTERVAL_SAMPLES;
-  if (count < 6)
+  if (count < PRESENT_MIN_VALID_SAMPLES)
     return 0;
 
-  uint64_t total = 0;
-  unsigned samples = 0;
+  uint64_t valid[PRESENT_INTERVAL_SAMPLES];
+  size_t valid_count = 0;
   for (uint32_t i = 0; i < count; i++) {
     const uint64_t interval = __atomic_load_n(&s_present_intervals[i],
                                                __ATOMIC_ACQUIRE);
     if (interval < frequency / 240u || interval > frequency / 10u)
       continue;
-    total += interval;
-    samples++;
+    valid[valid_count++] = interval;
   }
-  if (samples < 6 || !total)
+  if (valid_count < PRESENT_MIN_VALID_SAMPLES)
     return 0;
 
-  const uint64_t fps = (frequency * samples + total / 2u) / total;
-  return (fps >= 14 && fps <= 120) ? (unsigned)fps : 0;
+  const SaltysdFpsEstimate estimate = saltysd_estimate_fps(
+      valid, valid_count, frequency, PRESENT_MIN_VALID_SAMPLES);
+  if (p90_fps)
+    *p90_fps = estimate.p90_fps;
+  return estimate.average_fps;
 }
 
-static unsigned nearest_target(unsigned fps, const uint8_t *targets,
-                               size_t target_count) {
-  unsigned best = targets[0];
-  unsigned best_delta = fps > best ? fps - best : best - fps;
-  for (size_t i = 1; i < target_count; i++) {
-    const unsigned delta = fps > targets[i] ? fps - targets[i] : targets[i] - fps;
-    if (delta < best_delta) {
-      best = targets[i];
-      best_delta = delta;
-    }
-  }
-  return best;
-}
-
-static unsigned quantize_fpslocker_target(unsigned fps) {
-  static const uint8_t handheld_targets[] = {40, 45, 50, 55, 60};
-  static const uint8_t low_rate_divisors[] = {15, 20, 25, 30};
-  if (fps >= 40)
-    return nearest_target(fps, handheld_targets,
-                          sizeof(handheld_targets) / sizeof(handheld_targets[0]));
-
-  /* Upstream SaltyNX 2.1.3 indexes only its 40..60 Hz handheld table. Below
-   * that range it accepts these exact divisors; 35 Hz deliberately falls back
-   * to 60 because there is no valid 35 Hz shared-block target. */
-  if (fps >= 35)
-    return 60;
-  return nearest_target(fps, low_rate_divisors,
-                        sizeof(low_rate_divisors) / sizeof(low_rate_divisors[0]));
-}
-
-static void clear_live_measurement(void) {
-  if (s_plugin_active) {
-    const uint8_t zero = 0;
-    memcpy((void *)s_plugin_active, &zero, sizeof(zero));
-  }
-  if (s_fps) {
-    const uint8_t zero = 0;
-    memcpy((void *)s_fps, &zero, sizeof(zero));
-  }
-  if (s_fpsavg) {
-    const float zero = 0.0f;
-    memcpy((void *)s_fpsavg, &zero, sizeof(zero));
-  }
-}
-
-static void publish_live_measurement(unsigned fps) {
-  if (!fps || !s_fps || !s_fpsavg || !s_plugin_active || !s_api) {
-    clear_live_measurement();
+static void clear_live_measurement(volatile uint8_t *block) {
+  if (!block)
     return;
-  }
+  const uint8_t zero = 0;
+  const float zero_average = 0.0f;
+  memcpy((void *)(block + NX_FPS_PLUGIN_OFFSET), &zero, sizeof(zero));
+  memcpy((void *)(block + NX_FPS_FPS_OFFSET), &zero, sizeof(zero));
+  memcpy((void *)(block + NX_FPS_AVG_OFFSET), &zero_average,
+         sizeof(zero_average));
+  __atomic_store_n(&s_published_measurement, 0, __ATOMIC_RELEASE);
+}
+
+static void publish_live_measurement(volatile uint8_t *block, unsigned fps,
+                                     unsigned average_fps) {
+  if (!block || !fps || !average_fps)
+    return;
 
   const uint8_t fps_u8 = (uint8_t)fps;
   const uint8_t api = NX_FPS_API_VULKAN;
   const uint8_t one = 1;
-  const float average = (float)fps;
-  memcpy((void *)s_fps, &fps_u8, sizeof(fps_u8));
-  memcpy((void *)s_fpsavg, &average, sizeof(average));
-  memcpy((void *)s_api, &api, sizeof(api));
+  const float average = (float)average_fps;
+  memcpy((void *)(block + NX_FPS_FPS_OFFSET), &fps_u8, sizeof(fps_u8));
+  memcpy((void *)(block + NX_FPS_AVG_OFFSET), &average, sizeof(average));
+  memcpy((void *)(block + NX_FPS_API_OFFSET), &api, sizeof(api));
   /* Publish active last so the overlay never sees a live plugin with no FPS. */
-  memcpy((void *)s_plugin_active, &one, sizeof(one));
+  memcpy((void *)(block + NX_FPS_PLUGIN_OFFSET), &one, sizeof(one));
+  __atomic_store_n(&s_published_measurement, 1, __ATOMIC_RELEASE);
 }
 
-static int accept_fpslocker_target(void) {
-  const uint8_t current = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
-  if (s_fpslocker_owns_target || current != s_last_written_fpslocked) {
-    /* FPSLocker changed the shared target; keep honoring subsequent user edits
-     * and never retake ownership for the rest of this session. */
-    s_fpslocker_owns_target = 1;
+static int accept_fpslocker_target(volatile uint8_t *block, uint64_t now,
+                                    uint64_t frequency,
+                                    unsigned candidate_target) {
+  const uint8_t current = __atomic_load_n(block + NX_FPS_TARGET_OFFSET,
+                                           __ATOMIC_ACQUIRE);
+  if (!s_saved_fpslocked_valid) {
+    /* A saved non-zero FPSLocker target is a user choice, even if it was
+     * restored before the wrapper first discovered the block. Zero means auto. */
     s_saved_fpslocked = current;
     s_last_written_fpslocked = current;
-    s_candidate_target = 0;
-    s_candidate_since_tick = 0;
+    s_saved_fpslocked_valid = 1;
+    s_fpslocker_owns_target = current != 0;
+    s_fpslocker_zero_since_tick = 0;
     __atomic_store_n(&s_published_target, current, __ATOMIC_RELEASE);
-    return 0;
+  }
+
+  const uint64_t stable_ticks = frequency * FPSLOCKER_TARGET_STABLE_MS / 1000u;
+  if (s_fpslocker_owns_target) {
+    if (current != 0) {
+      if (current != s_last_written_fpslocked) {
+        s_saved_fpslocked = current;
+        s_last_written_fpslocked = current;
+        s_candidate_target = 0;
+        s_candidate_since_tick = 0;
+      }
+      s_fpslocker_zero_since_tick = 0;
+      __atomic_store_n(&s_published_target, current, __ATOMIC_RELEASE);
+      return 0;
+    }
+
+    /* A manual override releases auto ownership only after FPSLocker has left
+     * its target byte at zero continuously for the full stability interval. */
+    s_saved_fpslocked = 0;
+    s_last_written_fpslocked = 0;
+    if (!s_fpslocker_zero_since_tick || now < s_fpslocker_zero_since_tick)
+      s_fpslocker_zero_since_tick = now;
+    if (candidate_target && candidate_target != s_candidate_target) {
+      s_candidate_target = candidate_target;
+      s_candidate_since_tick = now;
+    }
+    __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
+    if (now - s_fpslocker_zero_since_tick < stable_ticks)
+      return 0;
+
+    s_fpslocker_owns_target = 0;
+    s_fpslocker_zero_since_tick = 0;
+    return 1;
+  }
+
+  if (current != s_last_written_fpslocked) {
+    if (current != 0) {
+      /* Any new non-zero byte is an external/manual target. Do not fight it;
+       * returning to zero is the explicit re-arm signal. */
+      s_fpslocker_owns_target = 1;
+      s_fpslocker_zero_since_tick = 0;
+      s_saved_fpslocked = current;
+      s_last_written_fpslocked = current;
+      s_candidate_target = 0;
+      s_candidate_since_tick = 0;
+      __atomic_store_n(&s_published_target, current, __ATOMIC_RELEASE);
+      return 0;
+    }
+
+    /* Zero is the documented auto mode. Start a fresh stability interval so
+     * neither a saved target nor an old candidate is overwritten immediately. */
+    s_saved_fpslocked = 0;
+    s_last_written_fpslocked = 0;
+    s_candidate_target = candidate_target;
+    s_candidate_since_tick = now;
+    __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
   }
   return 1;
 }
 
-static int write_fpslocked_if_ours(uint8_t target) {
+static int write_fpslocked_if_ours(volatile uint8_t *block, uint8_t target) {
   uint8_t expected = s_last_written_fpslocked;
-  if (!__atomic_compare_exchange_n(s_fpslocked, &expected, target, false,
-                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-    s_fpslocker_owns_target = 1;
+  if (!__atomic_compare_exchange_n(block + NX_FPS_TARGET_OFFSET, &expected,
+                                   target, false, __ATOMIC_ACQ_REL,
+                                   __ATOMIC_ACQUIRE)) {
     s_saved_fpslocked = expected;
     s_last_written_fpslocked = expected;
     s_candidate_target = 0;
     s_candidate_since_tick = 0;
+    if (expected != 0) {
+      s_fpslocker_owns_target = 1;
+      s_fpslocker_zero_since_tick = 0;
+    }
     __atomic_store_n(&s_published_target, expected, __ATOMIC_RELEASE);
     return 0;
   }
@@ -377,41 +438,50 @@ static int write_fpslocked_if_ours(uint8_t target) {
 }
 
 static void publish_present_rate(uint64_t now, uint64_t frequency) {
-  if (!saltysd_find_fpslocked())
+  volatile uint8_t *block = saltysd_find_fpslocked();
+  if (!block) {
+    /* Ownership state belongs to this housekeeping thread; render-side block
+     * discovery only publishes the block pointer, never these policy fields. */
+    s_saved_fpslocked_valid = 0;
+    s_fpslocker_owns_target = 0;
+    s_fpslocker_zero_since_tick = 0;
+    s_candidate_target = 0;
+    s_candidate_since_tick = 0;
+    __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_published_measurement, 0, __ATOMIC_RELEASE);
     return;
+  }
 
   const uint64_t last_present =
       __atomic_load_n(&s_last_present_tick, __ATOMIC_ACQUIRE);
   if (!last_present || now < last_present ||
       now - last_present > frequency * PRESENT_STALE_MS / 1000u) {
-    clear_live_measurement();
+    if (__atomic_load_n(&s_published_measurement, __ATOMIC_ACQUIRE))
+      clear_live_measurement(block);
     __atomic_store_n(&s_present_interval_count, 0, __ATOMIC_RELEASE);
     s_candidate_target = 0;
     s_candidate_since_tick = 0;
     return;
   }
 
-  const unsigned fps = estimate_present_fps();
-  publish_live_measurement(fps);
-  if (!fps)
+  unsigned stable_fps = 0;
+  const unsigned fps = estimate_present_fps(&stable_fps);
+  if (!fps || !stable_fps)
+    return; /* Preserve the last live report during a short pause/warm-up. */
+  publish_live_measurement(block, fps, fps);
+
+  const unsigned current = __atomic_load_n(
+      block + NX_FPS_TARGET_OFFSET, __ATOMIC_ACQUIRE);
+  const unsigned candidate_target =
+      saltysd_fpslocker_next_step(current, stable_fps);
+
+  /* Non-zero saved/user values are manual ownership; a steady zero re-arms
+   * auto mode after the two-second stability interval. */
+  if (!accept_fpslocker_target(block, now, frequency, candidate_target))
     return;
 
-  /* Never fight a target changed by the user in FPSLocker. */
-  if (!accept_fpslocker_target())
-    return;
-
-  /* Low-latency mode pins the target at 60 Hz, but still publishes the real
-   * measured FPS so FPSLocker can display it. */
-  if (prefs_get_bool("EmuCore/GS/low_latency", false)) {
-    if (s_last_written_fpslocked != 60 && !write_fpslocked_if_ours(60))
-      return;
-    __atomic_store_n(&s_published_target, 60, __ATOMIC_RELEASE);
-    s_candidate_target = 60;
-    s_candidate_since_tick = 0;
-    return;
-  }
-
-  const unsigned target = quantize_fpslocker_target(fps);
+  const unsigned target = saltysd_fpslocker_next_step(
+      s_last_written_fpslocked, stable_fps);
   if (!target) {
     s_candidate_target = 0;
     s_candidate_since_tick = 0;
@@ -422,19 +492,13 @@ static void publish_present_rate(uint64_t now, uint64_t frequency) {
     s_candidate_since_tick = 0;
     return;
   }
-  if (target != s_candidate_target) {
-    s_candidate_target = target;
-    s_candidate_since_tick = now;
-    return;
-  }
-
-  /* Preserve the two-second debounce so a brief load dip cannot retarget the
-   * handheld display. The shared FPSavg remains fresh at the 10 Hz cadence. */
   const uint64_t stable_ticks = frequency * FPSLOCKER_TARGET_STABLE_MS / 1000u;
-  if (!s_candidate_since_tick || now - s_candidate_since_tick < stable_ticks)
+  if (!saltysd_fpslocker_candidate_stable(
+          target, &s_candidate_target, now, &s_candidate_since_tick,
+          stable_ticks))
     return;
 
-  if (!write_fpslocked_if_ours((uint8_t)target))
+  if (!write_fpslocked_if_ours(block, (uint8_t)target))
     return;
   __atomic_store_n(&s_published_target, target, __ATOMIC_RELEASE);
   s_candidate_since_tick = 0;
@@ -442,8 +506,10 @@ static void publish_present_rate(uint64_t now, uint64_t frequency) {
 
 void saltysd_fpslocker_buffers_configure(bool enabled) {
   __atomic_store_n(&s_buffers_enabled, enabled ? 1 : 0, __ATOMIC_RELEASE);
-  if (enabled)
+  if (enabled) {
+    __atomic_store_n(&s_shutdown_in_progress, 0, __ATOMIC_RELEASE);
     saltysd_raise_session_limit_once();
+  }
 }
 
 unsigned saltysd_fpslocker_buffers_request(void) {
@@ -487,6 +553,7 @@ void saltysd_display_sync_configure(bool enabled) {
     return;
   }
 
+  __atomic_store_n(&s_shutdown_in_progress, 0, __ATOMIC_RELEASE);
   saltysd_raise_session_limit_once();
   __atomic_store_n(&s_enabled, 1, __ATOMIC_RELEASE);
 }
@@ -595,33 +662,40 @@ void saltysd_display_sync_note_present(void) {
 }
 
 void saltysd_display_sync_shutdown(void) {
+  __atomic_store_n(&s_shutdown_in_progress, 1, __ATOMIC_RELEASE);
   __atomic_store_n(&s_enabled, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&s_buffers_enabled, 0, __ATOMIC_RELEASE);
+  while (__atomic_load_n(&s_shared_memory_mapping, __ATOMIC_ACQUIRE))
+    svcSleepThread(1000000);
 
-  uint32_t magic = 0;
-  if (s_fpslocked)
-    memcpy(&magic, (const void *)(s_fpslocked - NX_FPS_TARGET_OFFSET),
-           sizeof(magic));
-  if (magic == NX_FPS_MAGIC) {
-    /* Deactivate first, then clear the last live measurement. */
-    clear_live_measurement();
-    if (s_saved_fpslocked_valid && !s_fpslocker_owns_target) {
-      const uint8_t current = __atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE);
-      if (current == s_last_written_fpslocked)
-        __atomic_store_n(s_fpslocked, s_saved_fpslocked, __ATOMIC_RELEASE);
+  volatile uint8_t *block = __atomic_load_n(&s_fpslocker_block,
+                                             __ATOMIC_ACQUIRE);
+  if (block) {
+    uint32_t magic = 0;
+    memcpy(&magic, (const void *)block, sizeof(magic));
+    if (magic == NX_FPS_MAGIC) {
+      /* Deactivate only fields this bridge actually published. */
+      if (__atomic_load_n(&s_published_measurement, __ATOMIC_ACQUIRE))
+        clear_live_measurement(block);
+      if (s_saved_fpslocked_valid && !s_fpslocker_owns_target) {
+        volatile uint8_t *target = block + NX_FPS_TARGET_OFFSET;
+        uint8_t expected = s_last_written_fpslocked;
+        (void)__atomic_compare_exchange_n(target, &expected, s_saved_fpslocked,
+                                          false, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE);
+      }
     }
   }
 
-  s_fps = NULL;
-  s_fpsavg = NULL;
-  s_plugin_active = NULL;
-  s_fpslocked = NULL;
-  s_api = NULL;
+  __atomic_store_n(&s_fpslocker_block, NULL, __ATOMIC_RELEASE);
+  __atomic_store_n(&s_published_measurement, 0, __ATOMIC_RELEASE);
   s_saved_fpslocked_valid = 0;
   s_fpslocker_owns_target = 0;
+  s_fpslocker_zero_since_tick = 0;
   if (__atomic_exchange_n(&s_shared_memory_mapped, 0, __ATOMIC_ACQ_REL))
     shmemClose(&s_shared_memory);
   memset(&s_shared_memory, 0, sizeof(s_shared_memory));
+  __atomic_store_n(&s_shared_memory_mapping, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&s_last_publish_tick, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&s_published_target, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&s_target_ready, 0, __ATOMIC_RELEASE);
@@ -639,7 +713,7 @@ bool saltysd_display_sync_active(void) {
 float saltysd_display_sync_rate(void) {
   if (!saltysd_display_sync_active())
     return 0.0f;
-  return (float)estimate_present_fps();
+  return (float)estimate_present_fps(NULL);
 }
 
 int saltysd_display_sync_query_status(void) {

@@ -141,24 +141,41 @@ Mesa expects that newlib does not have. The SDL launcher uses its own graphics
 runtime and exits before the emulator starts.
 
 FPSLocker/NX-FPS synchronization is automatic by default when NetherSX2 finds
-its shared block at startup. Set `Wrapper/AutoSyncFPSLocker = false` in
-`nethersx2.ini` to opt out. When detected, NetherSX2 enables the display-cadence
-bridge and publishes measured FPS so FPSLocker can follow a stable game cadence.
-On Vulkan it also enables the low-latency pacing path: prefer MAILBOX (falling
-back to FIFO) and pace submissions against panel refresh. Deko3D follows the
-panel with swap interval 1. It does not change
-FPSLocker's `patchApplied` or `FPSmode`, and it only updates `FPSlocked` while
-the bridge still owns that target. NetherSX2 writes `pluginActive` only after a
-real present rate has been measured. Enable FPSLocker's Handheld Display Sync
-toggle, which creates `sdmc:/SaltySD/flags/displaysync.flag`, for panel-rate
-changes to take effect.
+its shared block. Set `Wrapper/AutoSyncFPSLocker = false` in `nethersx2.ini` to
+opt out; with this option off, the bridge does not alter FPSLocker target or
+measurement fields. The bridge uses SaltySD's shared block and does not hook
+`vkQueuePresentKHR`, change FPSLocker's `patchApplied`/`FPSmode`, or send IPC
+commands to control the display-sync toggle.
 
-The manual `EmuCore/GS/low_latency = 1` option remains available if automatic
-NX-FPS detection is disabled. It exports `NVK_LOW_LATENCY=1` before Vulkan
-initializes and requests a 2-image swapchain when surface limits permit. Low
-latency takes precedence over FPSLocker's buffer-count request. Surface limits
-can prevent a requested count from being applied; NetherSX2 reports the actual
-swapchain image count back through FPSLocker's `Buffers` field.
+The panel-rate request is handheld-only: NetherSX2 writes only `FPSlocked` and
+uses the supported requests 45, 50, 55, and 60 Hz. It never writes
+`FPSlockedDocked`, because this bridge does not validate a docked target table.
+A rolling window of up to 64 valid present intervals (at least 60 to start)
+estimates cadence using both the average and a robust p90 rate; the requested
+rate rounds upward (49 FPS requests 50 Hz) and changes by one 5 Hz step only
+after a two-second stability period.
+A non-zero target set by FPSLocker is treated as a manual choice; auto mode
+resumes only after that byte stays zero for two seconds. `FPSavg` remains the
+measured average, distinct from the panel-following `FPSlocked` request. The
+bridge reports `pluginActive` only after a real present-rate measurement, and
+holds that report through pauses shorter than one second.
+
+Enable FPSLocker's own Handheld Display Sync toggle for panel-rate changes to
+take effect. FPSLocker owns that toggle and its `displaySync`/
+`displaySyncDocked` settings; NetherSX2 does not set either setting. Deko3D
+follows the panel with swap interval 1.
+
+Vulkan low latency is a separate, explicit `EmuCore/GS/low_latency = 1`
+preference; AutoSyncFPSLocker never enables it. Low latency is not compatible
+with display sync: if both are requested, display sync takes precedence and
+NetherSX2 uses FIFO without its wall-clock submit pacer. To use low latency,
+turn off AutoSyncFPSLocker (and any explicit display-sync option). When used on
+its own, low latency prefers MAILBOX (falling back to FIFO), exports
+`NVK_LOW_LATENCY=1` before Vulkan initializes, and requests a 2-image swapchain
+when surface limits permit. Low latency takes precedence over FPSLocker's
+buffer-count request. Surface limits can prevent a requested count from being
+applied; NetherSX2 reports the actual swapchain image count back through
+FPSLocker's `Buffers` field.
 
 Three things about the Horizon environment need papering over for the core to
 work at all, all of them in the POSIX shim rather than in the emulator:
@@ -260,20 +277,30 @@ output is megabytes per boot and real time on a Tegra X1. Expect
 that is the point, since the core's own message is usually the only thing that
 names a fault.
 
-The Vulkan log traces every `vkGetInstanceProcAddr` lookup the core makes and
-whether it resolved, reports how many physical devices NVK returned and what
-they are called, and prints the physical-memory figure NVK sizes its heap from.
-A run whose log ends without `host exiting normally`
+The Vulkan log reports unresolved `vkGetInstanceProcAddr` lookups (successful
+lookups are omitted), how many physical devices NVK returned and what they are
+called, and the physical-memory figure NVK sizes its heap from. Routine successful
+queue submits and low-latency fence waits are not logged individually; they are
+aggregated into the periodic performance report. The diagnostic logger flushes
+lines for immediate reading but does not `fsync` each one, avoiding an SD-card
+sync on every Vulkan call. A run whose log ends without `host exiting normally`
 did not exit cleanly — the last line before the gap names the stage that died.
 
-Every 300 presented frames the diagnostic build also writes a `perf:` block,
-which is the part that turns "it stutters" into a number:
+Every 300 presented frames the diagnostic build writes a compact `perf:` block,
+which turns "it stutters" into a number. The first line also states the detected
+panel sync rate separately from the optional LSFG target; the sync line adds
+pacer wait totals/maxima, skipped refresh deadlines, late submits, and fence wait
+totals/maxima. A missed vblank deadline does not add another full refresh of sleep:
+MAILBOX submits the late frame immediately, and the summary counts the missed
+refresh. A hitch line includes the pacer and fence time for the worst frame.
+Routine per-submit/per-fence traces are intentionally suppressed:
 
 ```
-perf: 300 presents / 5.981 s = 50 fps | worst 82.4 ms | 1% low 23 fps | stalls 0 | lsfg off ...
+perf: 300 presents / 5.981 s = 50 fps | worst 82.4 ms | 1% low 23 fps | stalls 0 | panel_hz=50 | lsfg off src=0 lsfg_target=60 gen=0
 perf: cpu EE 68% GS 58% MTVU 48% | fastmem lazy 0 faults/0 pages, limit 0, map-fail 0, ...
 perf: gpu blocked fence 300 x 8.1 ms (0%) + polls 0, queue-idle 0 x 0.0 ms (0%) | pipelines 5 x 3.1 ms (0%) | vk acquire 300 x 41.2 ms (1%) submit 300 x 96.0 ms (2%) present 300 x 12.4 ms (0%) | cmds barrier 130002 copy2buf 0 copyimg 13046 blit 0
-perf: hitch 82.4 ms (1 frame(s) over 40 ms this window) | vk acquire 0.1 submit 12.4 present 0.9 ms | ... | cpu EE 51.0 GS 12.0 MTVU 8.4 ms | io read 3 x 96 KiB blocked 61.2 ms
+perf: pace_hz=50 calls=300 waits=300 total=5560.0 max=18.0 ms skipped=0 late=0 | fence waits=300 total=24.0 max=2.0 ms
+perf: hitch 82.4 ms (1 frame(s) over 40 ms this window) | vk acquire 0.1 submit 12.4 present 0.9 ms | sync pace 14.0 fence 0.2 ms | ... | cpu EE 51.0 GS 12.0 MTVU 8.4 ms | io read 3 x 96 KiB blocked 61.2 ms
 ```
 
 The first three lines are per-window totals and answer what a stretch of play is
@@ -281,14 +308,15 @@ limited by: CPU share per heavy thread, time actually blocked waiting on the GPU
 pipelines compiled at runtime, how long the presenting thread sat inside the
 three calls that can block on the GPU without a fence (`acquire` on a FIFO
 swapchain with no free image, `submit`, `present` on a compositor that cannot
-take the frame), and how many copies and barriers the renderer issued. Those
-three fields exist because "no thread is busy and the frame rate is low" reads
-identically whether the wall is CPU-side or GPU-side as long as only fences are
-measured, and that ambiguity already produced two wrong diagnoses. The fourth appears only when a single frame took 40 ms or more — two
-dropped PAL frames — and differences the same counters across that one frame.
-It exists because a window cannot see a hitch: 82 ms is 1.4% of a 6 s window, so
-it hides inside every percentage there, and a Gran Turismo 3 log measured exactly
-that (worst frame 82.4 ms in a window reporting EE 68% and no GPU wait at all).
+take the frame), and how many copies and barriers the renderer issued. The
+fourth is the compact pacing summary; it explicitly distinguishes the shared
+panel rate from LSFG's own target and reports whether the pacer is sleeping,
+missing deadlines, or skipping refreshes. The fifth appears only when a single
+frame took 40 ms or more — two dropped PAL frames — and differences the same
+counters across that one frame. Per-window and per-frame views are both needed:
+82 ms is 1.4% of a 6 s window, so it hides inside every percentage there, and a
+Gran Turismo 3 log measured exactly that (worst frame 82.4 ms in a window
+reporting EE 68% and no GPU wait at all).
 
 At startup the same log prints the settings the run actually used
 (`settings upscale=2.00 crc=4 hwdl=3 ...` and a second line

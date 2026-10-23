@@ -109,8 +109,10 @@ vk_diag_note(const char *format, ...) {
     vfprintf(file, format, args);
     va_end(args);
     fputc('\n', file);
+    /* Keep diagnostics immediately readable without forcing an SD-card sync
+     * for every Vulkan call. The old per-line fsync made the logger itself a
+     * frame-time workload when verbose submit/fence traces were enabled. */
     fflush(file);
-    fsync(fileno(file));
   }
   mutexUnlock(&vk_diag_mutex);
 }
@@ -205,6 +207,18 @@ static unsigned vk_diag_submit_calls;
 static unsigned vk_diag_submit2_calls;
 static unsigned vk_diag_acquire_calls;
 static unsigned vk_diag_swapchain_image_calls;
+/* Windowed counters replace per-submit/per-fence log spam. */
+static unsigned long long vk_diag_pace_samples;
+static unsigned long long vk_diag_pace_waits;
+static uint64_t vk_diag_pace_ns;
+static uint64_t vk_diag_pace_max_ns;
+static unsigned long long vk_diag_pace_skips;
+static unsigned long long vk_diag_pace_late;
+static unsigned long long vk_diag_sync_fence_waits;
+static uint64_t vk_diag_sync_fence_ns;
+static uint64_t vk_diag_sync_fence_max_ns;
+static uint64_t frame_ll_pace_ns;
+static uint64_t frame_ll_fence_ns;
 #endif
 
 
@@ -214,26 +228,71 @@ static int lsfg_requested(void) {
 
 static uint64_t lsfg_monotonic_ns(void);
 
-static int vk_low_latency_cached = -1;
-static int vk_auto_sync_pref_cached = -1;
+static volatile int vk_low_latency_cached = -1;
+static volatile int vk_display_sync_suppressed_low_latency;
 static int vk_low_latency_enabled(void) {
-  if (vk_auto_sync_pref_cached < 0)
-    vk_auto_sync_pref_cached =
-        prefs_get_bool("Wrapper/AutoSyncFPSLocker", true) ? 1 : 0;
-  /* Auto mode is gated by the detected NX-FPS shared block. Checking here as
-   * well as before vkCreateInstance lets a late SaltyNX startup activate our
-   * own pacing hooks on a later swapchain without changing FPSLocker fields. */
-  if (vk_auto_sync_pref_cached && saltysd_display_sync_active())
-    return 1;
-  if (vk_low_latency_cached < 0)
-    vk_low_latency_cached = prefs_get_bool("EmuCore/GS/low_latency", false) ? 1 : 0;
-  return vk_low_latency_cached;
+  /* Display sync needs FIFO's vblank back-pressure. If SaltyNX comes up late,
+   * suppress the explicit pacer before selecting the first swapchain as well. */
+  if (saltysd_display_sync_active()) {
+    const int was_suppressed = __atomic_exchange_n(
+        &vk_display_sync_suppressed_low_latency, 1, __ATOMIC_ACQ_REL);
+    const int previous = __atomic_exchange_n(&vk_low_latency_cached, 0,
+                                              __ATOMIC_ACQ_REL);
+    if (!was_suppressed && previous != 0)
+      setenv("NVK_LOW_LATENCY", "0", 1);
+    return 0;
+  }
+  /* Once a swapchain has been handed to display sync, do not re-enable a
+   * wall-clock pacer if a transient rescan briefly loses the shared block. */
+  if (__atomic_load_n(&vk_display_sync_suppressed_low_latency,
+                      __ATOMIC_ACQUIRE))
+    return 0;
+  int cached = __atomic_load_n(&vk_low_latency_cached, __ATOMIC_ACQUIRE);
+  if (cached < 0) {
+    const char *configured = getenv("NVK_LOW_LATENCY");
+    const int desired = configured && configured[0] == '1' &&
+                        configured[1] == '\0';
+    int expected = -1;
+    (void)__atomic_compare_exchange_n(&vk_low_latency_cached, &expected,
+                                      desired, false, __ATOMIC_ACQ_REL,
+                                      __ATOMIC_ACQUIRE);
+    cached = __atomic_load_n(&vk_low_latency_cached, __ATOMIC_ACQUIRE);
+  }
+  return cached;
+}
+
+static unsigned low_latency_rate_hz(void) {
+  unsigned rate = saltysd_display_sync_service_rate();
+  if (rate < 20 || rate > 240) rate = 60;
+  return rate;
 }
 
 static uint64_t low_latency_period_ns(void) {
-  unsigned rate = saltysd_display_sync_service_rate();
-  if (rate < 20 || rate > 240) rate = 60;
-  return UINT64_C(1000000000) / rate;
+  return UINT64_C(1000000000) / low_latency_rate_hz();
+}
+
+/* Sleep only when the current frame can still meet its panel deadline. Once a
+ * vblank has passed, waiting for the following one adds a whole refresh period
+ * to an already-late frame (about 18 ms at 50 Hz), which turns brief overload
+ * into a sustained low-FPS cadence. MAILBOX is specifically useful here: submit
+ * the late frame now and let it replace the queued image. */
+static uint64_t low_latency_pace_delay_ns(uint64_t now, uint64_t next_vblank,
+                                          uint64_t period, uint64_t lead,
+                                          unsigned long long *skipped,
+                                          unsigned long long *late) {
+  if (!next_vblank || !period)
+    return 0;
+  const uint64_t target = next_vblank > lead ? next_vblank - lead : next_vblank;
+  if (now >= next_vblank) {
+    if (skipped)
+      *skipped += 1 + (now - next_vblank) / period;
+    return 0;
+  }
+  if (now >= target) {
+    if (late) ++*late;
+    return 0;
+  }
+  return target - now;
 }
 
 /* Present returns quickly with MAILBOX, so pace each GPU submit against the
@@ -244,19 +303,30 @@ static uint64_t low_latency_pace_before_submit(void) {
     return 0;
   const uint64_t now = lsfg_monotonic_ns();
   const uint64_t lead = UINT64_C(2000000);
-  uint64_t target = low_latency_next_vblank_ns > lead ?
-      low_latency_next_vblank_ns - lead : low_latency_next_vblank_ns;
   const uint64_t period = low_latency_period_ns();
-  while (target <= now && low_latency_next_vblank_ns <= now && period) {
-    low_latency_next_vblank_ns += period;
-    target = low_latency_next_vblank_ns > lead ?
-        low_latency_next_vblank_ns - lead : low_latency_next_vblank_ns;
-  }
-  if (target <= now)
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  ++vk_diag_pace_samples;
+  const uint64_t wait_ns = low_latency_pace_delay_ns(
+      now, low_latency_next_vblank_ns, period, lead,
+      &vk_diag_pace_skips, &vk_diag_pace_late);
+#else
+  const uint64_t wait_ns = low_latency_pace_delay_ns(
+      now, low_latency_next_vblank_ns, period, lead, NULL, NULL);
+#endif
+  if (!wait_ns)
     return 0;
-  const uint64_t wait_ns = target - now;
   svcSleepThread((int64_t)wait_ns);
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  const uint64_t after = lsfg_monotonic_ns();
+  const uint64_t actual_ns = after > now ? after - now : wait_ns;
+  ++vk_diag_pace_waits;
+  vk_diag_pace_ns += actual_ns;
+  if (actual_ns > vk_diag_pace_max_ns) vk_diag_pace_max_ns = actual_ns;
+  frame_ll_pace_ns += actual_ns;
+  return actual_ns;
+#else
   return wait_ns;
+#endif
 }
 
 /* Pure so it can be tested without a GPU: given the frozen source rate and the
@@ -622,6 +692,7 @@ static CpuTimeSample prev_cpu;
 static uint64_t hitch_ns;
 static unsigned hitch_count;
 static uint64_t hitch_acq_ns, hitch_sub_ns, hitch_pres_ns;
+static uint64_t hitch_ll_pace_ns, hitch_ll_fence_ns;
 static unsigned long long hitch_barrier, hitch_copyimg, hitch_copy2buf, hitch_blit;
 static unsigned long long hitch_fence_calls, hitch_idle_calls, hitch_pipe_calls;
 static uint64_t hitch_fence_ns, hitch_idle_ns, hitch_pipe_ns;
@@ -631,7 +702,9 @@ static int hitch_have;
 
 static void perf_note_frame(uint64_t interval) {
   const uint64_t acq = frame_acq_ns, sub = frame_sub_ns, pres = frame_pres_ns;
+  const uint64_t pace = frame_ll_pace_ns, sync_fence = frame_ll_fence_ns;
   frame_acq_ns = frame_sub_ns = frame_pres_ns = 0;
+  frame_ll_pace_ns = frame_ll_fence_ns = 0;
 
   const unsigned long long d_barrier  = gpu_barrier_calls   - prev_barrier;
   const unsigned long long d_copyimg  = gpu_copyimg_calls   - prev_copyimg;
@@ -673,6 +746,8 @@ static void perf_note_frame(uint64_t interval) {
     hitch_acq_ns      = acq;
     hitch_sub_ns      = sub;
     hitch_pres_ns     = pres;
+    hitch_ll_pace_ns  = pace;
+    hitch_ll_fence_ns = sync_fence;
     hitch_barrier     = d_barrier;
     hitch_copyimg     = d_copyimg;
     hitch_copy2buf    = d_copy2buf;
@@ -865,10 +940,10 @@ static void perf_report(uint64_t now) {
   const double worst_mean = perf_worst_mean_ns(scratch, n, tail);
 
   vk_diag_note("perf: %u presents / %.3f s = %.0f fps | worst %.1f ms | 1%% low %.0f fps"
-               " | stalls %u | lsfg %s src=%.0f target=%.0f gen=%llu",
+               " | stalls %u | panel_hz=%u | lsfg %s src=%.0f lsfg_target=%.0f gen=%llu",
                perf_window_presents, seconds, avg_fps,
                (double)worst / 1e6, worst_mean > 0.0 ? 1e9 / worst_mean : 0.0,
-               perf_stalls,
+               perf_stalls, saltysd_display_sync_service_rate(),
                !lsfg_requested() ? "off"
                    : (lsfg_mode_is_fractional() ? "fractional" : "auto"),
                lsfg_frozen_source_fps, lsfg_target_fps_pref(), perf_generated);
@@ -933,6 +1008,19 @@ static void perf_report(uint64_t now) {
                  gpu_copyimg_calls, gpu_blit_calls);
   }
 
+  vk_diag_note("perf: pace_hz=%u calls=%llu waits=%llu total=%.1f max=%.1f ms "
+               "skipped=%llu late=%llu | fence waits=%llu total=%.1f max=%.1f ms",
+               low_latency_rate_hz(), vk_diag_pace_samples,
+               vk_diag_pace_waits, (double)vk_diag_pace_ns / 1e6,
+               (double)vk_diag_pace_max_ns / 1e6, vk_diag_pace_skips,
+               vk_diag_pace_late, vk_diag_sync_fence_waits,
+               (double)vk_diag_sync_fence_ns / 1e6,
+               (double)vk_diag_sync_fence_max_ns / 1e6);
+  vk_diag_pace_samples = vk_diag_pace_waits = vk_diag_pace_skips = vk_diag_pace_late = 0;
+  vk_diag_pace_ns = vk_diag_pace_max_ns = 0;
+  vk_diag_sync_fence_waits = 0;
+  vk_diag_sync_fence_ns = vk_diag_sync_fence_max_ns = 0;
+
   /* Fourth line of the same window, emitted only when at least one frame was
    * long enough to be visible: what the longest such frame was made of. */
   if (hitch_have) {
@@ -942,6 +1030,7 @@ static void perf_report(uint64_t now) {
     const double io_ms = (double)(hitch_io_to.ns - hitch_io_from.ns) / 1e6;
     vk_diag_note("perf: hitch %.1f ms (%u frame(s) over %u ms this window)"
                  " | vk acquire %.1f submit %.1f present %.1f ms"
+                 " | sync pace %.1f fence %.1f ms"
                  " | fence %llu x %.1f idle %llu x %.1f pipe %llu x %.1f ms"
                  " | cmds barrier %llu copyimg %llu copy2buf %llu blit %llu"
                  " | cpu %s"
@@ -950,6 +1039,8 @@ static void perf_report(uint64_t now) {
                  (unsigned)(PERF_HITCH_NS / UINT64_C(1000000)),
                  (double)hitch_acq_ns / 1e6, (double)hitch_sub_ns / 1e6,
                  (double)hitch_pres_ns / 1e6,
+                 (double)hitch_ll_pace_ns / 1e6,
+                 (double)hitch_ll_fence_ns / 1e6,
                  hitch_fence_calls, (double)hitch_fence_ns / 1e6,
                  hitch_idle_calls, (double)hitch_idle_ns / 1e6,
                  hitch_pipe_calls, (double)hitch_pipe_ns / 1e6,
@@ -1263,9 +1354,15 @@ static void low_latency_wait_pending_fence(const char *where) {
                                                 VK_TRUE, UINT64_MAX);
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   const uint64_t t1 = lsfg_monotonic_ns();
-  vk_diag_note("low-latency fence wait where=%s fence=%p result=%d wait_ms=%.3f",
-               where, (void *)fence, result,
-               t1 > t0 ? (double)(t1 - t0) / 1e6 : 0.0);
+  const uint64_t waited_ns = t1 > t0 ? t1 - t0 : 0;
+  ++vk_diag_sync_fence_waits;
+  vk_diag_sync_fence_ns += waited_ns;
+  if (waited_ns > vk_diag_sync_fence_max_ns)
+    vk_diag_sync_fence_max_ns = waited_ns;
+  frame_ll_fence_ns += waited_ns;
+  if (result != VK_SUCCESS)
+    vk_diag_note("low-latency fence wait failed where=%s result=%d wait_ms=%.1f",
+                 where, result, (double)waited_ns / 1e6);
 #endif
   if (result == VK_SUCCESS)
     low_latency_pending_fence = VK_NULL_HANDLE;
@@ -1289,10 +1386,9 @@ vkQueueSubmit_shim(VkQueue queue, uint32_t submit_count,
     if (t1 > t0) { frame_sub_ns += t1 - t0; gpu_note_time(&gpu_sub_calls, &gpu_sub_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_submit_calls;
-  if (call <= 3 || result != VK_SUCCESS || paced_ns)
-    vk_diag_note("vkQueueSubmit call=%u count=%u fence=%p result=%d pace_ms=%.3f",
-                 call, submit_count, (void *)fence, result,
-                 (double)paced_ns / 1e6);
+  if (result != VK_SUCCESS)
+    vk_diag_note("vkQueueSubmit failed call=%u count=%u result=%d pace_ms=%.1f",
+                 call, submit_count, result, (double)paced_ns / 1e6);
 #endif
   if (vk_low_latency_enabled() && result == VK_SUCCESS && fence)
     low_latency_pending_fence = fence;
@@ -1317,10 +1413,9 @@ vkQueueSubmit2_shim(VkQueue queue, uint32_t submit_count,
     if (t1 > t0) { frame_sub_ns += t1 - t0; gpu_note_time(&gpu_sub_calls, &gpu_sub_ns, t0, t1); }
   }
   const unsigned call = ++vk_diag_submit2_calls;
-  if (call <= 3 || result != VK_SUCCESS || paced_ns)
-    vk_diag_note("vkQueueSubmit2 call=%u count=%u fence=%p result=%d pace_ms=%.3f",
-                 call, submit_count, (void *)fence, result,
-                 (double)paced_ns / 1e6);
+  if (result != VK_SUCCESS)
+    vk_diag_note("vkQueueSubmit2 failed call=%u count=%u result=%d pace_ms=%.1f",
+                 call, submit_count, result, (double)paced_ns / 1e6);
 #endif
   if (vk_low_latency_enabled() && result == VK_SUCCESS && fence)
     low_latency_pending_fence = fence;
@@ -2172,12 +2267,11 @@ vk_gipa_hook(VkInstance inst, const char *name) {
     fn = vk_loader_global_command(name);
 
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-  // Every entry point the core asks for that is not already covered by its own
-  // note above, and whether it got one. A NULL here is the difference between
-  // "GS init failed" and "GS init failed because vkEnumeratePhysicalDevices
-  // could not be resolved".
-  vk_diag_note("gipa inst=%p name=%s -> %p", (void *)inst,
-               name ? name : "(null)", (void *)fn);
+  /* Successful proc-address lookups are routine and produced a long startup
+   * trace with little diagnostic value. Keep only unresolved commands; those
+   * are the actionable cases when GS initialisation fails. */
+  if (!fn)
+    vk_diag_note("gipa unresolved name=%s", name ? name : "(null)");
 #endif
   return fn;
 }
