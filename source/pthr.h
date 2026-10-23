@@ -106,6 +106,7 @@ int pthr_cpu_time_report(char *buf, size_t len);
 // assignment complete; 11 assignment function returned; 12 pre-target marker
 // returned; 13 immediately before start(arg).
 unsigned pthr_debug_bridge4_stage(void);
+uint32_t pthr_debug_bridge4_handle(void);
 
 // Per-frame sampling of the same three roles, for the hitch line in vk.c.
 // pthr_cpu_time_report() consumes its own baselines (it is a rate), which is

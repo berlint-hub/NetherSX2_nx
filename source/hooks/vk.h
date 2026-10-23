@@ -43,7 +43,8 @@ void vk_diag_note(const char *format, ...)
    __attribute__((format(printf, 1, 2)));
 void vk_diag_exception(uint64_t pc, uint64_t far, uint32_t esr,
                        uint64_t sp, uint64_t frame_pointer, uint64_t link_register,
-                       uint32_t thread_handle, unsigned bridge4_stage);
+                       uint32_t thread_handle, unsigned bridge4_stage,
+                       uint32_t bridge4_handle);
 #endif
 
 // Registered in the core's import table (imports.c). Everything else the core

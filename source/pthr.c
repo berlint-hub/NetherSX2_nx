@@ -210,6 +210,7 @@ static int work_assigned;
 // fault inside the pre-target path is still attributable if the logger itself
 // is the thing that faulted.
 static volatile unsigned pthr_bridge4_stage;
+static volatile unsigned pthr_bridge4_handle;
 
 static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
   if (debug_id == 4)
@@ -218,6 +219,10 @@ static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
 
 unsigned pthr_debug_bridge4_stage(void) {
   return __atomic_load_n(&pthr_bridge4_stage, __ATOMIC_RELAXED);
+}
+
+unsigned pthr_debug_bridge4_handle(void) {
+  return __atomic_load_n(&pthr_bridge4_handle, __ATOMIC_RELAXED);
 }
 #else
 static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
@@ -758,10 +763,12 @@ static void *thread_trampoline(void *p) {
   const int trace = debug_id == 4;
   pthr_bridge4_set_stage(debug_id, 1); // TLS installed
   if (trace) {
-    corelog_log(CORELOG_INFO, "Wrapper",
-                "pthread bridge #%u entered target=0x%llx arg=%p fake TLS=%p current=%p",
-                debug_id, (unsigned long long)(uintptr_t)start, arg,
-                fake_tls, armGetTlsRw());
+    __atomic_store_n(&pthr_bridge4_handle, (unsigned)threadGetCurHandle(),
+                     __ATOMIC_RELAXED);
+    // Keep this first child-side marker text-only too: stage=1 means TLS was
+    // installed but the first formatted logger call never returned.
+    corelog_text(CORELOG_INFO, "Wrapper",
+                 "pthread bridge #4 entered target");
     pthr_bridge4_set_stage(debug_id, 2); // entry marker logged
   }
   // Keep emulator workers off the EE and audio cores.
