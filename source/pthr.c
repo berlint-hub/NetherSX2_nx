@@ -217,6 +217,12 @@ static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
     __atomic_store_n(&pthr_bridge4_stage, stage, __ATOMIC_RELAXED);
 }
 
+static inline void pthr_bridge4_capture_handle(unsigned debug_id) {
+  if (debug_id == 4)
+    __atomic_store_n(&pthr_bridge4_handle, (unsigned)threadGetCurHandle(),
+                     __ATOMIC_RELAXED);
+}
+
 unsigned pthr_debug_bridge4_stage(void) {
   return __atomic_load_n(&pthr_bridge4_stage, __ATOMIC_RELAXED);
 }
@@ -228,6 +234,10 @@ unsigned pthr_debug_bridge4_handle(void) {
 static inline void pthr_bridge4_set_stage(unsigned debug_id, unsigned stage) {
   (void)debug_id;
   (void)stage;
+}
+
+static inline void pthr_bridge4_capture_handle(unsigned debug_id) {
+  (void)debug_id;
 }
 #endif
 
@@ -763,8 +773,7 @@ static void *thread_trampoline(void *p) {
   const int trace = debug_id == 4;
   pthr_bridge4_set_stage(debug_id, 1); // TLS installed
   if (trace) {
-    __atomic_store_n(&pthr_bridge4_handle, (unsigned)threadGetCurHandle(),
-                     __ATOMIC_RELAXED);
+    pthr_bridge4_capture_handle(debug_id);
     // Keep this first child-side marker text-only too: stage=1 means TLS was
     // installed but the first formatted logger call never returned.
     corelog_text(CORELOG_INFO, "Wrapper",
