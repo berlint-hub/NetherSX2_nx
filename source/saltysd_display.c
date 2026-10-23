@@ -242,7 +242,7 @@ static void publish_present_rate(void) {
   const unsigned fps = estimate_present_fps();
   /* Low-latency mode uses a fixed 60 Hz presentation target; do not let the
    * adaptive cadence estimator ratchet FPSLocker down to 50/45 on transient
-   * emulator load. Keep publishing the measured average for diagnostics. */
+   * emulator load. Actual cadence remains available from the sync-rate query. */
   if (prefs_get_bool("EmuCore/GS/low_latency", false)) {
     if (__atomic_load_n(s_fpslocked, __ATOMIC_ACQUIRE) != 60)
       __atomic_store_n(s_fpslocked, 60, __ATOMIC_RELEASE);
@@ -250,9 +250,13 @@ static void publish_present_rate(void) {
     __atomic_store_n(&s_published_target, 60, __ATOMIC_RELEASE);
     s_candidate_target = 60;
     s_candidate_observations = 0;
-    if (fps && s_fpsavg) {
-      const float measured = (float)fps;
-      memcpy((void *)s_fpsavg, &measured, sizeof(measured));
+    /* SaltyNX fine mode follows FPSavg itself, not only FPSlocked. Keep both
+     * shared values at the fixed target or it will still retune the panel to
+     * 50/45 Hz while low-latency mode is active. NetherSX2's real cadence stays
+     * available through saltysd_display_sync_rate() and the Vulkan diagnostics. */
+    if (s_fpsavg) {
+      const float fixed_target = 60.0f;
+      memcpy((void *)s_fpsavg, &fixed_target, sizeof(fixed_target));
     }
     return;
   }

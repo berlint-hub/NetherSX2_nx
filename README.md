@@ -140,10 +140,13 @@ forwarding through it, and `source/nvk_libc_stubs.c` supplies the POSIX calls
 Mesa expects that newlib does not have. The SDL launcher uses its own graphics
 runtime and exits before the emulator starts.
 
-Experimental low-latency presentation is opt-in: set `EmuCore/GS/low_latency = 1`
-in `nethersx2.ini` (the flattened equivalent of `[EmuCore/GS] low_latency=1`).
-The setting exports `NVK_LOW_LATENCY=1` before Vulkan initializes, requests a
-2-image swapchain when surface limits permit, and prefers MAILBOX presentation.
+Experimental low-latency presentation is opt-in: set either the flat key
+`EmuCore/GS/low_latency = 1` or the conventional INI form `[EmuCore/GS]`
+followed by `low_latency = 1` in `nethersx2.ini`. The setting exports
+`NVK_LOW_LATENCY=1` before Vulkan initializes, requests a 2-image swapchain
+when surface limits permit, and prefers MAILBOX presentation. FPSLocker is held
+at a fixed 60 Hz target while this mode is active; measured cadence remains in
+the display-sync diagnostics.
 
 Three things about the Horizon environment need papering over for the core to
 work at all, all of them in the POSIX shim rather than in the emulator:

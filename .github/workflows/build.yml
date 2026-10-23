@@ -76,14 +76,14 @@ jobs:
           echo "::notice::libnx hlavicek: $n"
           test "$n" -gt 100 || echo "::error::libnx hlavicky se nerozbalily ($n)"
 
-      - name: Validace patchu a site (CMake + ctest)
+      - name: Validace prefs, patchu a site (CMake + ctest)
         run: |
-          for suite in patches network; do
+          for suite in prefs patches network; do
             cmake -S tests/$suite -B /tmp/$suite -G Ninja -DCMAKE_BUILD_TYPE=Release \
               || { echo "::error::cmake configure selhal: tests/$suite"; exit 1; }
             cmake --build /tmp/$suite || { echo "::error::build selhal: tests/$suite"; exit 1; }
             ctest --test-dir /tmp/$suite --output-on-failure \
-              || echo "::error::ctest selhal: tests/$suite"
+              || { echo "::error::ctest selhal: tests/$suite"; exit 1; }
           done
 
       - name: Validace nativniho Deko3D backendu
@@ -353,7 +353,7 @@ jobs:
           cmake --build launcher/dependencies/build --parallel "$(nproc)" \
             || { echo "::error::build storage deps selhal"; exit 1; }
 
-      - name: Osmy test -- validace shaderu proti assets jader
+      - name: Devaty test -- validace shaderu proti assets jader
         run: |
           # shader_validation potrebuje bison+flex (UAM) A zaroven rozbalene APK
           # assets: cte <assets>/shaders/opengl/*.glsl a kompiluje z nich DKSH.

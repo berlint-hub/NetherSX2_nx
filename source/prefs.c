@@ -100,25 +100,29 @@ static char *trim(char *s) {
   return s;
 }
 
-// Parse our flat ini: lines of "Section/Key = value", '#' (or ';') comments,
-// blank lines ignored. We deliberately do NOT honour [Section] headers -- the
-// keys the core uses are already the full "Section/Key" path, so storing them
-// flat keeps lookup a single strcmp.
+// Accept both the wrapper's historical flat keys ("Section/Key = value")
+// and ordinary INI sections ("[Section]" followed by "Key = value").
+// Keeping flat keys as-is preserves existing configs; sectioned keys are
+// flattened into the same map so JNI lookups still need only one strcmp.
 static void prefs_parse_file(const char *path) {
   FILE *f = fopen(path, "r");
-  if (!f) {
-
+  if (!f)
     return;
-  }
 
   char line[1024];
+  char section[PREFS_KEY_LEN] = "";
   while (fgets(line, sizeof(line), f)) {
     char *p = trim(line);
     if (p[0] == 0 || p[0] == '#' || p[0] == ';')
       continue;
-    // skip any [Section] header line defensively; we use flat keys.
-    if (p[0] == '[')
+    if (p[0] == '[') {
+      char *close = strchr(p + 1, ']');
+      if (!close)
+        continue;
+      *close = 0;
+      snprintf(section, sizeof(section), "%s", trim(p + 1));
       continue;
+    }
 
     char *eq = strchr(p, '=');
     if (!eq)
@@ -128,7 +132,23 @@ static void prefs_parse_file(const char *path) {
     char *val = trim(eq + 1);
     if (key[0] == 0)
       continue;
-    prefs_put(key, val);
+    if (section[0] && !strchr(key, '/')) {
+      char full_key[PREFS_KEY_LEN];
+      size_t section_len = strlen(section);
+      size_t key_len = strlen(key);
+      if (section_len > sizeof(full_key) - 3)
+        section_len = sizeof(full_key) - 3;
+      const size_t max_key_len = sizeof(full_key) - section_len - 2;
+      if (key_len > max_key_len)
+        key_len = max_key_len;
+      memcpy(full_key, section, section_len);
+      full_key[section_len] = '/';
+      memcpy(full_key + section_len + 1, key, key_len);
+      full_key[section_len + 1 + key_len] = 0;
+      prefs_put(full_key, val);
+    } else {
+      prefs_put(key, val);
+    }
   }
 
   fclose(f);
@@ -172,9 +192,9 @@ static void prefs_seed_defaults(void) {
   // "4:3", "16:9". Editable in nethersx2.ini.
   prefs_seed("EmuCore/GS/AspectRatio", "4:3");
   prefs_seed("EmuCore/GS/VsyncEnable", "0");
-  // Opt-in NVK low-latency presentation. The flat INI key corresponds to
-  // [EmuCore/GS] low_latency and is also exported as NVK_LOW_LATENCY before
-  // Vulkan initializes.
+  // Opt-in NVK low-latency presentation. Both EmuCore/GS/low_latency and
+  // [EmuCore/GS] low_latency are accepted; main.c exports it as
+  // NVK_LOW_LATENCY before Vulkan initializes.
   prefs_seed("EmuCore/GS/low_latency", "0");
   prefs_seed("Wrapper/SyncFrameLimitToDisplay", "false");
 #if GS_RENDERER == GS_RENDERER_VK

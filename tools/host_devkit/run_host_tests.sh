@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Postav a spust kazdy validacni test NetherSX2_nx, ktery bezi na HOSTITELI.
 #
-# 7 z 8: tests/patches a tests/network pres CMake+ctest; tests/deko3d
+# 8 z 9: tests/prefs, tests/patches a tests/network pres CMake+ctest; tests/deko3d
 #   (transfer, render_target, vertex_format, render_state, presentation) primo
 #   g++, protoze source/deko3d/compiler/CMakeLists.txt includuje Uam.cmake
 #   bezpodminene a to bez bison+flex spadne na FATAL_ERROR.
-# 1 z 8 preskocen: tests/deko3d/shader_validation -- linkuje `uam`, jehoz CMake
+# 1 z 9 preskocen: tests/deko3d/shader_validation -- linkuje `uam`, jehoz CMake
 #   vyzaduje bison+flex, a navic jeho main() bere rozbalene APK assets diry.
 #   build_all.sh ho stejne vypina (-DDEKO3D_SHADER_TESTS=OFF). Podrobnosti v
-#   README.md; v CI je jako gated krok "Osmy test -- validace shaderu".
+#   README.md; v CI je jako gated krok "Deváty test -- validace shaderu".
 set -uo pipefail
 
 REPO="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -29,7 +29,7 @@ command -v cmake >/dev/null || PATH="/home/user/toolchain/venv/bin:$PATH"
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 echo "== CMake/ctest =="
-for suite in patches network; do
+for suite in prefs patches network; do
   ( cd "$WORK" && cmake -S "$REPO/tests/$suite" -B "$suite" -G Ninja -DCMAKE_BUILD_TYPE=Release >"$suite.log" 2>&1 \
     && cmake --build "$suite" >>"$suite.log" 2>&1 \
     && ctest --test-dir "$suite" --output-on-failure >>"$suite.log" 2>&1 ); rc=$?

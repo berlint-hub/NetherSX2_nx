@@ -78,7 +78,7 @@ APK cores `NetherSX2-v2.2n-4248` / `-3668`. Workflow je detekuje kroky
 ```sh
 . tools/host_devkit/env.sh                          # DEVKITPRO + PATH
 bash tools/host_devkit/setup_host_devkit.sh         # ~14 s, idempotentní
-bash tools/host_devkit/run_host_tests.sh            # 7/8 testů
+bash tools/host_devkit/run_host_tests.sh            # 8/9 testů
 bash tools/host_devkit/audit_build_requirements.sh  # co chce build a co máme
 ```
 
@@ -104,10 +104,11 @@ bydlí v repu a sysroot mimo něj.
 část, kterou sandbox dodat neumí. `audit_build_requirements.sh` to vypíše po
 položkách; cesty parsuje z `Makefile`/`CMakeLists`, takže nezastará.
 
-## Testy: 7 z 8
+## Testy: 8 z 9
 
 | Test | Jak | Stav |
 |---|---|---|
+| `tests/prefs` | CMake + Ninja + ctest | PASS, flat and sectioned INI parsing |
 | `tests/patches` | CMake + Ninja + ctest | PASS, 15 core patch checks |
 | `tests/network` | CMake + Ninja + ctest | PASS, 4 network checks |
 | `tests/deko3d/transfer_validation` | `g++ -std=c++20` | PASS, 17 DMA případů |
@@ -137,5 +138,5 @@ Chybí mu dvě nezávislé věci:
 Navíc `Uam.cmake` zapíná shader testy jen při `DEKO3D_SHADER_TESTS=ON` **a**
 `NOT CMAKE_CROSSCOMPILING`, takže je potřeba druhá, nativní konfigurace
 `source/deko3d/compiler` (bez `Switch.cmake`). Workflow ji má jako krok
-`Osmy test -- validace shaderu`, gated na přítomnost cores — dnes se přeskočí,
-s cores dá plné 8/8.
+`Devátý test -- validace shaderu`, gated na přítomnost cores — dnes se přeskočí,
+s cores dá plné 9/9.

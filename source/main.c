@@ -2059,6 +2059,10 @@ int main(void) {
   saltysd_display_sync_configure(display_sync_enabled);
   saltysd_display_sync_poll();
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  const char *low_latency_env = getenv("NVK_LOW_LATENCY");
+  vk_diag_note("low-latency enabled=%d NVK_LOW_LATENCY=%s",
+               low_latency ? 1 : 0,
+               low_latency_env ? low_latency_env : "<unset>");
   vk_diag_note("display-sync enabled=%d query=%d active=%d connect_rc=0x%08x "
                "nethfps_rc=0x%08x legacy_rc=0x%08x port=%u "
                "display_rate=%u present_fps=%.2f shared_ready=%d "
