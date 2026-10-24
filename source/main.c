@@ -1612,8 +1612,13 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_message("nethersx2_quick_menu", "", 0.01f);
           g_quick_menu_mode = QUICK_MENU_CLOSED;
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
+          /* saveStateSlot queues work onto the VM thread. Calling the flush
+           * barrier immediately can return before that work has created its
+           * asynchronous writer (observed: flush returned before "Saving SPU2").
+           * Give the VM a short scheduling window, then wait for any writer. */
+          svcSleepThread(UINT64_C(100000000));
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: saveStateSlot returned; waiting for save flush",
+                      "slot %d: save queued; grace period elapsed, waiting for flush",
                       g_quick_menu_slot);
           nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
           corelog_log(CORELOG_INFO, "SaveState",
