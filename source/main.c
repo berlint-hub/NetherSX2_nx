@@ -552,7 +552,7 @@ static void run_startup_sequence(void) {
   prefs_set_string("Logging/EnableIOPConsole", "0");
 #endif
 #if defined(NETHERSX2_VK_DIAGNOSTIC) && defined(USE_VULKAN)
-  vk_diag_note("savestate diagnostic: effective MTVU=%d InstantVU1=%d (MTVU override is diagnostic-only; INI unchanged)",
+  vk_diag_note("savestate diagnostic: MTVU=%d InstantVU1=%d (read from preferences; no diagnostic override)",
                prefs_get_bool("EmuCore/Speedhacks/vuThread", true) ? 1 : 0,
                prefs_get_bool("EmuCore/Speedhacks/vu1Instant", true) ? 1 : 0);
 #endif
