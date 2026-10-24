@@ -104,5 +104,7 @@ This is the Vulkan/NVK production build. It keeps the previously implemented PAL
 
 - `git diff --check` and focused source assertions passed. The sandbox lacks local CMake, so tests/build ran through GitHub Actions.
 - GitHub Actions run `40096770681` for commit `94d49674b7409186abd69b610d18d878b949e7ce` passed both `host-tests` and the Switch build: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40096770681. That artifact predates the 2048 MiB reserve change and therefore validates only the 1024 MiB setting.
-- Artifacts: `nethersx2-switch` ID `12561481144` (43,600,400 bytes) and `nethersx2-vk-link-map` ID `12560719476` (742,315 bytes).
-- The pre-change GPU-reserve baseline is hardware-verified (`heap ready mb=2908`), but operation after the 2048 MiB reserve change is not yet verified. Effective low-latency mode and shader-cache persistence/performance are also unverified. The exact pinned source makes the low-latency override explicit; software-only CI cannot establish tearing or panel behavior.
+- Artifacts from run `40096770681`: `nethersx2-switch` ID `12561481144` (43,600,400 bytes) and `nethersx2-vk-link-map` ID `12560719476` (742,315 bytes).
+- GitHub Actions run `40102246846` for commit `9a7cfac649f61fb4dc60db1321f705215e5dc556` passed both `host-tests` and the Switch build with the new 2048 MiB Vulkan reserve: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40102246846
+- Artifacts from run `40102246846`: `nethersx2-switch` ID `12563212820` (43,600,414 bytes) and `nethersx2-vk-link-map` ID `12563521922` (742,331 bytes).
+- The pre-change GPU-reserve baseline is hardware-verified (`heap ready mb=2908`), but operation after the 2048 MiB reserve change is not yet verified on device. Effective low-latency mode and shader-cache persistence/performance are also unverified. The exact pinned source makes the low-latency override explicit; software-only CI cannot establish tearing or panel behavior.
