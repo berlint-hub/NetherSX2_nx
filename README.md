@@ -181,8 +181,9 @@ requests; it converts a FIFO or unknown request to MAILBOX. The interval mapper
 uses FIFO→1, IMMEDIATE→0, and MAILBOX→0 in low-latency mode (MAILBOX→1 on the
 default path). NetherSX2 requests IMMEDIATE when advertised and falls back to
 FIFO, which the driver converts to MAILBOX at interval zero. Thus the low-latency
-path runs at interval zero with two images. Tearing is
-possible, and the reduced queue depth can expose hitches that a third image
+path is source-derived to run at interval zero with two images; this has not
+yet been observed on device. Tearing is possible, and the reduced queue depth
+can expose hitches that a third image
 previously hid. This is opt-in only; the default three-image path and its
 MAILBOX interval behavior are unchanged.
 
@@ -207,10 +208,18 @@ work at all, all of them in the POSIX shim rather than in the emulator:
   `min(heap, 2048 * 0.9 * 0.75)` (about 1382 MiB with zero previously used
   heap; NVK adds current used bytes before capping at heap size). The existing
   memory-properties shim raises it to at least the heap size, so the
-  source-derived initial post-clamp expectation is 1536 MiB. These are source
-  expectations, not device measurements. The diagnostic log reports the actual
-  Vulkan heap and pre/post-clamp budget; `sysconf` itself logs only its sizing
+  source-derived initial post-clamp expectation is 1536 MiB. Device diagnostics
+  confirmed heap0=1536 MiB, NVK budget=1382 MiB before the shim and 1536 MiB
+  after it. This creates an intentional nominal overcommit: the exposed heap
+  budget is 512 MiB above the 1024 MiB dedicated reserve. That is not another
+  512 MiB of guaranteed free memory; actual usage must be read from
+  `heapUsage[0]`, not inferred from budget. The diagnostic build logs its
+  per-window and all-time observed usage; `sysconf` itself logs only its sizing
   hint. Do not treat it as total RAM or change the reserve based on the hint.
+  If measured heap use approaches the limit or OOM occurs, a one-step fallback
+  to a `GPU_RESERVE_MB * 4 / 3` hint (1366 MiB for a 1024 MiB reserve, implying
+  roughly a 1024 MiB NVK heap) can be tested. This fallback is documented only;
+  the current hint and heap percentage are unchanged.
 - **CPU topology.** The core links Facebook's `cpuinfo`, which reads
   `/sys/devices/system/cpu/*` and `/proc/cpuinfo`. Horizon has neither, so
   `source/libc_shim.c` serves both from a small synthetic-file table, sized

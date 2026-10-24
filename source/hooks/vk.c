@@ -59,6 +59,9 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *name) 
 
 volatile int vk_present_count = 0;
 
+static PFN_vkGetPhysicalDeviceMemoryProperties2 real_memprops2 = NULL;
+static VkPhysicalDevice real_memprops2_pd = VK_NULL_HANDLE;
+
 #ifdef NETHERSX2_VK_DIAGNOSTIC
 static Mutex vk_diag_mutex;
 static FILE *vk_diag_file;
@@ -592,6 +595,35 @@ static uint64_t perf_prev_ns;
 static unsigned perf_stalls;
 static unsigned long long perf_generated;
 static FastmemStats perf_fm_prev;
+static VkDeviceSize perf_heap_window_peak;
+static VkDeviceSize perf_heap_all_time_peak;
+static VkDeviceSize perf_heap0_size;
+static int perf_heap_sampled;
+
+/* The directly forwarded NVK query only reads its atomic heap accounting; keep
+ * this outside vk_diag_note() so no diagnostic-file mutex is held across it. */
+static void perf_sample_heap_usage(void) {
+  VkPhysicalDevice pd = __atomic_load_n(&real_memprops2_pd, __ATOMIC_ACQUIRE);
+  if (!real_memprops2 || pd == VK_NULL_HANDLE)
+    return;
+
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {
+    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT,
+  };
+  VkPhysicalDeviceMemoryProperties2 props = {
+    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+    .pNext = &budget,
+  };
+  real_memprops2(pd, &props);
+  if (!props.memoryProperties.memoryHeapCount)
+    return;
+
+  const VkDeviceSize used = budget.heapUsage[0];
+  perf_heap0_size = props.memoryProperties.memoryHeaps[0].size;
+  if (used > perf_heap_window_peak) perf_heap_window_peak = used;
+  if (used > perf_heap_all_time_peak) perf_heap_all_time_peak = used;
+  perf_heap_sampled = 1;
+}
 
 /* Insertion-sort a copy and average the worst `count` entries -- the 1% low
  * expressed as a frame time. Pure and bounded (n <= PERF_RING) so the
@@ -1045,6 +1077,15 @@ static void perf_report(uint64_t now) {
                vk_diag_pace_late, vk_diag_sync_fence_waits,
                (double)vk_diag_sync_fence_ns / 1e6,
                (double)vk_diag_sync_fence_max_ns / 1e6);
+  perf_sample_heap_usage();
+  if (perf_heap_sampled) {
+    vk_diag_note("perf: heap peak %llu MiB (all-time %llu MiB), heap size %llu MiB",
+                 (unsigned long long)(perf_heap_window_peak >> 20),
+                 (unsigned long long)(perf_heap_all_time_peak >> 20),
+                 (unsigned long long)(perf_heap0_size >> 20));
+    perf_heap_window_peak = 0;
+    perf_heap_sampled = 0;
+  }
   vk_diag_pace_samples = vk_diag_pace_waits = vk_diag_pace_skips = vk_diag_pace_late = 0;
   vk_diag_pace_ns = vk_diag_pace_max_ns = 0;
   vk_diag_sync_fence_waits = 0;
@@ -1106,6 +1147,7 @@ static void perf_report(uint64_t now) {
 
 static void perf_observe_present(void) {
   const uint64_t now = lsfg_monotonic_ns();
+  perf_sample_heap_usage();
   ++perf_window_presents;
   if (!now) return;
   if (!perf_window_start_ns) perf_window_start_ns = now;
@@ -2014,11 +2056,13 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
 // Memory-budget override: expose at least the full heap to clients. In
 // diagnostic builds, capture the actual NVK heap/budget and the post-clamp
 // budget once; do not duplicate NVK's heap or budget calculations here.
-static PFN_vkGetPhysicalDeviceMemoryProperties2 real_memprops2 = NULL;
 static void VKAPI_CALL
 vkGetPhysicalDeviceMemoryProperties2_shim(VkPhysicalDevice pd,
                                           VkPhysicalDeviceMemoryProperties2 *props) {
   if (!real_memprops2) return;
+  VkPhysicalDevice expected_pd = VK_NULL_HANDLE;
+  __atomic_compare_exchange_n(&real_memprops2_pd, &expected_pd, pd, 0,
+                              __ATOMIC_RELEASE, __ATOMIC_RELAXED);
   real_memprops2(pd, props);
   uint32_t heaps = props->memoryProperties.memoryHeapCount;
   for (VkBaseOutStructure *p = (VkBaseOutStructure *)props->pNext; p; p = p->pNext) {

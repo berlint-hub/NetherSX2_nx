@@ -527,6 +527,8 @@ jobs:
           scp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sysconf(_SC_PHYS_PAGES): hint=" || true)
           memd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "vkGetPhysicalDeviceMemoryProperties2: heaps=" || true)
           memp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "vkGetPhysicalDeviceMemoryProperties2: heaps=" || true)
+          heapd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -F -c "perf: heap peak %llu MiB (all-time %llu MiB), heap size %llu MiB" || true)
+          heapp=$("$xstrings" NetherSX2_nx_vk.nro | grep -F -c "perf: heap peak %llu MiB (all-time %llu MiB), heap size %llu MiB" || true)
           logd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core logging forced on" || true)
           logp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core logging forced on" || true)
           # Pocitadlo sched_yield je za #ifdef NETHERSX2_VK_DIAGNOSTIC, takze
@@ -763,7 +765,7 @@ jobs:
           echo "::notice::VU cycle steal: pref ${vsd}x (diag) / ${vsp}x (produkce), log-format ${vsf}x (produkce)"
           echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
           echo "::notice::sched_yield counter: ${yld}x (diag, ma byt 1) / ${ylp}x (produkce, ma byt 0)"
-          echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-hint ${scd}x (diag) / ${scp}x (produkce); Vulkan memory heap/budget log ${memd}x (diag) / ${memp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
+          echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-hint ${scd}x (diag) / ${scp}x (produkce); Vulkan memory heap/budget log ${memd}x (diag) / ${memp}x (produkce); actual heap peak format ${heapd}x (diag) / ${heapp}x (produkce, ma byt 0); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
           if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
             echo "::error::NETHERSX2_VK_DIAGNOSTIC se v diag buildu neprojevilo -- binarka by nelogovala"
             exit 1
@@ -772,8 +774,8 @@ jobs:
             echo "::error::source/corelog.c se nedostal do binarky -- konzole jadra by se zahazovala"
             exit 1
           fi
-          if [ "$scd" = "0" ] || [ "$memd" = "0" ] || [ "$logd" = "0" ]; then
-            echo "::error::diag build neobsahuje sizing-hint sysconf (${scd}x), Vulkan heap/budget measurement (${memd}x) nebo vynucene logovani jadra (${logd}x) -- chybi pozadovana diagnosticka cesta"
+          if [ "$scd" = "0" ] || [ "$memd" = "0" ] || [ "$heapd" = "0" ] || [ "$logd" = "0" ]; then
+            echo "::error::diag build neobsahuje sizing-hint sysconf (${scd}x), Vulkan heap/budget measurement (${memd}x), actual heap peak format (${heapd}x) nebo vynucene logovani jadra (${logd}x) -- chybi pozadovana diagnosticka cesta"
             exit 1
           fi
           if [ "$regd" = "0" ] || [ "$regp" = "0" ]; then
@@ -802,6 +804,10 @@ jobs:
           fi
           if [ "$pind" = "0" ] || [ "$pinp" = "0" ] || [ "$pfd" = "0" ] || [ "$pfp" = "0" ]; then
             echo "::error::pthr_pin_by_name() se nedostal do binarky (ThreadPinning diag ${pind}x / produkce ${pinp}x, log-format diag ${pfd}x / produkce ${pfp}x) -- prctl(PR_SET_NAME) by se opet zahazoval a GS s MTVU by sdilely jadro podle poradi vytvoreni"
+            exit 1
+          fi
+          if [ "$heapp" != "0" ]; then
+            echo "::error::produkce obsahuje diagnostic-only actual heap peak format (${heapp}x), musi byt 0"
             exit 1
           fi
           if [ "$scp" != "0" ] || [ "$memp" != "0" ] || [ "$logp" != "0" ]; then

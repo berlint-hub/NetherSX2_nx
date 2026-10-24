@@ -1,5 +1,19 @@
 # Handoff: TEST3 spinrelax + NXVK build
 
+## Current state
+
+```text
+hint sysconf            = 2048 MiB (2 * GPU_RESERVE_MB), NENÍ total RAM
+GPU_RESERVE_MB          = 1024
+VkMemoryHeap[0].size    = 1536 MiB   (NVK heap_memory_percent = 0.75)
+budget NVK před clampem = 1382 MiB
+budget po shimu         = 1536 MiB
+ověřeno na device       = c6a74f2-run40109729826
+otevřeno                = P0#1 (low-latency A/B), P1 warm-cache
+```
+
+Nižší sekce jsou historie; čísla z nich se necitují.
+
 ## Follow-up candidate (2026-10-22)
 
 - Requested action: rebuild the Switch package against the updated NXVK supplied by TEST3 branch `arena/8b264db8-test3`.
@@ -56,7 +70,7 @@
   https://github.com/berlint-hub/NetherSX2_nx/actions/runs/39789988729
 - Device test with this build was successful for the IPC/shared-memory path: `active=1`, `nethfps_rc=0`, `shared_ready=1`; the published FPSLocker target reached 50 while PAL presentation settled around 50.2 FPS. On-device validation of the exact NXVK/core performance and physical panel response remains useful.
 
-## Exact inputs in the build
+## Exact inputs in the build (as of `2c4bac7` — superseded history)
 
 - Core: `TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so`
   - SHA-256: `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`
@@ -158,3 +172,9 @@ the end of this file.
 - The supplied gameplay log contains sustained rendering and no reported Vulkan OOM/`bad_alloc` or GPU allocation failure. Its `fastmem ... map-fail 0` counter is for the emulator's CPU fastmem mapping, not the Vulkan allocator. Close P0 #3 for this tested configuration/run; this is not a guarantee for every game or workload. The log later shows a fatal CPU exception while an asynchronous savestate save is in progress; that remains out of scope and was not investigated or attributed to GPU memory.
 - **P0 #1 remains untested.** The provided configuration has `Wrapper/AutoSyncFPSLocker=true` and `EmuCore/GS/low_latency=0`. Runtime lines also say `low_latency=0` and `NVK_LOW_LATENCY=0`; the swapchain uses three images, FIFO (`selected_mode=2`), interval 1. `EmuCore/GS/VsyncEnable=0` does not make this the low-latency A/B. Repeat with `Wrapper/AutoSyncFPSLocker=false` and `EmuCore/GS/low_latency=1`, then capture interval 0, pace counters, and whether tearing is acceptable.
 - The shader-cache line reports 449 entries (256 KiB), so this run used a non-empty cache. There is no paired first-/second-start count from this build, so cross-launch warm-cache persistence remains unverified. Other observed performance windows are generally near the 50 Hz panel rate but include hitches; this was not a controlled low-latency comparison.
+
+### Current memory-headroom invariant and deferred fallback
+
+- The device-confirmed 1536 MiB Vulkan heap is 512 MiB larger than the 1024 MiB GPU reserve. Because the existing shim reports budget at least equal to heap size, VMA sees a nominal budget 512 MiB above the amount explicitly reserved for GPU use. This is an intentional overcommit, not 512 MiB of guaranteed free RAM. The earlier 2463 MiB source estimate against the same 1024 MiB reserve implied a 1439 MiB gap; the current sizing reduced, but did not eliminate, that gap.
+- If the new `heapUsage[0]` peaks approach the heap limit or a Vulkan OOM is observed, the documented one-step fallback is to report `GPU_RESERVE_MB * 4 / 3` as the `sysconf` hint (1366 MiB for the current reserve), which source-estimates an NVK heap of roughly 1024 MiB. This is a contingency only: do not change the current 2048 MiB hint or the pinned 0.75 percentage now.
+- Diagnostic perf windows now sample actual `heapUsage[0]` through the saved physical-device handle and the direct NVK `vkGetPhysicalDeviceMemoryProperties2` entry point. They report per-window sampled peak and all-time peak; they do not use `heapBudget` as a usage proxy. Sampling is diagnostic-only and is not performed in production.
