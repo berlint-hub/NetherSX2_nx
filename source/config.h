@@ -20,6 +20,8 @@
 // so claiming every byte starved the GPU and VMA then refused all allocations.
 #ifdef USE_DEKO3D
 #define GPU_RESERVE_MB 256
+#elif defined(USE_VULKAN)
+#define GPU_RESERVE_MB 2048
 #else
 #define GPU_RESERVE_MB 1024
 #endif
