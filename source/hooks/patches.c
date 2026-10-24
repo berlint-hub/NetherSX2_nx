@@ -349,11 +349,13 @@ void patch_game(void) {
 
   // Logged before the UNKNOWN bail-out on purpose: an unrecognised core is
   // exactly when it matters most to know which wrapper produced the log.
-  corelog_log(CORELOG_INFO, "Wrapper", "wrapper build %s, core %s",
+  corelog_log(CORELOG_INFO, "Wrapper",
+              "wrapper build %s, core %s, variant %s",
               NETHERSX2_BUILD_ID,
               g_core_version == CORE_VER_V22N_4248 ? "v2.2n-4248"
               : g_core_version == CORE_VER_V22N_3668 ? "v2.2n-3668"
-              : "UNKNOWN");
+              : "UNKNOWN",
+              CORE_VARIANT);
 
   if (g_core_version == CORE_VER_UNKNOWN)
     return;

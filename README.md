@@ -199,11 +199,18 @@ work at all, all of them in the POSIX shim rather than in the emulator:
 - **Memory.** NVK sizes its `VkMemoryHeap` using
   `sysconf(_SC_PHYS_PAGES)`, which newlib does not implement. The Switch shim
   returns a Mesa-specific sizing hint of `2 * GPU_RESERVE_MB` (2048 MiB with
-  the 1024 MiB Vulkan reserve), not the console's actual physical-page count.
-  The pinned NXVK 50% heap heuristic therefore reports a 1024 MiB NVK heap,
-  matching the memory deliberately left unmapped by the newlib heap without
-  taking another GiB from it. Do not treat this sysconf result as a general
-  system-memory measurement.
+  the unchanged 1024 MiB Vulkan reserve), not the console's actual physical-page
+  count. At the pinned NXVK revision, `heap_memory_percent` defaults to 0.75;
+  its 25/50/75% fallback is used only when that option is zero. Therefore the
+  source-derived heap expectation for this hint is 1536 MiB, not 1024 MiB. On
+  Horizon, NVK's initial budget calculation is approximately
+  `min(heap, 2048 * 0.9 * 0.75)` (about 1382 MiB with zero previously used
+  heap; NVK adds current used bytes before capping at heap size). The existing
+  memory-properties shim raises it to at least the heap size, so the
+  source-derived initial post-clamp expectation is 1536 MiB. These are source
+  expectations, not device measurements. The diagnostic log reports the actual
+  Vulkan heap and pre/post-clamp budget; `sysconf` itself logs only its sizing
+  hint. Do not treat it as total RAM or change the reserve based on the hint.
 - **CPU topology.** The core links Facebook's `cpuinfo`, which reads
   `/sys/devices/system/cpu/*` and `/proc/cpuinfo`. Horizon has neither, so
   `source/libc_shim.c` serves both from a small synthetic-file table, sized
@@ -377,15 +384,28 @@ accepted as a fallback; it exports the public entry points itself, so the
 
 `NXVK_EXPECTED_SHA256` in the Makefile pins the exact candidate tarball used by
 CI; CI fails if `berlint-hub/TEST3` serves anything else. The core is pinned in
-`source/deko3d/dk_profiles.h`, with its GSDevice and HostDisplay vtables checked
-against the profile. CI pins `berlint-hub/TEST3` at commit
+`source/deko3d/dk_profiles.h`. CI checks the selected bundle core hash and
+GSDevice/HostDisplay vtables against the profile; this is not a Vulkan device
+runtime check. The `dk_install_native_backend()` hash/vtable check is only used
+when installing Deko3D, which the shipped Vulkan build does not do. CI pins
+`berlint-hub/TEST3` at commit
 `0f5878e08cd37dd25b23ba5e090ae5c292560eca` from `arena/8b264db8-test3`, and
 uses `assets_4248/` plus
 `4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` from that exact tree. The core
 SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`;
-the profile validator checks all GSDevice and HostDisplay vtable entries and
-the core hash. The Vulkan asset check verifies the required shader files are
-present and bundled. NXVK is pinned by its tarball SHA-256
+CI's `tools/check_deko3d_build.py` checks all GSDevice and HostDisplay vtable
+entries and the core hash. The Vulkan asset check verifies the required shader
+files are present and bundled. The selected core is the TEST3 `spinrelax` variant. TEST3
+produces it with the post-build command
+`tools/patch_tegra_x1.py --with-spin-relax`, which signature-matches 81 spin-wait
+sites and replaces each eight-instruction `isb` block with eight `yield`
+instructions. A binary comparison of the standard and spinrelax cores found
+both images are 12,162,984 bytes, with 648 changed words at those 81 locations;
+the checked `.rodata`, `.data.rel.ro`, GOT, relocation, and listed vtable regions
+were unchanged. This is a behavioral spin-wait change that can shift timing, not
+a verified performance gain or a prerequisite for P0 #1. No on-device timing
+comparison is available. The wrapper/core startup log identifies the selected
+variant as `spinrelax`. NXVK is pinned by its tarball SHA-256
 (`c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74`); its
 BUILDINFO identifies NXVK commit `d6dcd9fb860e398abb8081bc5d23c38d4162052e`,
 Mesa 26.2.2, and build run `40103062558`. This package includes the low-latency

@@ -60,7 +60,7 @@
 
 - Core: `TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so`
   - SHA-256: `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`
-  - The build's profile check verified all 29 GSDevice and 31 HostDisplay vtable entries against `source/deko3d/dk_profiles.h`.
+  - CI's bundle/profile check verified all 29 GSDevice and 31 HostDisplay vtable entries against `source/deko3d/dk_profiles.h`; this is a build-time check, not a Vulkan device-runtime check.
 - NXVK: `TEST3/nxvk-vulkan-tegra-x1.tar.gz`
   - SHA-256: `1480973e71cfd54eb430e7c6b48f9c5ce60a674e54bb6d44d0c1c8de412de0de`
   - NXVK commit `b53eb3308c510dde96930c07090a907af92a696d`, Mesa 26.2.2, build run `39497258880`.
@@ -78,26 +78,28 @@
 
 ## Scope
 
-This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The IPC/shared-memory publication has now been confirmed on-device; actual panel response should still be confirmed separately. The build does not establish RAM-bandwidth gains from the spinrelax core/NXVK combination.
+This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The IPC/shared-memory publication has now been confirmed on-device; actual panel response should still be confirmed separately. The spinrelax core changes a spin-wait hint and may shift timing; no RAM-bandwidth/performance gain is established.
 
-## Superseded review of the previous NXVK pin (2026-10-24)
+## Historical review: never-shipped 2048 MiB reserve experiment (2026-10-24)
 
-The following review records the earlier 9786622 package and 2048 MiB reserve
-candidate only. Its low-latency and reserve conclusions are superseded by the
-current follow-up at the end of this file.
+This preserved review covers the earlier 9786622 package and a 2048 MiB reserve
+experiment. That reserve change was **never shipped**. All heap percentages and
+inferred heap sizes in this historical review are superseded; they were wrapper-
+side estimates, not reads of `VkMemoryHeap::size`. See the current correction at
+the end of this file.
 
 ### Inputs and verification boundary
 
 - The TEST3 archive at commit `4c23955060cde768ec16e25062b78ae890e21b58` was retrieved through the GitHub API. Its SHA-256 is exactly `87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51`, matching `Makefile`; its `BUILDINFO.txt` identifies NXVK source commit `978662247facf1ff30ad8ea6116b96c130602934` (run `39819283724`, Mesa 26.2.2).
 - Source was checked at that exact NXVK commit. `wsi_switch.c` fixes normal/low-latency image counts at 3/2. With `NVK_LOW_LATENCY=1`, its WSI selects MAILBOX regardless of the application's requested `presentMode`; `nwindowSetSwapInterval()` uses 0 only for IMMEDIATE and 1 for both MAILBOX and FIFO. The wrapper can request IMMEDIATE, but that does **not** change the effective mode on this pinned binary. A driver-source change and rebuilt/pinned package are required to finish P0 #1; do not claim it fixed on-device.
 - `disk_cache.c` in the same source commit recognizes `MESA_SHADER_CACHE_DIR` and defaults its maximum to 1 GiB when no override is supplied. The app now supplies an explicit 2 GiB cap. The newly supplied device log confirms NVK opens `/switch/nethersx2/cache/mesa/.mesa_shader_cache/...`; it starts with 0 entries, so cache persistence/warm reuse is still unverified.
-- Device log `64902a8-run40096937923` reports `heap ready mb=2908` with the old 1024 MiB reserve. It also reports total memory 3285 MiB and NVK's heap budget as 50% = 1642 MiB. Raising the reserve by 1024 MiB projects a 1884 MiB newlib heap (2908 - 1024), still 384 MiB above the code's 1500 MiB startup guard. This projection is arithmetic, not a post-change hardware measurement.
+- Device log `64902a8-run40096937923` reports `heap ready mb=2908` with the 1024 MiB reserve and total memory 3285 MiB. Its `NVK heap budget as 50% = 1642 MiB` was a wrapper-side estimate, not a runtime `VkMemoryHeap`/budget measurement. The 1884 MiB newlib-heap figure in the experiment notes was a projection (2908 - 1024), not a post-change measurement.
 
 ### Changes made
 
 - **P0 #1 — low-latency present mode:** the wrapper now prefers IMMEDIATE, then FIFO, and no longer prefers MAILBOX. The pinned NXVK driver overrides the request to MAILBOX whenever its low-latency environment flag is set, so this is only the correct wrapper request, not a complete runtime fix. A driver patch/rebuild is still required. Hardware verification: **not performed**.
 - **P0 #2 — SaltySD retry:** once legacy SaltySD has been selected, reconnect attempts no longer fall through to the NethFPS port. NethFPS remains attempted only when it is preferred or no endpoint has yet been selected. Host tests/build pending below; no hardware verification claimed.
-- **P0 #3 — GPU reserve:** after inspecting the supplied log (`heap ready mb=2908`), Vulkan's `GPU_RESERVE_MB` is raised 1024→2048 MiB. The resulting heap is projected at 1884 MiB, above the 1500 MiB startup guard; actual operation with this smaller heap remains **hardware-unverified**. Retain the driver-side alternative if the follow-up log shows heap pressure or allocations failing.
+- **Never-shipped 2048 MiB reserve experiment (superseded):** this historical review proposed raising Vulkan's `GPU_RESERVE_MB` 1024→2048 MiB and projected a newlib heap at 1884 MiB. The reserve increase was never shipped, and the projection was not a hardware measurement.
 - **P0 #4 — buffer behavior:** README now documents that pinned NXVK chooses 3 images normally and 2 in its low-latency mode, ignores `minImageCount`, and therefore cannot honor FPSLocker's `SetBuffers`. The wrapper continues to leave `SetBuffers` untouched and report the queried actual count through `Buffers`. The supplied normal FIFO-mode log confirms 3 actual images and successful count query; low-latency's 2-image path remains unverified on hardware.
 - **P1 — shader cache and present hot path:** set `MESA_SHADER_CACHE_DIR=/switch/nethersx2/cache/mesa` and `MESA_SHADER_CACHE_MAX_SIZE=2G` before driver initialization; ensure the cache directory exists. The supplied Mesa line confirms the configured cache file path opens, with 0 entries at startup; reuse/persistence and performance remain **unverified**. Cache `Wrapper/LSFGMode` and `Wrapper/LSFGTargetFPS`, and skip the target preference lookup when LSFG is disabled.
 - **P1 — audio callback:** `DEFAULT_FRAMES_PER_CB` remains 512. The proposed 256-frame reduction was not made because doubled callback frequency could underrun on core 3; it needs an audio stress test on hardware. Hardware verification: **not performed**.
@@ -109,9 +111,9 @@ current follow-up at the end of this file.
 - `git diff --check` and focused source assertions passed. The sandbox lacks local CMake, so tests/build ran through GitHub Actions.
 - GitHub Actions run `40096770681` for commit `94d49674b7409186abd69b610d18d878b949e7ce` passed both `host-tests` and the Switch build: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40096770681. That artifact predates the 2048 MiB reserve change and therefore validates only the 1024 MiB setting.
 - Artifacts from run `40096770681`: `nethersx2-switch` ID `12561481144` (43,600,400 bytes) and `nethersx2-vk-link-map` ID `12560719476` (742,315 bytes).
-- GitHub Actions run `40102246846` for commit `9a7cfac649f61fb4dc60db1321f705215e5dc556` passed both `host-tests` and the Switch build with the new 2048 MiB Vulkan reserve: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40102246846
-- Artifacts from run `40102246846`: `nethersx2-switch` ID `12563212820` (43,600,414 bytes) and `nethersx2-vk-link-map` ID `12563521922` (742,331 bytes).
-- The pre-change GPU-reserve baseline is hardware-verified (`heap ready mb=2908`), but operation after the 2048 MiB reserve change is not yet verified on device. Effective low-latency mode and shader-cache persistence/performance are also unverified. The exact pinned source makes the low-latency override explicit; software-only CI cannot establish tearing or panel behavior.
+- **Never-shipped 2048 MiB reserve experiment:** GitHub Actions run `40102246846` for commit `9a7cfac649f61fb4dc60db1321f705215e5dc556` passed `host-tests` and the Switch build with that experimental reserve. It was a CI artifact only, not a shipped configuration: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40102246846
+- Artifacts from that experiment run `40102246846`: `nethersx2-switch` ID `12563212820` (43,600,414 bytes) and `nethersx2-vk-link-map` ID `12563521922` (742,331 bytes).
+- Effective low-latency mode and shader-cache persistence/performance remain unverified. Software-only CI cannot establish tearing or panel behavior.
 
 ## Current follow-up: NXVK low-latency WSI and memory sizing (2026-10-24)
 
@@ -119,21 +121,23 @@ current follow-up at the end of this file.
 
 - TEST3 branch `arena/8b264db8-test3` is pinned at commit `0f5878e08cd37dd25b23ba5e090ae5c292560eca`. That commit adds the updated NXVK tarball; the same tree supplies `assets_4248/` and `4248/arm64-v8a/libemucore_tegrax1_spinrelax.so`.
 - The package tarball SHA-256 is `c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74`, computed over the tarball in the TEST3 git tree (not the Actions ZIP). Its `BUILDINFO.txt` identifies NXVK source commit `d6dcd9fb860e398abb8081bc5d23c38d4162052e`, Mesa 26.2.2, and package run `40103062558`. That run completed successfully, including its Switch cross-build and tests.
-- The selected spinrelax core SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`. Its profile hash and vtable checks are set to this image.
-- NetherSX2 commit `75935aa0e62a86d6bb81d0461ab315d66fb21741` passed both `host-tests` and the Switch build in Actions run `40105680609`: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40105680609. Build ID: `75935aa-run40105680609`. Artifacts: `nethersx2-switch` ID `12564124596` (43,599,392 bytes) and `nethersx2-vk-link-map` ID `12564303817` (742,474 bytes).
+- The selected spinrelax core SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`. TEST3 generates it from the standard core with its post-build `tools/patch_tegra_x1.py --with-spin-relax` option; that script signature-matches 81 spin-wait sites and replaces each eight-`isb` block with eight `yield` instructions. The user's binary comparison found both images are 12,162,984 bytes, with 648 changed words at those 81 locations; `.rodata`, `.data.rel.ro`, GOT, relocations, and the listed vtable regions were unchanged. This is a behavioral change with potentially shifted timing, not a proven gain or a requirement for P0 #1; no controlled on-device timing comparison is available. The wrapper/core log now labels the variant `spinrelax`.
+- CI checks this selected bundle core's hash and GSDevice/HostDisplay vtable entries against `source/deko3d/dk_profiles.h`; this is not a Vulkan device-runtime check. `dk_install_native_backend()` performs a runtime profile check only for Deko3D, which the shipped Vulkan build does not install.
+- NetherSX2 commit `75935aa0e62a86d6bb81d0461ab315d66fb21741` passed both `host-tests` and the Switch build in Actions run `40105680609`: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40105680609. Build ID: `75935aa-run40105680609`. Artifacts: `nethersx2-switch` ID `12564124596` (43,599,392 bytes) and `nethersx2-vk-link-map` ID `12564303817` (742,474 bytes). This result predates the current diagnostic/documentation corrections.
 
 ### Findings and changes
 
 - **P0 #1 — low latency:** inspected `wsi_switch.c` from the package's exact source commit. The low-latency WSI keeps a supported MAILBOX or IMMEDIATE request, and falls back to MAILBOX for FIFO/unknown requests. Its low-latency path creates 2 images and maps FIFO→interval 1, IMMEDIATE→0, MAILBOX→0. The default 3-image path stays unchanged; default MAILBOX remains interval 1. README now warns that interval zero can tear and that two images can expose hitches previously hidden by the third image. This is source/build validation, not device proof.
-- **P0 #3 — GPU heap hint:** `GPU_RESERVE_MB` is restored to 1024 MiB; newlib heap size is not reduced. `sysconf(_SC_PHYS_PAGES)` now reports `2 * GPU_RESERVE_MB` (2048 MiB), so NXVK's 50% heuristic projects a 1024 MiB heap matching the unmapped reserve. Diagnostic output labels this `reported=2048 MiB` rather than implying it is actual total system memory. The earlier `heap ready mb=2908` is expected to remain unchanged, but only a new device run can confirm both values.
+- **P0 #3 — memory sizing:** `GPU_RESERVE_MB` remains 1024 MiB; the newlib heap size and pinned NXVK heap percentage are not changed. `sysconf(_SC_PHYS_PAGES)` supplies a 2048 MiB sizing hint, not total RAM. Pinned NXVK source sets `heap_memory_percent=0.75`, so its source-derived heap expectation is 1536 MiB. Its initial NVK budget calculation is approximately `min(heap, 2048 * 0.9 * 0.75)` (about 1382 MiB with zero previously used heap; NVK adds its current used bytes before capping at heap size); the existing shim raises the exposed budget to at least heap size, giving a source-derived initial post-clamp expectation of 1536 MiB. These are source expectations only; a runtime diagnostic now logs the actual heap and budgets instead of duplicating driver arithmetic.
 - Removed the store that zeroed `vk_low_latency_cached` when display sync activates. The suppression flag still disables the wrapper's wall-clock pacer and stays latched, while the startup `NVK_LOW_LATENCY=1` environment remains intact for a later swapchain recreation.
+- **P1 — spinrelax core:** TEST3 generates this variant with `tools/patch_tegra_x1.py --with-spin-relax`. The binary audit records 12,162,984-byte images, 648 changed words at 81 sites (eight `isb` instructions become eight `yield` instructions per site), and no changes in the checked data/relocation/vtable regions. Treat this as a potential timing change only; it is independent of P0 #1 and has no demonstrated performance direction.
 - NetherSX2 CI is now pinned to the TEST3 commit and tarball hash above, and takes the spinrelax core plus assets from the same commit. The README describes the new WSI behavior and memory hint.
 
 ### On-device log: `0e834ba-run40105861568`
 
-- **P0 #3 confirmed on device:** `sysconf(_SC_PHYS_PAGES): reported=2048 MiB`, `NVK heap = 50% = 1024 MiB`, `GPU_RESERVE_MB=1024`, and `heap ready mb=2908`. This matches the intended heap sizing and shows the newlib heap stayed at the earlier measured size; it does not prove every future GPU allocation will succeed under all workloads.
+- **P0 #3 is not confirmed by this log:** its `sysconf(_SC_PHYS_PAGES): reported=2048 MiB` and `NVK heap = 50% = 1024 MiB` line came from wrapper-side duplicate arithmetic, not Vulkan runtime properties. The log does confirm the 1024 MiB hint/reserve and the separate `heap ready mb=2908` value; actual `VkMemoryHeap::size` and pre/post-shim budget were not captured. The old interpretation is withdrawn, and P0 #3 remains open pending the new Vulkan diagnostic plus allocation/headroom outcomes.
 - **P0 #1 was not exercised:** startup reports `fpslocker-auto-sync requested=1 detected=1 low_latency=0`, `display-sync ... active=1`, and `NVK_LOW_LATENCY=0`. The swapchain is 3 images, FIFO (`selected_mode=2`), with Mesa reporting swap interval 1. This verifies the unchanged default/display-sync path, not the updated low-latency WSI, interval-zero presentation, or tearing behavior.
 - `perf:` reports `pace_hz=50 calls=0 waits=0 ... skipped=0 late=0`, consistent with low latency being disabled and display sync active. Several early/transition windows range from 26–49 FPS with large hitches; later windows repeatedly reach 50 FPS on the 50 Hz panel. This log is not a controlled low-latency A/B and does not establish a cause for the early dips or hitches.
 - Mesa reports the new shader-cache path with `0 entries`; the previous pipeline-cache UUID is rejected and old pipeline-cache files are removed. A second-start cache comparison was not supplied, so warm cache persistence remains unverified.
-- The requested low-latency A/B still needs `Wrapper/AutoSyncFPSLocker = false` and `EmuCore/GS/low_latency = 1`, followed by the `nvk wsi: low-latency on, ... swap interval 0` line, performance counters, and a tearing observation. This is still required to close P0 #1 and P1 cache verification; P0 #3 is now verified for the reported values.
+- The requested low-latency A/B still needs `Wrapper/AutoSyncFPSLocker = false` and `EmuCore/GS/low_latency = 1`, followed by the `nvk wsi: low-latency on, ... swap interval 0` line, pacing counters, and a tearing observation. It is still required for P0 #1; no P0 is closed by the old logs. Capture the sizing hint, actual heap and NVK pre/post-clamp budgets, `heap ready mb=`, OOM/`bad_alloc` outcomes, and first-/second-start shader-cache counts, plus whether tearing is acceptable. P1 cache verification also remains open.
 - The log also contains a fatal exception during async savestate save. Savestate remains explicitly out of scope; it was not analyzed or changed. Audio code was not changed.

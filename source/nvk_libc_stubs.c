@@ -33,7 +33,6 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <signal.h> /* sigset_t */
-#include <switch.h> /* svcGetInfo, InfoType_*, CUR_PROCESS_HANDLE */
 #include "config.h" /* GPU_RESERVE_MB */
 
 #ifdef NETHERSX2_VK_DIAGNOSTIC
@@ -89,18 +88,12 @@ int getpwuid_r(unsigned int uid, void *pwd, char *buf, unsigned long buflen,
 }
 #endif
 
-/* NVK uses os_get_total_physical_memory() as the input to its heap-size
- * heuristic. On this port, report twice the memory deliberately left unmapped
- * by main.c's newlib heap: the pinned NXVK Switch WSI/Mesa build uses the 50%
- * heuristic for this 2 GiB figure, yielding a 1 GiB VkMemoryHeap when the
- * configured GPU_RESERVE_MB is 1024. This keeps the heap estimate aligned with
- * the existing reservation without taking another GiB from newlib.
- *
- * This is a targeted Mesa sizing hint, NOT the console's actual physical-memory
- * total. Do not use it as a general-purpose system-memory query. The former
- * free-remainder approach reported only a few MiB after svcMapProcessCodeMemory
- * and made VMA reject allocations; reporting the full console total made NVK's
- * estimate much larger than the memory explicitly held aside for the GPU. */
+/* NVK uses os_get_total_physical_memory() as an input to heap sizing. On
+ * this port, report twice the memory deliberately left unmapped by main.c's
+ * newlib heap. This is a Mesa sizing hint, NOT the console's actual physical
+ * memory total; do not use it as a general-purpose system-memory query. Keep
+ * this shim independent of NVK's configured heap percentage and its budget
+ * calculation: those values are reported from Vulkan at runtime instead. */
 static uint64_t nvk_reported_physical_bytes(void) {
   return (uint64_t)GPU_RESERVE_MB * 2u * 1024u * 1024u;
 }
@@ -117,22 +110,14 @@ long sysconf(int name) {
     const uint64_t bytes = nvk_reported_physical_bytes();
     const long pages = bytes >= 4096 ? (long)(bytes / 4096) : -1L;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-    /* Once: distinguish the intentional sysconf sizing hint from actual
-     * process use so device logs do not mistake it for total console RAM. */
+    /* Once: identify this value as a sizing hint, not total console RAM or a
+     * measurement of the VkMemoryHeap NVK creates from it. */
     static int logged;
     if (!logged) {
       logged = 1;
-      uint64_t used = 0;
-      (void)svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
-      const int pct = bytes <= 1024ull * 1024 * 1024 ? 25
-                    : bytes <= 4096ull * 1024 * 1024 ? 50 : 75;
-      vk_diag_note("sysconf(_SC_PHYS_PAGES): reported=%llu MiB used=%llu MiB "
-                   "-> %ld pages; NVK heap = %d%% = %llu MiB; "
-                   "GPU_RESERVE_MB=%u",
-                   (unsigned long long)(bytes >> 20),
-                   (unsigned long long)(used >> 20),
-                   pages, pct,
-                   (unsigned long long)((bytes * pct / 100) >> 20),
+      vk_diag_note("sysconf(_SC_PHYS_PAGES): hint=%llu MiB (%ld pages), "
+                   "not total RAM; GPU_RESERVE_MB=%u",
+                   (unsigned long long)(bytes >> 20), pages,
                    (unsigned)GPU_RESERVE_MB);
     }
 #endif

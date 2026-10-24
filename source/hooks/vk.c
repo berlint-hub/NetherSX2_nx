@@ -5,13 +5,11 @@
  *   2. vkQueuePresentKHR         -> count presented frames (main.c's liveness /
  *                                   CPU-boost-off trigger; the GL swap counter
  *                                   never moves on the Vulkan path).
- *   3. vkGetPhysicalDeviceMemoryProperties2 -> report the full heap as the
- *                                   VK_EXT_memory_budget budget. NVK reports the
- *                                   free-system-memory figure, which our newlib
- *                                   heap has eaten; VMA then believes it is over
- *                                   budget and refuses EVERY allocation without
- *                                   calling Vulkan -> the GS spins in bad_alloc
- *                                   and the screen stays black. This is the fix.
+ *   3. vkGetPhysicalDeviceMemoryProperties2 -> clamp each reported
+ *                                   VK_EXT_memory_budget budget to at least its
+ *                                   corresponding Vulkan heap size. Diagnostic
+ *                                   builds log NVK's value before the clamp and
+ *                                   the value exposed to the core afterward.
  * Plus vkCreateInstance / vkEnumerateInstanceExtensionProperties, which swap the
  * core's VK_KHR_android_surface for NVK's real VK_NN_vi_surface.
  *
@@ -2013,7 +2011,9 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   return vkQueuePresentKHR_native(q, pi);
 }
 
-// memory-budget override (the black-screen fix -- see file header).
+// Memory-budget override: expose at least the full heap to clients. In
+// diagnostic builds, capture the actual NVK heap/budget and the post-clamp
+// budget once; do not duplicate NVK's heap or budget calculations here.
 static PFN_vkGetPhysicalDeviceMemoryProperties2 real_memprops2 = NULL;
 static void VKAPI_CALL
 vkGetPhysicalDeviceMemoryProperties2_shim(VkPhysicalDevice pd,
@@ -2025,10 +2025,35 @@ vkGetPhysicalDeviceMemoryProperties2_shim(VkPhysicalDevice pd,
     if (p->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT)
       continue;
     VkPhysicalDeviceMemoryBudgetPropertiesEXT *b = (void *)p;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+    const VkDeviceSize nvk_budget0 = heaps ? b->heapBudget[0] : 0;
+#endif
     for (uint32_t i = 0; i < heaps && i < VK_MAX_MEMORY_HEAPS; i++) {
       VkDeviceSize heap = props->memoryProperties.memoryHeaps[i].size;
       if (b->heapBudget[i] < heap) b->heapBudget[i] = heap;
     }
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+    static Mutex log_once_mutex;
+    static int logged;
+    mutexLock(&log_once_mutex);
+    const int log_this_call = !logged;
+    logged = 1;
+    mutexUnlock(&log_once_mutex);
+    if (log_this_call) {
+      const VkDeviceSize heap0 = heaps ? props->memoryProperties.memoryHeaps[0].size : 0;
+      const VkDeviceSize shim_budget0 = heaps ? b->heapBudget[0] : 0;
+      vk_diag_note("vkGetPhysicalDeviceMemoryProperties2: heaps=%u "
+                   "heap0=%llu bytes (%llu MiB) NVK_budget0=%llu bytes "
+                   "(%llu MiB) shim_budget0=%llu bytes (%llu MiB)",
+                   heaps,
+                   (unsigned long long)heap0,
+                   (unsigned long long)(heap0 >> 20),
+                   (unsigned long long)nvk_budget0,
+                   (unsigned long long)(nvk_budget0 >> 20),
+                   (unsigned long long)shim_budget0,
+                   (unsigned long long)(shim_budget0 >> 20));
+    }
+#endif
   }
 }
 

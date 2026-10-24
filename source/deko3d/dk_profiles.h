@@ -37,12 +37,16 @@ inline constexpr uint32_t Host3668[]{
 // applies all of them at load time. That is the path this table was written
 // for; the baked cores merely had it applied ahead of time.
 //
-// Verified against the spinrelax image: sha256 b2dd3b6b...535c5f01, GSDevice
-// vtable 29/29 slots and HostDisplay vtable 31/31 slots match the arrays above, and
-// none of the five Tegra patch sites collides with a profile offset or a vtable
-// slot. Its 338 dynamic imports are the same set the baked core had, all of
-// them resolved by source/imports.c, and it still imports AAudio (20 symbols,
-// no OpenSL ES), so source/aaudio.c is the audio path.
+// CI verifies this image's SHA-256 and all GSDevice/HostDisplay vtable slots
+// against this profile; none of the five Tegra patch sites collides with a
+// profile offset or vtable slot. Its 338 dynamic imports are the same set the
+// baked core had, all resolved by source/imports.c, and it still imports AAudio
+// (20 symbols, no OpenSL ES), so source/aaudio.c is the audio path.
+//
+// dk_install_native_backend() uses this profile for its runtime hash/vtable
+// check only when the Deko3D backend is installed. The shipped Vulkan build
+// does not call that function: its selected-core hash/profile validation is a
+// CI check, not a Vulkan device-runtime check.
 //
 // Profile3668 is retained because dk_core.cpp selects between the two at
 // runtime, but no 3668 core ships: the product is Vulkan-only with a single
