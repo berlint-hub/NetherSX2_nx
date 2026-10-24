@@ -1607,28 +1607,25 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_status("State loaded");
           return true;
         case QUICK_ITEM_SAVE_STATE:
-          /* Remove the in-game quick-menu OSD and restore the user's OSD
-           * preference before starting the asynchronous save. The save worker
-           * serializes GS state; leaving our overlay active can race that
-           * snapshot. Do not call any OSD/JNI method after saveStateSlot starts. */
+          /* Match the upstream call order: queue the core save while its GS/OSD
+           * configuration is still unchanged, then close the wrapper menu. The
+           * close path may restore OsdShowMessages and call applySettings(); doing
+           * that before saveStateSlot can reorder a GS reconfiguration ahead of
+           * the asynchronous state snapshot. */
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: clearing quick-menu OSD before save; restore_messages=%d",
+                      "slot %d: calling saveStateSlot before closing quick menu; restore_messages=%d",
                       g_quick_menu_slot, g_quick_menu_restore_messages);
-          quick_menu_close();
-          corelog_log(CORELOG_INFO, "SaveState", "slot %d: calling saveStateSlot",
-                      g_quick_menu_slot);
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: saveStateSlot returned; overlay was closed first",
+                      "slot %d: saveStateSlot returned; now closing quick menu",
                       g_quick_menu_slot);
+          quick_menu_close();
+          quick_menu_status("Saving state...");
           g_quick_menu_save_pending = 1;
           g_quick_menu_save_hold_polls = QUICK_MENU_SAVE_QUIET_POLLS;
           corelog_log(CORELOG_INFO, "SaveState",
                       "slot %d: host input/poll loop paused for %u polls",
                       g_quick_menu_slot, QUICK_MENU_SAVE_QUIET_POLLS);
-          /* Do not post an OSD status or call another JNI entrypoint while the
-           * queued save is starting. The menu is already closed and the original
-           * OSD preference has been restored. */
           return true;
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
