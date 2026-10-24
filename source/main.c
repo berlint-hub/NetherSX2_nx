@@ -1677,7 +1677,37 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           g_quick_menu_savestate_polls = 0;
           imports_savestate_watch_begin();
           g_quick_menu_savestate_pending = 1;
+
+          /* The input/quick-menu thread normally lives on the background core
+           * (core 3 on the four-core grant). Try the JNI save request itself on
+           * the EE core instead, then restore this thread's exact prior mask.
+           * The core may still enqueue serialization onto its VM thread; this
+           * experiment distinguishes caller-side affinity from that worker. */
+          s32 save_old_preferred_core = -1;
+          u64 save_old_affinity_mask = 0;
+          const bool save_have_old_affinity = R_SUCCEEDED(
+              svcGetThreadCoreMask(&save_old_preferred_core,
+                                   &save_old_affinity_mask,
+                                   CUR_THREAD_HANDLE));
+          const bool save_pinned_to_ee = save_have_old_affinity &&
+              R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u));
+          corelog_log(CORELOG_INFO, "SaveState",
+                      "slot %d: saveStateSlot caller affinity -> core 0: %s (old preferred=%d mask=0x%llx)",
+                      g_quick_menu_slot, save_pinned_to_ee ? "pinned" : "failed",
+                      save_old_preferred_core,
+                      (unsigned long long)save_old_affinity_mask);
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
+          if (save_pinned_to_ee && save_have_old_affinity) {
+            const Result save_restore_result = svcSetThreadCoreMask(
+                CUR_THREAD_HANDLE, save_old_preferred_core,
+                save_old_affinity_mask);
+            corelog_log(CORELOG_INFO, "SaveState",
+                        "slot %d: restored save caller affinity: %s (preferred=%d mask=0x%llx)",
+                        g_quick_menu_slot,
+                        R_SUCCEEDED(save_restore_result) ? "ok" : "failed",
+                        save_old_preferred_core,
+                        (unsigned long long)save_old_affinity_mask);
+          }
           quick_menu_status("Saving state...");
           return true;
         }
