@@ -66,10 +66,11 @@ NXVK_PKG_CONFIG ?= $(PREFIX)pkg-config
 # reproducible test candidate; hardware validation is still required before a
 # release recommendation. Override with NXVK_EXPECTED_SHA256= to test another.
 # Current tarball: TEST3 branch arena/8b264db8-test3 at
-# 4c23955060cde768ec16e25062b78ae890e21b58. Pin the SHA256 of the tarball
-# itself (not the enclosing GitHub Actions artifact ZIP); refresh it whenever
-# TEST3 updates the NXVK package. Hardware validation is still required.
-NXVK_EXPECTED_SHA256 ?= 87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51
+# 0f5878e08cd37dd25b23ba5e090ae5c292560eca (NXVK source d6dcd9fb, run
+# 40103062558). SHA256 is computed from the tarball itself, not the enclosing
+# Actions artifact ZIP; refresh both this pin and TEST3_COMMIT in CI together.
+# Hardware validation is still required.
+NXVK_EXPECTED_SHA256 ?= c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74
 ifneq ($(strip $(MESA_SDK_ROOT)),)
 ifneq ($(RENDERER),DK)
 DEFINES += -DUSE_UNIFIED_MESA

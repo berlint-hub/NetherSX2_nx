@@ -80,7 +80,11 @@
 
 This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The IPC/shared-memory publication has now been confirmed on-device; actual panel response should still be confirmed separately. The build does not establish RAM-bandwidth gains from the spinrelax core/NXVK combination.
 
-## Review against the pinned NXVK package (2026-10-24)
+## Superseded review of the previous NXVK pin (2026-10-24)
+
+The following review records the earlier 9786622 package and 2048 MiB reserve
+candidate only. Its low-latency and reserve conclusions are superseded by the
+current follow-up at the end of this file.
 
 ### Inputs and verification boundary
 
@@ -108,3 +112,24 @@ This is the Vulkan/NVK production build. It keeps the previously implemented PAL
 - GitHub Actions run `40102246846` for commit `9a7cfac649f61fb4dc60db1321f705215e5dc556` passed both `host-tests` and the Switch build with the new 2048 MiB Vulkan reserve: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40102246846
 - Artifacts from run `40102246846`: `nethersx2-switch` ID `12563212820` (43,600,414 bytes) and `nethersx2-vk-link-map` ID `12563521922` (742,331 bytes).
 - The pre-change GPU-reserve baseline is hardware-verified (`heap ready mb=2908`), but operation after the 2048 MiB reserve change is not yet verified on device. Effective low-latency mode and shader-cache persistence/performance are also unverified. The exact pinned source makes the low-latency override explicit; software-only CI cannot establish tearing or panel behavior.
+
+## Current follow-up: NXVK low-latency WSI and memory sizing (2026-10-24)
+
+### Pinned build inputs
+
+- TEST3 branch `arena/8b264db8-test3` is pinned at commit `0f5878e08cd37dd25b23ba5e090ae5c292560eca`. That commit adds the updated NXVK tarball; the same tree supplies `assets_4248/` and `4248/arm64-v8a/libemucore_tegrax1_spinrelax.so`.
+- The package tarball SHA-256 is `c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74`, computed over the tarball in the TEST3 git tree (not the Actions ZIP). Its `BUILDINFO.txt` identifies NXVK source commit `d6dcd9fb860e398abb8081bc5d23c38d4162052e`, Mesa 26.2.2, and package run `40103062558`. That run completed successfully, including its Switch cross-build and tests.
+- The selected spinrelax core SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`. Its profile hash and vtable checks are set to this image.
+
+### Findings and changes
+
+- **P0 #1 — low latency:** inspected `wsi_switch.c` from the package's exact source commit. The low-latency WSI keeps a supported MAILBOX or IMMEDIATE request, and falls back to MAILBOX for FIFO/unknown requests. Its low-latency path creates 2 images and maps FIFO→interval 1, IMMEDIATE→0, MAILBOX→0. The default 3-image path stays unchanged; default MAILBOX remains interval 1. README now warns that interval zero can tear and that two images can expose hitches previously hidden by the third image. This is source/build validation, not device proof.
+- **P0 #3 — GPU heap hint:** `GPU_RESERVE_MB` is restored to 1024 MiB; newlib heap size is not reduced. `sysconf(_SC_PHYS_PAGES)` now reports `2 * GPU_RESERVE_MB` (2048 MiB), so NXVK's 50% heuristic projects a 1024 MiB heap matching the unmapped reserve. Diagnostic output labels this `reported=2048 MiB` rather than implying it is actual total system memory. The earlier `heap ready mb=2908` is expected to remain unchanged, but only a new device run can confirm both values.
+- Removed the store that zeroed `vk_low_latency_cached` when display sync activates. The suppression flag still disables the wrapper's wall-clock pacer and stays latched, while the startup `NVK_LOW_LATENCY=1` environment remains intact for a later swapchain recreation.
+- NetherSX2 CI is now pinned to the TEST3 commit and tarball hash above, and takes the spinrelax core plus assets from the same commit. The README describes the new WSI behavior and memory hint.
+
+### Device-validation boundary
+
+- No device A/B was available for this update. Do not claim the interval-zero WSI log, `heap ready mb=2908` after the change, `NVK heap = 50% = 1024 MiB`, performance counters, tearing tolerance, or shader-cache warm reuse as verified.
+- For the requested low-latency A/B, set `Wrapper/AutoSyncFPSLocker = false` and `EmuCore/GS/low_latency = 1`; capture the `nvk wsi: low-latency on, ... swap interval 0` line, `perf: pace_hz=... skipped=... late=...`, first/second-start cache entry counts, and `sysconf(_SC_PHYS_PAGES)`, `heap ready mb=`, and NVK heap lines. Observe whether tearing is tolerable. These are still required to close P0 #1/#3 and P1 cache verification.
+- Savestate and audio code were not changed or investigated.

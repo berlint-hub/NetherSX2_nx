@@ -260,7 +260,6 @@ static int vk_low_latency_enabled(void) {
   if (saltysd_display_sync_active()) {
     __atomic_store_n(&vk_display_sync_suppressed_low_latency, 1,
                      __ATOMIC_RELEASE);
-    __atomic_store_n(&vk_low_latency_cached, 0, __ATOMIC_RELEASE);
     return 0;
   }
   /* Once a swapchain has been handed to display sync, do not re-enable a
@@ -284,8 +283,9 @@ static uint64_t low_latency_period_ns(void) {
 /* Sleep only when the current frame can still meet its panel deadline. Once a
  * vblank has passed, waiting for the following one adds a whole refresh period
  * to an already-late frame (about 18 ms at 50 Hz), which turns brief overload
- * into a sustained low-FPS cadence. The wrapper requests IMMEDIATE when exposed;
- * the currently pinned NVK low-latency WSI still overrides that to MAILBOX. */
+ * into a sustained low-FPS cadence. The wrapper requests IMMEDIATE when
+ * available, then FIFO; the pinned low-latency WSI preserves IMMEDIATE and
+ * maps its FIFO fallback to MAILBOX, both at swap interval zero. */
 static uint64_t low_latency_pace_delay_ns(uint64_t now, uint64_t next_vblank,
                                           uint64_t period, uint64_t lead,
                                           unsigned long long *skipped,

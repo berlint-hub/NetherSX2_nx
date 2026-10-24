@@ -181,7 +181,7 @@ jobs:
           # uploaded blob, so cloning only the branch can silently select a
           # newer driver whose SHA does not match this build's Makefile pin.
           TEST3_REF="arena/8b264db8-test3"
-          TEST3_COMMIT="4c23955060cde768ec16e25062b78ae890e21b58"
+          TEST3_COMMIT="0f5878e08cd37dd25b23ba5e090ae5c292560eca"
           git clone --depth 1 --branch "$TEST3_REF" \
             https://github.com/berlint-hub/TEST3.git /tmp/TEST3 \
             || { echo "::error::clone TEST3 selhal (ref $TEST3_REF)"; exit 1; }
@@ -231,13 +231,13 @@ jobs:
             echo "::warning::TEST3 neobsahuje nxvk-vulkan-tegra-x1.tar.gz -> RENDERER=VK se preskoci"
           fi
 
-          # 2) Core + APK assets: use the exact upstream TEST3 inputs requested
-          #    for this build, not the separate spinrelax core variant. Remap them
-          #    into the APK-like tree expected by build_all.sh and the validators.
+          # 2) Core + APK assets: use the requested spinrelax 4248 core and
+          #    Vulkan resources from the same pinned TEST3 commit. Remap them
+          #    into the APK-like tree expected by build_all.sh and validators.
           root="$(dirname "$PWD")"
-          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1.so"
+          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"
           assets="/tmp/TEST3/assets_4248"
-          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1.so"; exit 1; }
+          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"; exit 1; }
           [ -f "$assets/GameIndex.yaml" ] || { echo "::error::TEST3 assets_4248/GameIndex.yaml chybi"; exit 1; }
           [ -s "$assets/shaders/vulkan/tfx.glsl" ] || { echo "::error::TEST3 assets_4248 Vulkan tfx.glsl chybi"; exit 1; }
           mkdir -p "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a"
@@ -521,13 +521,12 @@ jobs:
           # ze se source/corelog.c neskompiloval a core by opet mlcel.
           cored=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "nethersx2-core.log" || true)
           corep=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "nethersx2-core.log" || true)
-          # Dve dalsi diag-only vetve: sysconf(_SC_PHYS_PAGES) vraci
-          # TotalMemorySize misto volneho zbytku (jinak NVK vypocita heap
-          # ~1 MiB a VMA odmitne kazdou alokaci) a diagnosticky build nasilim
-          # zapina logging jadra. Hodnoty pref jsou v obou vetvich tyz literal
-          # "1"/"0", takze je rozlisi jen tyhle formaty.
-          scd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "sysconf(_SC_PHYS_PAGES): total=" || true)
-          scp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sysconf(_SC_PHYS_PAGES): total=" || true)
+          # Dve dalsi diag-only vetve: sysconf(_SC_PHYS_PAGES) vraci sizing hint
+          # 2*GPU_RESERVE_MB (NVK pak z 50% heuristiky odvodí stejnou rezervu),
+          # nikoli skutečnou TotalMemorySize; diagnostický build navíc násilně
+          # zapíná logování jádra. Formát sysconf řádku rozliší pouze diag NRO.
+          scd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "sysconf(_SC_PHYS_PAGES): reported=" || true)
+          scp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sysconf(_SC_PHYS_PAGES): reported=" || true)
           logd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core logging forced on" || true)
           logp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core logging forced on" || true)
           # Pocitadlo sched_yield je za #ifdef NETHERSX2_VK_DIAGNOSTIC, takze
@@ -764,7 +763,7 @@ jobs:
           echo "::notice::VU cycle steal: pref ${vsd}x (diag) / ${vsp}x (produkce), log-format ${vsf}x (produkce)"
           echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
           echo "::notice::sched_yield counter: ${yld}x (diag, ma byt 1) / ${ylp}x (produkce, ma byt 0)"
-          echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-total ${scd}x (diag) / ${scp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
+          echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-hint ${scd}x (diag) / ${scp}x (produkce); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
           if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
             echo "::error::NETHERSX2_VK_DIAGNOSTIC se v diag buildu neprojevilo -- binarka by nelogovala"
             exit 1
@@ -774,7 +773,7 @@ jobs:
             exit 1
           fi
           if [ "$scd" = "0" ] || [ "$logd" = "0" ]; then
-            echo "::error::diag build neobsahuje opravu sysconf (${scd}x) nebo vynucene logovani jadra (${logd}x) -- NVK by dostal ~1 MiB heap a core by opet mlcel"
+            echo "::error::diag build neobsahuje sizing-hint sysconf (${scd}x) nebo vynucene logovani jadra (${logd}x) -- chybi pozadovana diagnosticka cesta"
             exit 1
           fi
           if [ "$regd" = "0" ] || [ "$regp" = "0" ]; then

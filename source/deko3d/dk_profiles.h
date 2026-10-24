@@ -22,9 +22,9 @@ inline constexpr uint32_t Host3668[]{
   0x7daba0,0x7daca0,0x7dad00,0x7dad80,0x7db170,0x7dad90,0x7dae60,0x7daee0,
   0x7daef0,0x7daf00,0x7daf10,0x7db1d0,0x7da800,0x7da9e0,0x7db370,0x7db430,
   0x7daaa0,0x7db270,0x7db2d0,0x7db360,0x2f3e70,0x7db6e0,0x7db890};
-// Profile4248 pins the standard libemucore_tegrax1.so from TEST3: the NetherSX2
-// v2.2n-4248 Tegra X1 core (not the separate spin-relax variant), plus five
-// length-preserving patches taken from mininxd/NetherSX2-patch:
+// Profile4248 pins libemucore_tegrax1_spinrelax.so from TEST3: the NetherSX2
+// v2.2n-4248 Tegra X1 core with the spin-relax variant, plus five length-
+// preserving patches taken from mininxd/NetherSX2-patch:
 // scale-unclamp (drops the 0.5x GS multiplier floor), Full Texture Hash Cache
 // as the default in both the preferences and GSSettings::Load paths, and two
 // preset-reset sites turned into NOPs so applying a performance preset stops
@@ -37,7 +37,7 @@ inline constexpr uint32_t Host3668[]{
 // applies all of them at load time. That is the path this table was written
 // for; the baked cores merely had it applied ahead of time.
 //
-// Verified against the standard image: sha256 be64362a...40fc1b4f, GSDevice
+// Verified against the spinrelax image: sha256 b2dd3b6b...535c5f01, GSDevice
 // vtable 29/29 slots and HostDisplay vtable 31/31 slots match the arrays above, and
 // none of the five Tegra patch sites collides with a profile offset or a vtable
 // slot. Its 338 dynamic imports are the same set the baked core had, all of
@@ -52,7 +52,7 @@ inline constexpr uint32_t Host3668[]{
 // tools/check_deko3d_build.py reads the vtable addresses out of the brace body
 // and any hex literal in there would be parsed as an address.
 inline constexpr CoreProfile Profile4248{
-  "4248", "be64362a525e43e67d2816e60ef197e84b8c82fc2af1655c1504fecc40fc1b4f",
+  "4248", "b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01",
   0xb78a20,0xb7ed58,0x6156b0,0x64ff20,0xc6cb5c0,0xa39200,0xa43400,
   0x78,0x75,2,Device4248,29,Host4248,0x271ce80,0xa38080};
 inline constexpr CoreProfile Profile3668{

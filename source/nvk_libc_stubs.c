@@ -33,7 +33,8 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <signal.h> /* sigset_t */
-#include <switch.h> /* svcGetInfo, InfoType_*, CUR_PROCESS_HANDLE, R_FAILED */
+#include <switch.h> /* svcGetInfo, InfoType_*, CUR_PROCESS_HANDLE */
+#include "config.h" /* GPU_RESERVE_MB */
 
 #ifdef NETHERSX2_VK_DIAGNOSTIC
 #include "hooks/vk.h" /* vk_diag_note; this whole file is the VK link path */
@@ -88,56 +89,20 @@ int getpwuid_r(unsigned int uid, void *pwd, char *buf, unsigned long buflen,
 }
 #endif
 
-/* NOT "unknown". Mesa's os_get_total_physical_memory() is
- * sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE), and nvk_physical_device_create()
- * feeds that through os_get_gpu_heap_size() to size NVK's only memory heap. When
- * it comes back 0 the driver fails with
+/* NVK uses os_get_total_physical_memory() as the input to its heap-size
+ * heuristic. On this port, report twice the memory deliberately left unmapped
+ * by main.c's newlib heap: the pinned NXVK Switch WSI/Mesa build uses the 50%
+ * heuristic for this 2 GiB figure, yielding a 1 GiB VkMemoryHeap when the
+ * configured GPU_RESERVE_MB is 1024. This keeps the heap estimate aligned with
+ * the existing reservation without taking another GiB from newlib.
  *
- *   vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
- *             "Failed to query total system memory")
- *
- * nvk_enumerate_physical_device() propagates that, vk_common_EnumeratePhysicalDevices()
- * returns it verbatim, and the core sees vkEnumeratePhysicalDevices() == -3 with
- * zero adapters -- so GS init dies before vkCreateDevice is ever called. Returning
- * -1 here looked harmless ("Mesa will take its graceful fallback") and instead
- * removed the GPU entirely.
- *
- * The figure has to be TOTAL memory, not the free remainder. _SC_PHYS_PAGES
- * means "total physical pages of the machine" on every POSIX system -- never
- * "pages still free" (that is _SC_AVPHYS_PAGES) -- and on Horizon the two are
- * not even related, because NVK/nvmap allocates through the kernel's nvmap
- * driver rather than out of whatever the process has left unmapped.
- *
- * This first shipped as `TotalMemorySize - UsedMemorySize`, on the reasoning
- * that GPU_RESERVE_MB was left unmapped for exactly this purpose. On device it
- * reported 4 083 712 B -- 3.9 MiB. main.c's reserve is consumed by the core's
- * own svcMapProcessCodeMemory() mappings (PS2 RAM mirrors, recompiler RX
- * caches) long before NVK asks, so the remainder is dust. NVK then sized its
- * one and only memory heap at 25 % of 3.9 MiB = 977 KiB (os_gpu_heap_size_
- * calculate() takes 25 % at or below 1 GiB), VkMemoryHeap::size came out at
- * ~1 MiB, and VMA -- which trusts that number -- refused every allocation the
- * GS asked for. That is the abort() right after swapchain creation.
- *
- * Proof the free remainder is not the limit NVK works under: the nxvk port's
- * own smoke tests declare `__nx_heap_size = 0` (switch/smoke/nvk_harness.h:25),
- * which is libnx's default of taking TotalMemorySize - UsedMemorySize - 2 MiB
- * into the heap -- leaving ~2 MiB free, a smaller remainder than ours. They
- * still allocate a 32 MiB buffer (nvk_b2_flush.c) and hold a 14 MiB allocator
- * arena across 48 rounds (nvk_mem_churn.c) on the same hardware. So heap.size
- * on this port is an advisory figure for the caller, not a budget NVK enforces;
- * reporting the real total keeps VMA willing to ask, and a genuine
- * out-of-memory still surfaces as VK_ERROR_OUT_OF_DEVICE_MEMORY. */
-uint64_t nvk_host_physical_bytes(void) {
-  uint64_t total = 0;
-
-  /* InfoType_TotalMemorySize is what this process may address: on a
-   * full-memory Application that is essentially all of the console's 4 GiB of
-   * unified memory, and in applet mode it is correctly smaller -- which is the
-   * warning main.c already raises. Reading it per call (rather than caching)
-   * keeps nvk_get_sysmem_heap_available()'s VK_EXT_memory_budget reports live. */
-  if (R_FAILED(svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0)))
-    return 0;
-  return total;
+ * This is a targeted Mesa sizing hint, NOT the console's actual physical-memory
+ * total. Do not use it as a general-purpose system-memory query. The former
+ * free-remainder approach reported only a few MiB after svcMapProcessCodeMemory
+ * and made VMA reject allocations; reporting the full console total made NVK's
+ * estimate much larger than the memory explicitly held aside for the GPU. */
+static uint64_t nvk_reported_physical_bytes(void) {
+  return (uint64_t)GPU_RESERVE_MB * 2u * 1024u * 1024u;
 }
 
 long sysconf(int name) {
@@ -149,12 +114,11 @@ long sysconf(int name) {
 #endif
 #ifdef _SC_PHYS_PAGES
   if (name == _SC_PHYS_PAGES) {
-    const uint64_t bytes = nvk_host_physical_bytes();
+    const uint64_t bytes = nvk_reported_physical_bytes();
     const long pages = bytes >= 4096 ? (long)(bytes / 4096) : -1L;
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-    /* Once: NVK re-queries this for every memory-budget report. Both figures
-     * are printed because the gap between them is what broke this -- see
-     * nvk_host_physical_bytes(). */
+    /* Once: distinguish the intentional sysconf sizing hint from actual
+     * process use so device logs do not mistake it for total console RAM. */
     static int logged;
     if (!logged) {
       logged = 1;
@@ -162,12 +126,14 @@ long sysconf(int name) {
       (void)svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
       const int pct = bytes <= 1024ull * 1024 * 1024 ? 25
                     : bytes <= 4096ull * 1024 * 1024 ? 50 : 75;
-      vk_diag_note("sysconf(_SC_PHYS_PAGES): total=%llu MiB used=%llu MiB "
-                   "-> %ld pages; NVK heap = %d%% = %llu MiB",
+      vk_diag_note("sysconf(_SC_PHYS_PAGES): reported=%llu MiB used=%llu MiB "
+                   "-> %ld pages; NVK heap = %d%% = %llu MiB; "
+                   "GPU_RESERVE_MB=%u",
                    (unsigned long long)(bytes >> 20),
                    (unsigned long long)(used >> 20),
                    pages, pct,
-                   (unsigned long long)((bytes * pct / 100) >> 20));
+                   (unsigned long long)((bytes * pct / 100) >> 20),
+                   (unsigned)GPU_RESERVE_MB);
     }
 #endif
     if (pages > 0) return pages;

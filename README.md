@@ -11,7 +11,7 @@ patches it, and runs it inside a minimal Android-like
 environment natively.
 
 Everything ships as a **single `NetherSX2.nro`**: it bundles one emulator core
-(NetherSX2 v2.2n-`4248` with the Tegra X1 patches), the Vulkan/NVK emulator and
+(NetherSX2 v2.2n-`4248` spin-relax core with the Tegra X1 patches), the Vulkan/NVK emulator and
 that build's data files, and extracts them to the SD card at launch. There is no
 core-version setting — the bundle carries exactly one core. An SDL cover-art
 launcher chooses the game and per-game settings, then chainloads the emulator.
@@ -171,17 +171,20 @@ follows the panel with swap interval 1.
 Vulkan low latency is a separate, explicit `EmuCore/GS/low_latency = 1`
 preference; AutoSyncFPSLocker never enables it. Low latency is not compatible
 with display sync: if both are requested, display sync takes precedence and
-NetherSX2 requests FIFO without its wall-clock submit pacer. To use low latency,
-turn off AutoSyncFPSLocker (and any explicit display-sync option). When used on
+NetherSX2 requests FIFO without its wall-clock submit pacer. For a clean A/B,
+set `Wrapper/AutoSyncFPSLocker = false` and manually set
+`EmuCore/GS/low_latency = 1`; AutoSync never enables low latency. When used on
 its own, NetherSX2 requests IMMEDIATE when the surface advertises it, falling
 back to FIFO, exports `NVK_LOW_LATENCY=1` before Vulkan initializes, and
-requests a 2-image swapchain. There is an important limitation in the pinned
-NXVK build: with `NVK_LOW_LATENCY=1`, its WSI code overrides the requested mode
-to MAILBOX. This Switch WSI maps MAILBOX and FIFO to swap interval 1; only
-IMMEDIATE maps to interval 0. Thus the current pinned driver does not actually
-apply the wrapper's IMMEDIATE request or its possible tearing tradeoff. That
-requires an NXVK source/build update; MAILBOX must not be described as
-zero-wait/tearing low latency.
+requests a 2-image swapchain. The pinned NXVK low-latency WSI preserves supported MAILBOX and IMMEDIATE
+requests; it converts a FIFO or unknown request to MAILBOX. The interval mapper
+uses FIFO→1, IMMEDIATE→0, and MAILBOX→0 in low-latency mode (MAILBOX→1 on the
+default path). NetherSX2 requests IMMEDIATE when advertised and falls back to
+FIFO, which the driver converts to MAILBOX at interval zero. Thus the low-latency
+path runs at interval zero with two images. Tearing is
+possible, and the reduced queue depth can expose hitches that a third image
+previously hid. This is opt-in only; the default three-image path and its
+MAILBOX interval behavior are unchanged.
 
 The pinned NXVK WSI chooses the image count itself: 3 in normal mode, 2 when
 `NVK_LOW_LATENCY=1`. It ignores the Vulkan `minImageCount` request, so FPSLocker's
@@ -193,13 +196,14 @@ precedence over the buffer request.
 Three things about the Horizon environment need papering over for the core to
 work at all, all of them in the POSIX shim rather than in the emulator:
 
-- **Memory.** NVK sizes its one `VkMemoryHeap` from `sysconf(_SC_PHYS_PAGES)`,
-  which newlib does not implement. `source/nvk_libc_stubs.c` answers it with
-  `InfoType_TotalMemorySize` — the *total* figure, as `_SC_PHYS_PAGES` means on
-  every POSIX system. Reporting the free remainder instead gives NVK a heap of
-  about 1 MiB (the process has almost nothing left once the newlib heap, the
-  core image and its `svcMapProcessCodeMemory` mappings are in place), and the
-  allocator then refuses everything.
+- **Memory.** NVK sizes its `VkMemoryHeap` using
+  `sysconf(_SC_PHYS_PAGES)`, which newlib does not implement. The Switch shim
+  returns a Mesa-specific sizing hint of `2 * GPU_RESERVE_MB` (2048 MiB with
+  the 1024 MiB Vulkan reserve), not the console's actual physical-page count.
+  The pinned NXVK 50% heap heuristic therefore reports a 1024 MiB NVK heap,
+  matching the memory deliberately left unmapped by the newlib heap without
+  taking another GiB from it. Do not treat this sysconf result as a general
+  system-memory measurement.
 - **CPU topology.** The core links Facebook's `cpuinfo`, which reads
   `/sys/devices/system/cpu/*` and `/proc/cpuinfo`. Horizon has neither, so
   `source/libc_shim.c` serves both from a small synthetic-file table, sized
@@ -292,8 +296,8 @@ names a fault.
 
 The Vulkan log reports unresolved `vkGetInstanceProcAddr` lookups (successful
 lookups are omitted), how many physical devices NVK returned and what they are
-called, and the physical-memory figure NVK sizes its heap from. Routine successful
-queue submits and low-latency fence waits are not logged individually; they are
+called, and the sysconf sizing hint used by NVK's heap heuristic. Routine
+successful queue submits and low-latency fence waits are not logged individually; they are
 aggregated into the periodic performance report. The diagnostic logger flushes
 lines for immediate reading but does not `fsync` each one, avoiding an SD-card
 sync on every Vulkan call. A run whose log ends without `host exiting normally`
@@ -305,9 +309,10 @@ panel sync rate separately from the optional LSFG target; the sync line adds
 pacer wait totals/maxima, skipped refresh deadlines, late submits, and fence wait
 totals/maxima. A missed vblank deadline does not add another full refresh of sleep: the
 software pacer submits the late frame as soon as it can and counts the missed
-refresh. This is not a claim that the pinned NXVK MAILBOX path is interval-zero
-or tear-free; the driver currently maps it to swap interval 1. A hitch line
-includes the pacer and fence time for the worst frame.
+refresh. On the pinned NXVK build, MAILBOX uses interval 0 only in
+`NVK_LOW_LATENCY=1` mode; the default MAILBOX path remains interval 1. Interval
+zero is not vblank-locked or guaranteed tear-free. A hitch line includes the
+pacer and fence time for the worst frame.
 Routine per-submit/per-fence traces are intentionally suppressed:
 
 ```
@@ -374,17 +379,17 @@ accepted as a fallback; it exports the public entry points itself, so the
 CI; CI fails if `berlint-hub/TEST3` serves anything else. The core is pinned in
 `source/deko3d/dk_profiles.h`, with its GSDevice and HostDisplay vtables checked
 against the profile. CI pins `berlint-hub/TEST3` at commit
-`4c23955060cde768ec16e25062b78ae890e21b58` from
-`arena/8b264db8-test3`, and takes both `assets_4248/` and the standard
-`4248/arm64-v8a/libemucore_tegrax1.so` from that exact tree. The core SHA-256 is
-`be64362a525e43e67d2816e60ef197e84b8c82fc2af1655c1504fecc40fc1b4f`; the
-profile validator checks all GSDevice and HostDisplay vtable entries and the
-core hash. The separate spin-relax core variant is not used. The Vulkan asset
-check verifies the required shader files are present and bundled. NXVK remains
-pinned by its tarball SHA-256 (`87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51`);
-its BUILDINFO identifies the exact Mesa build, including Tegra WSI swizzle and
-Horizon cache-worker changes. This combination still requires on-device runtime
-validation.
+`0f5878e08cd37dd25b23ba5e090ae5c292560eca` from `arena/8b264db8-test3`, and
+uses `assets_4248/` plus
+`4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` from that exact tree. The core
+SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`;
+the profile validator checks all GSDevice and HostDisplay vtable entries and
+the core hash. The Vulkan asset check verifies the required shader files are
+present and bundled. NXVK is pinned by its tarball SHA-256
+(`c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74`); its
+BUILDINFO identifies NXVK commit `d6dcd9fb860e398abb8081bc5d23c38d4162052e`,
+Mesa 26.2.2, and build run `40103062558`. This package includes the low-latency
+WSI interval fix. The combination still requires on-device runtime validation.
 
 The core is based on NetherSX2 v2.2n-4248 and includes five length-preserving
 Tegra X1 patches from
