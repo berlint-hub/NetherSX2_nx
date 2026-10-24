@@ -66,19 +66,68 @@ FILE *stderr_ptr = (FILE *)&fake_sF[2][0];
 // it. Everything PCSX2 reports -- Console.Error, Log::Write, the GS init failure
 // reasons -- arrives here, so it goes to DATA_ROOT/nethersx2-core.log instead of
 // into a void. See corelog.c for the buffering and flush policy.
+static volatile int savestate_watch_active;
+static volatile int savestate_watch_result;
+
+void imports_savestate_watch_begin(void) {
+  __atomic_store_n(&savestate_watch_result, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&savestate_watch_active, 1, __ATOMIC_RELEASE);
+}
+
+int imports_savestate_watch_result(void) {
+  return __atomic_load_n(&savestate_watch_result, __ATOMIC_ACQUIRE);
+}
+
+void imports_savestate_watch_end(void) {
+  __atomic_store_n(&savestate_watch_active, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&savestate_watch_result, 0, __ATOMIC_RELAXED);
+}
+
+static void observe_savestate_status(const char *tag, const char *text) {
+  (void)tag; // the unique terminal message can use either Android or PCSX2 tags
+  if (!text || !__atomic_load_n(&savestate_watch_active, __ATOMIC_ACQUIRE))
+    return;
+
+  // saveStateSlot() queues serialization onto the VM thread. Its progress OSD
+  // appears as "Saving state to slot ...", while this completion OSD is emitted
+  // only after the state has actually been written. waitForSaveStateFlush() by
+  // itself is not a VM-queue barrier: the runtime trace showed it return before
+  // even "Saving SPU2". Use the core's terminal status as the synchronization
+  // point, then call the flush barrier for the writer it has now created.
+  if (strstr(text, "State saved to slot "))
+    __atomic_store_n(&savestate_watch_result, 1, __ATOMIC_RELEASE);
+  else if (strstr(text, "Failed to save save state") ||
+           strstr(text, "Error saving state!"))
+    __atomic_store_n(&savestate_watch_result, -1, __ATOMIC_RELEASE);
+}
+
+static void observe_savestate_vlog(const char *tag, const char *fmt, va_list args) {
+  if (!__atomic_load_n(&savestate_watch_active, __ATOMIC_ACQUIRE))
+    return;
+  char text[768];
+  va_list copy;
+  va_copy(copy, args);
+  vsnprintf(text, sizeof(text), fmt ? fmt : "", copy);
+  va_end(copy);
+  observe_savestate_status(tag, text);
+}
+
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
+  observe_savestate_vlog(tag, fmt, args);
   corelog_vlog(prio, tag, fmt, args);
   va_end(args);
   return 0;
 }
 
 static int __android_log_write_fake(int prio, const char *tag, const char *text) {
+  observe_savestate_status(tag, text);
   corelog_text(prio, tag, text);
   return 0;
 }
 static int __android_log_vprint_fake(int prio, const char *tag, const char *fmt, va_list va) {
+  observe_savestate_vlog(tag, fmt, va);
   corelog_vlog(prio, tag, fmt, va);
   return 0;
 }

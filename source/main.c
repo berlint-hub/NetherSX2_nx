@@ -946,6 +946,9 @@ static float g_quick_menu_pal_rate;
 static int g_quick_menu_ee_cycle_rate;
 static int g_quick_menu_ee_cycle_skip;
 static int g_quick_menu_restore_messages;
+static int g_quick_menu_savestate_pending;
+static int g_quick_menu_restore_mtvu_after_save;
+static unsigned g_quick_menu_savestate_polls;
 static int g_quick_menu_ready;
 #ifdef USE_FRAME_GENERATION
 static int g_quick_menu_lsfg_enabled;
@@ -1390,6 +1393,45 @@ static void quick_menu_restore_messages(void) {
   g_quick_menu_restore_messages = 0;
 }
 
+static void quick_menu_poll_savestate(void) {
+  if (!g_quick_menu_savestate_pending)
+    return;
+
+  int result = imports_savestate_watch_result();
+  if (!result && ++g_quick_menu_savestate_polls < 60000) // 120 s at 500 Hz
+    return;
+  const int timed_out = result == 0;
+  if (timed_out) {
+    result = -1;
+    corelog_log(CORELOG_WARN, "SaveState",
+                "slot %d: no terminal core status after 120 s; ending save wait defensively",
+                g_quick_menu_slot);
+  }
+
+  // The core's terminal status means VM-thread serialization has finished. Only
+  // now is waitForSaveStateFlush meaningful, and only after it returns may an
+  // applySettings call rebuild CPU/GS configuration without racing the save.
+  corelog_log(CORELOG_INFO, "SaveState",
+              "slot %d: core reported %s; waiting for writer flush",
+              g_quick_menu_slot, result > 0 ? "save complete" : "save failure");
+  nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
+  imports_savestate_watch_end();
+
+  if (g_quick_menu_restore_mtvu_after_save) {
+    prefs_set_bool("EmuCore/Speedhacks/vuThread", true);
+    nl.applySettings(fake_env, NATIVE_CLASS);
+    corelog_log(CORELOG_INFO, "SaveState",
+                "slot %d: MTVU preference restored after terminal status and flush",
+                g_quick_menu_slot);
+  }
+  g_quick_menu_restore_mtvu_after_save = 0;
+  quick_menu_restore_messages();
+  g_quick_menu_savestate_pending = 0;
+  g_quick_menu_savestate_polls = 0;
+  quick_menu_status(result > 0 ? "State saved" :
+                     (timed_out ? "Save status timed out" : "Save state failed"));
+}
+
 static void quick_menu_close(void) {
   quick_menu_message("nethersx2_quick_menu", "", 0.01f);
   g_quick_menu_mode = QUICK_MENU_CLOSED;
@@ -1540,6 +1582,11 @@ static bool quick_menu_store_binding(const char *token) {
 }
 
 static bool quick_menu_update(u64 down, u64 pressed) {
+  if (g_quick_menu_savestate_pending) {
+    quick_menu_poll_savestate();
+    return true;
+  }
+
   const bool chord = (pressed & HidNpadButton_Plus) &&
                      (down & HidNpadButton_L) && (down & HidNpadButton_R);
   if (g_quick_menu_mode == QUICK_MENU_CLOSED) {
@@ -1608,14 +1655,14 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_status("State loaded");
           return true;
         case QUICK_ITEM_SAVE_STATE: {
-          /* The core warns that MTVU saves may be unstable. Keep the user's
-           * performance setting for gameplay, but ask the running core to apply
-           * MTVU-off only while it serializes this slot. Do not persist the
-           * temporary value: restore the in-memory preference before any save. */
+          /* MTVU saves may be unstable, so quiesce it only for this operation.
+           * Keep both MTVU and OSD settings deferred until the core's terminal
+           * "State saved to slot" status arrives; waitForSaveStateFlush alone
+           * returned before VM-thread serialization even reached SPU2/GS. */
           const bool restore_mtvu =
               prefs_get_bool("EmuCore/Speedhacks/vuThread", true);
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: hide quick-menu overlay; temporary MTVU quiesce=%d, defer OSD restore=%d",
+                      "slot %d: begin async save; temporary MTVU quiesce=%d, defer OSD restore=%d",
                       g_quick_menu_slot, restore_mtvu, g_quick_menu_restore_messages);
           quick_menu_message("nethersx2_quick_menu", "", 0.01f);
           g_quick_menu_mode = QUICK_MENU_CLOSED;
@@ -1623,31 +1670,15 @@ static bool quick_menu_update(u64 down, u64 pressed) {
             prefs_set_bool("EmuCore/Speedhacks/vuThread", false);
             nl.applySettings(fake_env, NATIVE_CLASS);
             corelog_log(CORELOG_INFO, "SaveState",
-                        "slot %d: applySettings returned with MTVU disabled for serialization",
+                        "slot %d: MTVU disabled for serialization",
                         g_quick_menu_slot);
           }
+          g_quick_menu_restore_mtvu_after_save = restore_mtvu;
+          g_quick_menu_savestate_polls = 0;
+          imports_savestate_watch_begin();
+          g_quick_menu_savestate_pending = 1;
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
-          /* saveStateSlot queues work onto the VM thread. Calling the flush
-           * barrier immediately can return before that work has created its
-           * asynchronous writer (observed: flush returned before "Saving SPU2").
-           * Keep MTVU quiesced through the serialization and flush. */
-          svcSleepThread(UINT64_C(100000000));
-          corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: save queued; grace period elapsed, waiting for flush",
-                      g_quick_menu_slot);
-          nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
-          if (restore_mtvu) {
-            prefs_set_bool("EmuCore/Speedhacks/vuThread", true);
-            nl.applySettings(fake_env, NATIVE_CLASS);
-            corelog_log(CORELOG_INFO, "SaveState",
-                        "slot %d: MTVU preference restored after serialization",
-                        g_quick_menu_slot);
-          }
-          corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: save flush returned; restoring quick-menu settings",
-                      g_quick_menu_slot);
-          quick_menu_restore_messages();
-          quick_menu_status("State saved");
+          quick_menu_status("Saving state...");
           return true;
         }
         case QUICK_ITEM_CHANGE_DISC:
