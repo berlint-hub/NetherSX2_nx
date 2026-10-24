@@ -942,9 +942,6 @@ static int g_quick_menu_ee_cycle_rate;
 static int g_quick_menu_ee_cycle_skip;
 static int g_quick_menu_restore_messages;
 static int g_quick_menu_ready;
-static int g_quick_menu_save_pending;
-static unsigned g_quick_menu_save_hold_polls;
-#define QUICK_MENU_SAVE_QUIET_POLLS 500
 #ifdef USE_FRAME_GENERATION
 static int g_quick_menu_lsfg_enabled;
 #endif
@@ -1380,15 +1377,18 @@ static void quick_menu_draw_capture(void) {
   quick_menu_message("nethersx2_quick_menu", text, 3600.0f);
 }
 
+static void quick_menu_restore_messages(void) {
+  if (!g_quick_menu_restore_messages) return;
+  prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
+  prefs_save_display_sync_safe();
+  nl.applySettings(fake_env, NATIVE_CLASS);
+  g_quick_menu_restore_messages = 0;
+}
+
 static void quick_menu_close(void) {
   quick_menu_message("nethersx2_quick_menu", "", 0.01f);
   g_quick_menu_mode = QUICK_MENU_CLOSED;
-  if (g_quick_menu_restore_messages) {
-    prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
-    prefs_save_display_sync_safe();
-    nl.applySettings(fake_env, NATIVE_CLASS);
-    g_quick_menu_restore_messages = 0;
-  }
+  quick_menu_restore_messages();
 }
 
 static void quick_menu_open(void) {
@@ -1542,10 +1542,6 @@ static bool quick_menu_update(u64 down, u64 pressed) {
     quick_menu_open();
     return true;
   }
-  /* During the diagnostic save quiet window, keep input routed away from the
-   * game and do not execute any quick-menu operations. The host loop itself is
-   * parked for the window below, so this is only a defensive fallback. */
-  if (g_quick_menu_save_pending) return true;
   if (chord) {
     quick_menu_close();
     return true;
@@ -1607,25 +1603,24 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_status("State loaded");
           return true;
         case QUICK_ITEM_SAVE_STATE:
-          /* Match the upstream call order: queue the core save while its GS/OSD
-           * configuration is still unchanged, then close the wrapper menu. The
-           * close path may restore OsdShowMessages and call applySettings(); doing
-           * that before saveStateSlot can reorder a GS reconfiguration ahead of
-           * the asynchronous state snapshot. */
+          /* The core saves asynchronously. Close only the wrapper overlay first,
+           * but defer restoring OsdShowMessages (which calls applySettings and
+           * rebuilds GS configuration) until the core confirms the save is flushed. */
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: calling saveStateSlot before closing quick menu; restore_messages=%d",
+                      "slot %d: hide quick-menu overlay; defer settings restore=%d",
                       g_quick_menu_slot, g_quick_menu_restore_messages);
+          quick_menu_message("nethersx2_quick_menu", "", 0.01f);
+          g_quick_menu_mode = QUICK_MENU_CLOSED;
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: saveStateSlot returned; now closing quick menu",
+                      "slot %d: saveStateSlot returned; waiting for save flush",
                       g_quick_menu_slot);
-          quick_menu_close();
-          quick_menu_status("Saving state...");
-          g_quick_menu_save_pending = 1;
-          g_quick_menu_save_hold_polls = QUICK_MENU_SAVE_QUIET_POLLS;
+          nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: host input/poll loop paused for %u polls",
-                      g_quick_menu_slot, QUICK_MENU_SAVE_QUIET_POLLS);
+                      "slot %d: save flush returned; restoring quick-menu settings",
+                      g_quick_menu_slot);
+          quick_menu_restore_messages();
+          quick_menu_status("State saved");
           return true;
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
@@ -2389,18 +2384,6 @@ int main(void) {
   while (applet_running && !g_quick_menu_exit_requested) {
     if (crash_in_progress())
       for (;;) svcSleepThread(1000000000ULL);
-
-    if (g_quick_menu_save_hold_polls > 0) {
-      --g_quick_menu_save_hold_polls;
-      svcSleepThread(input_poll_interval_ns);
-      ++input_polls;
-      continue;
-    }
-    if (g_quick_menu_save_pending) {
-      g_quick_menu_save_pending = 0;
-      corelog_log(CORELOG_INFO, "SaveState",
-                  "host input/poll loop resumed after diagnostic quiet window");
-    }
 
     if ((input_polls % housekeeping_divisor) == 0) {
       applet_running = appletMainLoop();
