@@ -126,6 +126,10 @@ def verify_bundle(nro, workspace, cores):
         expected[f"cores/emucore_{version}.so"] = core
         assets = cores / f"NetherSX2-v2.2n-{version}/assets"
         expected[f"res/{version}/GameIndex.yaml"] = assets / "GameIndex.yaml"
+        # FXAA is loaded at runtime through the core's replaced GSDevice slot.
+        # Verify its source asset too, so the menu toggle cannot pass CI while
+        # failing on first use because the shader was omitted from the bundle.
+        expected[f"res/{version}/shaders/common/fxaa.fx"] = assets / "shaders/common/fxaa.fx"
         vulkan_shaders = sorted((assets / "shaders/vulkan").glob("*.glsl"))
         if not vulkan_shaders:
             raise ValueError(f"No Vulkan GLSL assets found under {assets / 'shaders/vulkan'}")

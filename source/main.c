@@ -1607,31 +1607,49 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_close();
           quick_menu_status("State loaded");
           return true;
-        case QUICK_ITEM_SAVE_STATE:
-          /* The core saves asynchronously. Close only the wrapper overlay first,
-           * but defer restoring OsdShowMessages (which calls applySettings and
-           * rebuilds GS configuration) until the core confirms the save is flushed. */
+        case QUICK_ITEM_SAVE_STATE: {
+          /* The core warns that MTVU saves may be unstable. Keep the user's
+           * performance setting for gameplay, but ask the running core to apply
+           * MTVU-off only while it serializes this slot. Do not persist the
+           * temporary value: restore the in-memory preference before any save. */
+          const bool restore_mtvu =
+              prefs_get_bool("EmuCore/Speedhacks/vuThread", true);
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: hide quick-menu overlay; defer settings restore=%d",
-                      g_quick_menu_slot, g_quick_menu_restore_messages);
+                      "slot %d: hide quick-menu overlay; temporary MTVU quiesce=%d, defer OSD restore=%d",
+                      g_quick_menu_slot, restore_mtvu, g_quick_menu_restore_messages);
           quick_menu_message("nethersx2_quick_menu", "", 0.01f);
           g_quick_menu_mode = QUICK_MENU_CLOSED;
+          if (restore_mtvu) {
+            prefs_set_bool("EmuCore/Speedhacks/vuThread", false);
+            nl.applySettings(fake_env, NATIVE_CLASS);
+            corelog_log(CORELOG_INFO, "SaveState",
+                        "slot %d: applySettings returned with MTVU disabled for serialization",
+                        g_quick_menu_slot);
+          }
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
           /* saveStateSlot queues work onto the VM thread. Calling the flush
            * barrier immediately can return before that work has created its
            * asynchronous writer (observed: flush returned before "Saving SPU2").
-           * Give the VM a short scheduling window, then wait for any writer. */
+           * Keep MTVU quiesced through the serialization and flush. */
           svcSleepThread(UINT64_C(100000000));
           corelog_log(CORELOG_INFO, "SaveState",
                       "slot %d: save queued; grace period elapsed, waiting for flush",
                       g_quick_menu_slot);
           nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
+          if (restore_mtvu) {
+            prefs_set_bool("EmuCore/Speedhacks/vuThread", true);
+            nl.applySettings(fake_env, NATIVE_CLASS);
+            corelog_log(CORELOG_INFO, "SaveState",
+                        "slot %d: MTVU preference restored after serialization",
+                        g_quick_menu_slot);
+          }
           corelog_log(CORELOG_INFO, "SaveState",
                       "slot %d: save flush returned; restoring quick-menu settings",
                       g_quick_menu_slot);
           quick_menu_restore_messages();
           quick_menu_status("State saved");
           return true;
+        }
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
           quick_menu_refresh_discs();
