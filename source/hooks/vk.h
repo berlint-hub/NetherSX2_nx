@@ -30,6 +30,8 @@ extern volatile int vk_present_count;
 // Runtime LSFG control used by the in-game quick menu. Requests are consumed
 // by the presentation thread so LSFG resources are never torn down while a
 // queue submission is still in flight.
+/* Set once on the startup thread before NVK is initialized. */
+void vk_low_latency_configure(int enabled);
 int vk_lsfg_is_available(void);
 int vk_lsfg_is_enabled(void);
 int vk_lsfg_is_high_fps_passthrough(void);

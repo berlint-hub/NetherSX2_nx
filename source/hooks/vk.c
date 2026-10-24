@@ -110,10 +110,12 @@ vk_diag_note(const char *format, ...) {
     vfprintf(file, format, args);
     va_end(args);
     fputc('\n', file);
-    /* Keep diagnostics immediately readable without forcing an SD-card sync
-     * for every Vulkan call. The old per-line fsync made the logger itself a
-     * frame-time workload when verbose submit/fence traces were enabled. */
+    /* Keep routine diagnostics readable without syncing every Vulkan call;
+     * persist errors and unresolved GIPA lookups because they identify failures. */
     fflush(file);
+    if (strstr(format, "error") || strstr(format, "failed") ||
+        strstr(format, "unresolved"))
+      fsync(fileno(file));
   }
   mutexUnlock(&vk_diag_mutex);
 }
@@ -243,18 +245,22 @@ static int lsfg_requested(void) {
 
 static uint64_t lsfg_monotonic_ns(void);
 
-static volatile int vk_low_latency_cached = -1;
+static volatile int vk_low_latency_cached;
 static volatile int vk_display_sync_suppressed_low_latency;
+
+void vk_low_latency_configure(int enabled) {
+  __atomic_store_n(&vk_low_latency_cached, enabled != 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&vk_display_sync_suppressed_low_latency, 0, __ATOMIC_RELEASE);
+}
+
 static int vk_low_latency_enabled(void) {
   /* Display sync needs FIFO's vblank back-pressure. If SaltyNX comes up late,
-   * suppress the explicit pacer before selecting the first swapchain as well. */
+   * suppress the explicit pacer before selecting the first swapchain as well.
+   * NVK_LOW_LATENCY is startup-only: never mutate process environment here. */
   if (saltysd_display_sync_active()) {
-    const int was_suppressed = __atomic_exchange_n(
-        &vk_display_sync_suppressed_low_latency, 1, __ATOMIC_ACQ_REL);
-    const int previous = __atomic_exchange_n(&vk_low_latency_cached, 0,
-                                              __ATOMIC_ACQ_REL);
-    if (!was_suppressed && previous != 0)
-      setenv("NVK_LOW_LATENCY", "0", 1);
+    __atomic_store_n(&vk_display_sync_suppressed_low_latency, 1,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&vk_low_latency_cached, 0, __ATOMIC_RELEASE);
     return 0;
   }
   /* Once a swapchain has been handed to display sync, do not re-enable a
@@ -262,18 +268,7 @@ static int vk_low_latency_enabled(void) {
   if (__atomic_load_n(&vk_display_sync_suppressed_low_latency,
                       __ATOMIC_ACQUIRE))
     return 0;
-  int cached = __atomic_load_n(&vk_low_latency_cached, __ATOMIC_ACQUIRE);
-  if (cached < 0) {
-    const char *configured = getenv("NVK_LOW_LATENCY");
-    const int desired = configured && configured[0] == '1' &&
-                        configured[1] == '\0';
-    int expected = -1;
-    (void)__atomic_compare_exchange_n(&vk_low_latency_cached, &expected,
-                                      desired, false, __ATOMIC_ACQ_REL,
-                                      __ATOMIC_ACQUIRE);
-    cached = __atomic_load_n(&vk_low_latency_cached, __ATOMIC_ACQUIRE);
-  }
-  return cached;
+  return __atomic_load_n(&vk_low_latency_cached, __ATOMIC_ACQUIRE);
 }
 
 static unsigned low_latency_rate_hz(void) {
@@ -289,8 +284,8 @@ static uint64_t low_latency_period_ns(void) {
 /* Sleep only when the current frame can still meet its panel deadline. Once a
  * vblank has passed, waiting for the following one adds a whole refresh period
  * to an already-late frame (about 18 ms at 50 Hz), which turns brief overload
- * into a sustained low-FPS cadence. MAILBOX is specifically useful here: submit
- * the late frame now and let it replace the queued image. */
+ * into a sustained low-FPS cadence. The wrapper requests IMMEDIATE when exposed;
+ * the currently pinned NVK low-latency WSI still overrides that to MAILBOX. */
 static uint64_t low_latency_pace_delay_ns(uint64_t now, uint64_t next_vblank,
                                           uint64_t period, uint64_t lead,
                                           unsigned long long *skipped,
@@ -310,8 +305,8 @@ static uint64_t low_latency_pace_delay_ns(uint64_t now, uint64_t next_vblank,
   return target - now;
 }
 
-/* Present returns quickly with MAILBOX, so pace each GPU submit against the
- * next panel vblank. The existing SaltyNX display-sync query supplies the panel
+/* Pace each GPU submit against the next panel vblank. The existing SaltyNX
+ * display-sync query supplies the panel
  * refresh rate; leave a 2 ms submission lead-in for NVK and the VI queue. */
 static uint64_t low_latency_pace_before_submit(void) {
   if (!vk_low_latency_enabled() || !low_latency_next_vblank_ns)
@@ -375,14 +370,35 @@ static double lsfg_measured_source_fps(void) {
   return 1e9 / lsfg_source_interval_ns;
 }
 
+static volatile int lsfg_fractional_mode_cached = -1;
+static volatile int lsfg_target_fps_cached = -1;
+
 static int lsfg_mode_is_fractional(void) {
-  return !strcmp(prefs_get_string("Wrapper/LSFGMode", "auto"), "fractional");
+  int cached = __atomic_load_n(&lsfg_fractional_mode_cached, __ATOMIC_ACQUIRE);
+  if (cached < 0) {
+    const int value = !strcmp(prefs_get_string("Wrapper/LSFGMode", "auto"),
+                              "fractional");
+    int expected = -1;
+    (void)__atomic_compare_exchange_n(&lsfg_fractional_mode_cached, &expected,
+                                      value, false, __ATOMIC_ACQ_REL,
+                                      __ATOMIC_ACQUIRE);
+    cached = __atomic_load_n(&lsfg_fractional_mode_cached, __ATOMIC_ACQUIRE);
+  }
+  return cached;
 }
 
 static double lsfg_target_fps_pref(void) {
-  int target = prefs_get_int("Wrapper/LSFGTargetFPS", 60);
-  if (target < 30) target = 30;
-  if (target > 120) target = 120;
+  int target = __atomic_load_n(&lsfg_target_fps_cached, __ATOMIC_ACQUIRE);
+  if (target < 0) {
+    target = prefs_get_int("Wrapper/LSFGTargetFPS", 60);
+    if (target < 30) target = 30;
+    if (target > 120) target = 120;
+    int expected = -1;
+    (void)__atomic_compare_exchange_n(&lsfg_target_fps_cached, &expected,
+                                      target, false, __ATOMIC_ACQ_REL,
+                                      __ATOMIC_ACQUIRE);
+    target = __atomic_load_n(&lsfg_target_fps_cached, __ATOMIC_ACQUIRE);
+  }
   return (double)target;
 }
 
@@ -1445,8 +1461,8 @@ vkAcquireNextImageKHR_shim(VkDevice device, VkSwapchainKHR swapchain,
   if (!acquire) return VK_ERROR_INITIALIZATION_FAILED;
   /* Preserve the application's timeout contract. In particular, timeout=0 is
    * an explicit poll: don't wait for the previous frame's fence or turn
-   * VK_NOT_READY into a 50 ms retry loop. MAILBOX plus the next-frame pacing
-   * path already bounds queue depth without blocking a nonblocking acquire. */
+   * VK_NOT_READY into a 50 ms retry loop. The two-image low-latency path plus
+   * next-frame pacing bounds queue depth without blocking a nonblocking acquire. */
   if (timeout != 0)
     low_latency_wait_pending_fence("before-acquire");
 #ifdef NETHERSX2_VK_DIAGNOSTIC
@@ -1520,11 +1536,8 @@ static int vk_low_latency_select_mode(VkSurfaceKHR surface,
     return 0;
   }
   const VkPresentModeKHR preference[] = {
-    VK_PRESENT_MODE_MAILBOX_KHR,
-    /* Keep the On setting tear-free when MAILBOX is unavailable. IMMEDIATE is
-     * an explicit last resort only when the surface exposes no FIFO mode. */
-    VK_PRESENT_MODE_FIFO_KHR,
     VK_PRESENT_MODE_IMMEDIATE_KHR,
+    VK_PRESENT_MODE_FIFO_KHR,
   };
   int found = 0;
   for (unsigned i = 0; i < sizeof(preference) / sizeof(preference[0]); ++i) {
@@ -1852,7 +1865,7 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   uint64_t source_interval = 0;
 
   const int fractional = requested && lsfg_mode_is_fractional();
-  const double target_fps = lsfg_target_fps_pref();
+  const double target_fps = requested ? lsfg_target_fps_pref() : 0.0;
 
   /* FIFO back-pressure invalidates source timing after generation starts: the
    * display saturates, the second present blocks, and the next source present

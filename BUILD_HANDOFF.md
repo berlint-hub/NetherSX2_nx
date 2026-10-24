@@ -79,3 +79,28 @@
 ## Scope
 
 This is the Vulkan/NVK production build. It keeps the previously implemented PAL/NTSC core limits and output-side display-sync behavior. The IPC/shared-memory publication has now been confirmed on-device; actual panel response should still be confirmed separately. The build does not establish RAM-bandwidth gains from the spinrelax core/NXVK combination.
+
+## Review against the pinned NXVK package (2026-10-24)
+
+### Inputs and verification boundary
+
+- The TEST3 archive at commit `4c23955060cde768ec16e25062b78ae890e21b58` was retrieved through the GitHub API. Its SHA-256 is exactly `87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51`, matching `Makefile`; its `BUILDINFO.txt` identifies NXVK source commit `978662247facf1ff30ad8ea6116b96c130602934` (run `39819283724`, Mesa 26.2.2).
+- Source was checked at that exact NXVK commit. `wsi_switch.c` fixes normal/low-latency image counts at 3/2. With `NVK_LOW_LATENCY=1`, its WSI selects MAILBOX regardless of the application's requested `presentMode`; `nwindowSetSwapInterval()` uses 0 only for IMMEDIATE and 1 for both MAILBOX and FIFO. The wrapper can request IMMEDIATE, but that does **not** change the effective mode on this pinned binary. A driver-source change and rebuilt/pinned package are required to finish P0 #1; do not claim it fixed on-device.
+- `disk_cache.c` in the same source commit recognizes `MESA_SHADER_CACHE_DIR` and defaults its maximum to 1 GiB when no override is supplied. The app now supplies an explicit 2 GiB cap. No hardware/cache persistence verification was available.
+- No device log containing `heap ready mb=` was accessible in the workspace during this review. Per instruction, `GPU_RESERVE_MB` remains 1024; no estimate or hardware result is substituted for that missing measurement.
+
+### Changes made
+
+- **P0 #1 — low-latency present mode:** the wrapper now prefers IMMEDIATE, then FIFO, and no longer prefers MAILBOX. The pinned NXVK driver overrides the request to MAILBOX whenever its low-latency environment flag is set, so this is only the correct wrapper request, not a complete runtime fix. A driver patch/rebuild is still required. Hardware verification: **not performed**.
+- **P0 #2 — SaltySD retry:** once legacy SaltySD has been selected, reconnect attempts no longer fall through to the NethFPS port. NethFPS remains attempted only when it is preferred or no endpoint has yet been selected. Host tests/build pending below; no hardware verification claimed.
+- **P0 #3 — GPU reserve:** unchanged at 1024 MiB because no latest `heap ready mb=` device log was available for a safe heap-headroom decision. Hardware verification: **not performed**; do not increase to 2048 MiB from this review alone.
+- **P0 #4 — buffer behavior:** README now documents that pinned NXVK chooses 3 images normally and 2 in its low-latency mode, ignores `minImageCount`, and therefore cannot honor FPSLocker's `SetBuffers`. The wrapper continues to leave `SetBuffers` untouched and report the queried actual count through `Buffers`. Hardware verification: **not performed**.
+- **P1 — shader cache and present hot path:** set `MESA_SHADER_CACHE_DIR=/switch/nethersx2/cache/mesa` and `MESA_SHADER_CACHE_MAX_SIZE=2G` before driver initialization; ensure the cache directory exists. Cache `Wrapper/LSFGMode` and `Wrapper/LSFGTargetFPS`, and skip the target preference lookup when LSFG is disabled. Cache creation/reuse and performance are **not hardware-verified**.
+- **P1 — audio callback:** `DEFAULT_FRAMES_PER_CB` remains 512. The proposed 256-frame reduction was not made because doubled callback frequency could underrun on core 3; it needs an audio stress test on hardware. Hardware verification: **not performed**.
+- **P2 — cleanup/docs:** corrected the application CPU-mask comment to `0xf`/four cores (the `0x7` fallback and applet-specific references remain intentional); removed `setenv("NVK_LOW_LATENCY", ...)` from the present-thread path and initialize the cached setting on startup; added `fsync` only for diagnostic errors/failures/unresolved GIPA lines; documented the intentionally retained ~560-byte `ThreadStart`/fake-TLS allocation; clarified that the app wraps `vkQueuePresentKHR` for its own present counting/cadence measurement while shared-block communication remains the FPSLocker bridge; and aligned `NativeLibrary.initialize()` parameter names with the unchanged call order `(dataDir, cacheDir, deviceName)`. No JNI arguments were reordered. A direct SD listing was unavailable, so whether the core creates any additional device-name directory remains **unverified**.
+- Savestate code/path, AutoSync defaults, FIFO display-sync policy, FPSLocker-owned fields, and the audio callback size were not changed.
+
+### Validation status
+
+- `git diff --check`, host tests, Switch CI build, and hardware smoke tests: **pending** at the time this handoff was written.
+- Hardware verification is unavailable for the GPU-reserve decision, effective low-latency mode, and shader-cache persistence/performance. The exact pinned source makes the current low-latency override explicit; software-only CI cannot establish tearing or panel behavior.

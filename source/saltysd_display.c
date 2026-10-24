@@ -1,7 +1,7 @@
 /* SaltySD bridge for FPSLocker display cadence and Vulkan buffer settings.
- * This process defines Vulkan entry points internally, so NX-FPS's
- * import-replacement hook does not see vkQueuePresentKHR; publish cadence and
- * buffer status through the shared block without hooking the present entry. */
+ * NX-FPS's import-replacement hook does not see this process's internal Vulkan
+ * entry points. NetherSX2 wraps its own present path for frame measurement;
+ * FPSLocker communication/settings remain on the shared-block bridge. */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -176,7 +176,7 @@ static Result saltysd_connect(Handle *session) {
     if (R_SUCCEEDED(legacy))
       return legacy;
   }
-  if (preferred == 1 || preferred == 0 || preferred == 2) {
+  if (preferred == 1 || preferred == 0) {
     nethfps = svcConnectToNamedPort(session, SALTYSD_PORT);
     tried_nethfps = 1;
     __atomic_store_n(&s_nethfps_connect_result, (uint32_t)nethfps,

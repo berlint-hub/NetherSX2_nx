@@ -70,7 +70,7 @@ u32 __nx_nv_transfermem_size = 16 * 1024 * 1024;
 #endif
 
 // Full-memory application, never an applet. Mesa sizes itself from the core mask
-// Horizon grants the process (0x7, three cores) and NVK needs the memory it gets
+// Horizon grants the process (0xf, four cores) and NVK needs the memory it gets
 // only in this applet type; an applet is silently short of both. libnx declares
 // this weak, so a strong definition here pins it.
 // __nx_heap_size is deliberately NOT defined: __libnx_initheap() below replaces
@@ -206,7 +206,7 @@ static void display_sync_restore(void);
 static struct {
   int  (*JNI_OnLoad)(void *vm, void *reserved);
   void (*JNI_OnUnload)(void *vm, void *reserved);
-  jbool(*initialize)(void *env, void *cls, void *ctx, void *dataDir, void *devName, void *cacheDir);
+  jbool(*initialize)(void *env, void *cls, void *ctx, void *dataDir, void *cacheDir, void *deviceName);
   void (*applySettings)(void *env, void *cls);
   jbool(*isBIOSAvailable)(void *env, void *cls);
   void (*setDefaultPadSettings)(void *env, void *cls);
@@ -2071,6 +2071,15 @@ int main(void) {
   // each make their own line durable first.
   corelog_open();
   atexit(corelog_flush);
+#if defined(USE_VULKAN)
+  /* NVK's Mesa disk cache otherwise falls back to its default one-GiB cap and
+   * implicit home-directory discovery, neither of which is appropriate on SD. */
+  (void)mkdir(DATA_ROOT, 0777);
+  (void)mkdir(CACHE_DIR, 0777);
+  (void)mkdir(CACHE_DIR "/mesa", 0777);
+  setenv("MESA_SHADER_CACHE_DIR", CACHE_DIR "/mesa", 1);
+  setenv("MESA_SHADER_CACHE_MAX_SIZE", "2G", 1);
+#endif
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   unlink(DATA_ROOT "/nethersx2-exception.log");
   unlink(DATA_ROOT "/nethersx2-mesa.log");
@@ -2129,6 +2138,7 @@ int main(void) {
   /* NVK reads this during WSI setup. Auto-sync never enables it; when a shared
    * display-sync block is active, display sync takes priority. */
   setenv("NVK_LOW_LATENCY", low_latency ? "1" : "0", 1);
+  vk_low_latency_configure(low_latency ? 1 : 0);
 #endif
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   const bool auto_fpslocker_sync_active =

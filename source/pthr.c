@@ -721,8 +721,10 @@ typedef struct {
   void *arg;
   unsigned debug_id;
   // Inline TLS storage is allocated by the parent and intentionally retained
-  // for the worker's lifetime. The child installs it before calling free/log/
-  // allocator code, avoiding libc work before its RW TLS is valid.
+  // after exit: there is no post-exit reclamation hook in this trampoline.
+  // This costs about 560 bytes per created worker (ThreadStart plus its
+  // 512-byte fake-TLS block). The child
+  // installs it before libc/log/allocator use, while RW TLS is still required.
   uint8_t fake_tls[0x200] __attribute__((aligned(16)));
 } ThreadStart;
 
@@ -771,8 +773,8 @@ static void *thread_trampoline(void *p) {
   void *fake_tls = s->fake_tls;
 
   // Install parent-allocated TLS before free(), logging, or any other libc call
-  // on the new thread. The backing ThreadStart is retained because fake_tls
-  // must remain live until the worker has fully exited.
+  // on the new thread. ThreadStart remains allocated (about 560 bytes) because
+  // fake_tls must remain live until the worker has fully exited.
   armSetTlsRw(fake_tls);
   const int trace = debug_id == 4;
   pthr_bridge4_set_stage(debug_id, 1); // TLS installed

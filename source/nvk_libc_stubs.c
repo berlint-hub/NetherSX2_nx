@@ -9,9 +9,9 @@
  *
  * None of them has a meaning on Horizon: there is one user, no signals, no
  * advisory file locks, no drirc file to parse and no <regex.h>. They only have
- * to exist and behave so Mesa takes its graceful fallbacks -- the shader disk
- * cache stays off unless the app turns it on through MESA_SHADER_CACHE_PATH,
- * which is exactly what switch/docs/bringing-an-application.md documents.
+ * to exist and behave so Mesa takes its graceful fallbacks. The application
+ * explicitly enables the disk cache with MESA_SHADER_CACHE_DIR and sets its
+ * size limit before NVK initializes.
  *
  * Only compiled for the pkg-config link path: the vendored 23-archive tree
  * carries its own stubs for these, so defining them there would collide.
@@ -70,8 +70,8 @@ gid_t getgid(void) { return NVK_FAKE_UID; }
 gid_t getegid(void) { return NVK_FAKE_UID; }
 
 /* Mesa asks for the home directory to place the shader cache. Report "no such
- * user" so it falls back to MESA_SHADER_CACHE_PATH / XDG_CACHE_HOME instead of
- * writing somewhere unintended. */
+ * user" so the explicit MESA_SHADER_CACHE_DIR supplied by main.c is used rather
+ * than writing under an unintended home directory. */
 #ifdef NVK_HAVE_PWD_H
 int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
                struct passwd **result) {

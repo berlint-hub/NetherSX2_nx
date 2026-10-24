@@ -138,14 +138,17 @@ Horizon has no Vulkan loader, that package exports a single entry point,
 `tools/gen_nvk_loader_shim.py`) provides the entry points the wrapper calls by
 forwarding through it, and `source/nvk_libc_stubs.c` supplies the POSIX calls
 Mesa expects that newlib does not have. The SDL launcher uses its own graphics
-runtime and exits before the emulator starts.
+runtime and exits before the emulator starts. NVK's shader disk cache is
+configured at `/switch/nethersx2/cache/mesa` with an explicit 2 GiB cap.
 
 FPSLocker/NX-FPS synchronization is automatic by default when NetherSX2 finds
 its shared block. Set `Wrapper/AutoSyncFPSLocker = false` in `nethersx2.ini` to
 opt out; with this option off, the bridge does not alter FPSLocker target or
-measurement fields. The bridge uses SaltySD's shared block and does not hook
-`vkQueuePresentKHR`, change FPSLocker's `patchApplied`/`FPSmode`, or send IPC
-commands to control the display-sync toggle.
+measurement fields. The bridge communicates through SaltySD's shared block.
+On Vulkan, NetherSX2 wraps its own `vkQueuePresentKHR` entry to count presents
+and measure cadence; this is separate from NX-FPS's import-replacement hook.
+It does not change FPSLocker's `patchApplied`/`FPSmode` or send IPC commands to
+control the display-sync toggle.
 
 The panel-rate request is handheld-only: NetherSX2 writes only `FPSlocked` and
 uses the supported requests 45, 50, 55, and 60 Hz. It never writes
@@ -168,14 +171,24 @@ follows the panel with swap interval 1.
 Vulkan low latency is a separate, explicit `EmuCore/GS/low_latency = 1`
 preference; AutoSyncFPSLocker never enables it. Low latency is not compatible
 with display sync: if both are requested, display sync takes precedence and
-NetherSX2 uses FIFO without its wall-clock submit pacer. To use low latency,
+NetherSX2 requests FIFO without its wall-clock submit pacer. To use low latency,
 turn off AutoSyncFPSLocker (and any explicit display-sync option). When used on
-its own, low latency prefers MAILBOX (falling back to FIFO), exports
-`NVK_LOW_LATENCY=1` before Vulkan initializes, and requests a 2-image swapchain
-when surface limits permit. Low latency takes precedence over FPSLocker's
-buffer-count request. Surface limits can prevent a requested count from being
-applied; NetherSX2 reports the actual swapchain image count back through
-FPSLocker's `Buffers` field.
+its own, NetherSX2 requests IMMEDIATE when the surface advertises it, falling
+back to FIFO, exports `NVK_LOW_LATENCY=1` before Vulkan initializes, and
+requests a 2-image swapchain. There is an important limitation in the pinned
+NXVK build: with `NVK_LOW_LATENCY=1`, its WSI code overrides the requested mode
+to MAILBOX. This Switch WSI maps MAILBOX and FIFO to swap interval 1; only
+IMMEDIATE maps to interval 0. Thus the current pinned driver does not actually
+apply the wrapper's IMMEDIATE request or its possible tearing tradeoff. That
+requires an NXVK source/build update; MAILBOX must not be described as
+zero-wait/tearing low latency.
+
+The pinned NXVK WSI chooses the image count itself: 3 in normal mode, 2 when
+`NVK_LOW_LATENCY=1`. It ignores the Vulkan `minImageCount` request, so FPSLocker's
+`SetBuffers` cannot change the count on this driver. NetherSX2 reads that request
+but leaves `SetBuffers` untouched, queries the actual created image count, and
+reports that value through FPSLocker's `Buffers` field. Low latency takes
+precedence over the buffer request.
 
 Three things about the Horizon environment need papering over for the core to
 work at all, all of them in the POSIX shim rather than in the emulator:
@@ -290,9 +303,11 @@ Every 300 presented frames the diagnostic build writes a compact `perf:` block,
 which turns "it stutters" into a number. The first line also states the detected
 panel sync rate separately from the optional LSFG target; the sync line adds
 pacer wait totals/maxima, skipped refresh deadlines, late submits, and fence wait
-totals/maxima. A missed vblank deadline does not add another full refresh of sleep:
-MAILBOX submits the late frame immediately, and the summary counts the missed
-refresh. A hitch line includes the pacer and fence time for the worst frame.
+totals/maxima. A missed vblank deadline does not add another full refresh of sleep: the
+software pacer submits the late frame as soon as it can and counts the missed
+refresh. This is not a claim that the pinned NXVK MAILBOX path is interval-zero
+or tear-free; the driver currently maps it to swap interval 1. A hitch line
+includes the pacer and fence time for the worst frame.
 Routine per-submit/per-fence traces are intentionally suppressed:
 
 ```
