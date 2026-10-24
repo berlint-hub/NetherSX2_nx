@@ -409,6 +409,10 @@ int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
 // the process.
 static __thread char tls_self_name[16];
 
+const char *pthr_debug_current_name(void) {
+  return tls_self_name[0] ? tls_self_name : "(unnamed)";
+}
+
 // ---------------------------------------------------------------------------
 // per-thread CPU time of the three heavy roles
 //

@@ -302,8 +302,8 @@ corelog_emit_locked(int priority, const char *tag, const char *text) {
  * device abort()'s caller printed as a bare 0x41b1667c68, far outside the core
  * image, and there was no way to tell JIT'd recompiler code from a PS2 RAM
  * mirror from a value that was never a code address at all. */
-static void
-corelog_format_address(char *out, size_t size, const void *address) {
+void
+corelog_describe_address(char *out, size_t size, const void *address) {
   const uintptr_t a = (uintptr_t)address;
   const uintptr_t base = (uintptr_t)emu_mod.load_base;
   char region[160];
@@ -417,7 +417,7 @@ void
 corelog_death(const char *reason, const void *called_from) {
   char where[256];  // room for a libc_shim region description
   char line[CORELOG_LINE];
-  corelog_format_address(where, sizeof(where), called_from);
+  corelog_describe_address(where, sizeof(where), called_from);
 
   mutexLock(&corelog_mutex);
   snprintf(line, sizeof(line), "*** core terminated: %s, called from %s%s%s ***",

@@ -8,6 +8,7 @@
 #define NETHERSX2_CORELOG_H
 
 #include <stdarg.h>
+#include <stddef.h>
 
 // Bionic priorities (android/log.h): 2 VERBOSE, 3 DEBUG, 4 INFO, 5 WARN,
 // 6 ERROR, 7 FATAL. ERROR and above are flushed and fsynced immediately.
@@ -40,5 +41,9 @@ void corelog_death(const char *reason, const void *called_from);
 // marker is needed -- every ERROR and FATAL line reached the card already, since
 // corelog_emit_locked() flushes and fsyncs those as it writes them.
 void corelog_crash_marker(unsigned long long pc, unsigned long long lr);
+
+// Best-effort mapping label for a fault PC/LR (core-relative, JIT, RAM mirror,
+// or unmapped); no locks are taken by the address-region lookup.
+void corelog_describe_address(char *out, size_t size, const void *address);
 
 #endif // NETHERSX2_CORELOG_H

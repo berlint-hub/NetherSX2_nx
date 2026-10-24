@@ -86,6 +86,7 @@ int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
 int pthr_sched_yield(void);
 
 void pthr_ensure_fake_tls(void);
+const char *pthr_debug_current_name(void);
 
 // Number of heavy roles whose CPU time is tracked (EE, GS, MTVU). Outside the
 // diagnostic guard because the slot table itself is always compiled.

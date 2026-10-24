@@ -40,6 +40,7 @@
 #include "../lsfg/lsfg_bridge.h"
 #include "../pthr.h"
 #include "../libc_shim.h"
+#include "../corelog.h"
 
 // The Mesa NVK portlib package (nxvk.pc, built from berlint-hub/nxvk) ships only
 // libnvk.a + libnvk_support.a, and libnvk.a defines exactly one entry point:
@@ -122,17 +123,31 @@ vk_diag_exception(uint64_t pc, uint64_t far, uint32_t esr,
                   uint64_t sp, uint64_t frame_pointer, uint64_t link_register,
                   uint32_t thread_handle, unsigned bridge4_stage,
                   uint32_t bridge4_handle) {
-  char report[512];
+  char pc_map[192], lr_map[192], report[1024];
+  corelog_describe_address(pc_map, sizeof(pc_map), (const void *)(uintptr_t)pc);
+  corelog_describe_address(lr_map, sizeof(lr_map),
+                           (const void *)(uintptr_t)link_register);
+  s32 preferred_core = -1;
+  u64 affinity_mask = 0;
+  const Result affinity_result = svcGetThreadCoreMask(
+      &preferred_core, &affinity_mask, (Handle)thread_handle);
   const int length = snprintf(
       report, sizeof(report),
       "NetherSX2 fatal CPU exception\n"
-      "pc=0x%016llx far=0x%016llx esr=0x%08x\n"
-      "sp=0x%016llx fp=0x%016llx lr=0x%016llx\n"
-      "thread_handle=0x%08x bridge4_stage=%u bridge4_handle=0x%08x\n",
-      (unsigned long long)pc, (unsigned long long)far, esr,
+      "pc=0x%016llx map=%s\n"
+      "far=0x%016llx esr=0x%08x\n"
+      "sp=0x%016llx fp=0x%016llx\n"
+      "lr=0x%016llx map=%s\n"
+      "thread_handle=0x%08x name=%s affinity=%s preferred_core=%d mask=0x%llx\n"
+      "bridge4_stage=%u bridge4_handle=0x%08x\n",
+      (unsigned long long)pc, pc_map,
+      (unsigned long long)far, esr,
       (unsigned long long)sp, (unsigned long long)frame_pointer,
-      (unsigned long long)link_register, thread_handle, bridge4_stage,
-      bridge4_handle);
+      (unsigned long long)link_register, lr_map, thread_handle,
+      pthr_debug_current_name(),
+      R_SUCCEEDED(affinity_result) ? "available" : "unavailable",
+      preferred_core, (unsigned long long)affinity_mask,
+      bridge4_stage, bridge4_handle);
   const int fd = open(DATA_ROOT "/nethersx2-exception.log",
                       O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (fd >= 0) {

@@ -947,7 +947,6 @@ static int g_quick_menu_ee_cycle_rate;
 static int g_quick_menu_ee_cycle_skip;
 static int g_quick_menu_restore_messages;
 static int g_quick_menu_savestate_pending;
-static int g_quick_menu_restore_mtvu_after_save;
 static unsigned g_quick_menu_savestate_polls;
 static int g_quick_menu_ready;
 #ifdef USE_FRAME_GENERATION
@@ -1417,14 +1416,6 @@ static void quick_menu_poll_savestate(void) {
   nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
   imports_savestate_watch_end();
 
-  if (g_quick_menu_restore_mtvu_after_save) {
-    prefs_set_bool("EmuCore/Speedhacks/vuThread", true);
-    nl.applySettings(fake_env, NATIVE_CLASS);
-    corelog_log(CORELOG_INFO, "SaveState",
-                "slot %d: MTVU preference restored after terminal status and flush",
-                g_quick_menu_slot);
-  }
-  g_quick_menu_restore_mtvu_after_save = 0;
   quick_menu_restore_messages();
   g_quick_menu_savestate_pending = 0;
   g_quick_menu_savestate_polls = 0;
@@ -1655,59 +1646,20 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_status("State loaded");
           return true;
         case QUICK_ITEM_SAVE_STATE: {
-          /* MTVU saves may be unstable, so quiesce it only for this operation.
-           * Keep both MTVU and OSD settings deferred until the core's terminal
-           * "State saved to slot" status arrives; waitForSaveStateFlush alone
-           * returned before VM-thread serialization even reached SPU2/GS. */
-          const bool restore_mtvu =
-              prefs_get_bool("EmuCore/Speedhacks/vuThread", true);
+          /* Keep the user's CPU configuration intact during serialization.
+           * applySettings() to disable MTVU reconfigures the CPU and resets the
+           * EE recompiler while the asynchronous save is starting, which is the
+           * last event before the observed GS-save crash. The EE/CPU thread is
+           * already pinned to core 0; saveStateSlot() only queues the request. */
           corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: begin async save; temporary MTVU quiesce=%d, defer OSD restore=%d",
-                      g_quick_menu_slot, restore_mtvu, g_quick_menu_restore_messages);
+                      "slot %d: begin async save; preserve MTVU preference, defer OSD restore=%d",
+                      g_quick_menu_slot, g_quick_menu_restore_messages);
           quick_menu_message("nethersx2_quick_menu", "", 0.01f);
           g_quick_menu_mode = QUICK_MENU_CLOSED;
-          if (restore_mtvu) {
-            prefs_set_bool("EmuCore/Speedhacks/vuThread", false);
-            nl.applySettings(fake_env, NATIVE_CLASS);
-            corelog_log(CORELOG_INFO, "SaveState",
-                        "slot %d: MTVU disabled for serialization",
-                        g_quick_menu_slot);
-          }
-          g_quick_menu_restore_mtvu_after_save = restore_mtvu;
           g_quick_menu_savestate_polls = 0;
           imports_savestate_watch_begin();
           g_quick_menu_savestate_pending = 1;
-
-          /* The input/quick-menu thread normally lives on the background core
-           * (core 3 on the four-core grant). Try the JNI save request itself on
-           * the EE core instead, then restore this thread's exact prior mask.
-           * The core may still enqueue serialization onto its VM thread; this
-           * experiment distinguishes caller-side affinity from that worker. */
-          s32 save_old_preferred_core = -1;
-          u64 save_old_affinity_mask = 0;
-          const bool save_have_old_affinity = R_SUCCEEDED(
-              svcGetThreadCoreMask(&save_old_preferred_core,
-                                   &save_old_affinity_mask,
-                                   CUR_THREAD_HANDLE));
-          const bool save_pinned_to_ee = save_have_old_affinity &&
-              R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u));
-          corelog_log(CORELOG_INFO, "SaveState",
-                      "slot %d: saveStateSlot caller affinity -> core 0: %s (old preferred=%d mask=0x%llx)",
-                      g_quick_menu_slot, save_pinned_to_ee ? "pinned" : "failed",
-                      save_old_preferred_core,
-                      (unsigned long long)save_old_affinity_mask);
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
-          if (save_pinned_to_ee && save_have_old_affinity) {
-            const Result save_restore_result = svcSetThreadCoreMask(
-                CUR_THREAD_HANDLE, save_old_preferred_core,
-                save_old_affinity_mask);
-            corelog_log(CORELOG_INFO, "SaveState",
-                        "slot %d: restored save caller affinity: %s (preferred=%d mask=0x%llx)",
-                        g_quick_menu_slot,
-                        R_SUCCEEDED(save_restore_result) ? "ok" : "failed",
-                        save_old_preferred_core,
-                        (unsigned long long)save_old_affinity_mask);
-          }
           quick_menu_status("Saving state...");
           return true;
         }
