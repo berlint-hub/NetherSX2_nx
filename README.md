@@ -358,22 +358,23 @@ accepted as a fallback; it exports the public entry points itself, so the
 `NXVK_EXPECTED_SHA256` in the Makefile pins the exact candidate tarball used by
 CI; CI fails if `berlint-hub/TEST3` serves anything else. The core is pinned in
 `source/deko3d/dk_profiles.h`, with its GSDevice and HostDisplay vtables checked
-against the profile. CI clones the pinned ref `arena/8b264db8-test3`, but the
-branch can move independently, so both binary inputs are hash-checked for
-reproducibility. The current test candidate is NXVK commit
-`c3745fe5b797dde04745dae90fb96cda7add03c6` from NXVK branch
-`arena/92b2b9eb-nxvk` (Mesa 26.2.2, build run `39667587272`, tarball SHA-256
-`3942e4318ebbbd772d2d76ccfef4f376e8e194c942d4eba80444ea5e9abcc65f`) and
-`4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` (SHA-256
-`b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`). The
-new driver includes Tegra WSI swizzle and Horizon cache-worker changes; this
-combination is queued for an on-device A/B test and is not yet hardware-validated.
+against the profile. CI pins `berlint-hub/TEST3` at commit
+`4c23955060cde768ec16e25062b78ae890e21b58` from
+`arena/8b264db8-test3`, and takes both `assets_4248/` and the standard
+`4248/arm64-v8a/libemucore_tegrax1.so` from that exact tree. The core SHA-256 is
+`be64362a525e43e67d2816e60ef197e84b8c82fc2af1655c1504fecc40fc1b4f`; the
+profile validator checks all GSDevice and HostDisplay vtable entries and the
+core hash. The separate spin-relax core variant is not used. The Vulkan asset
+check verifies the required shader files are present and bundled. NXVK remains
+pinned by its tarball SHA-256 (`87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51`);
+its BUILDINFO identifies the exact Mesa build, including Tegra WSI swizzle and
+Horizon cache-worker changes. This combination still requires on-device runtime
+validation.
 
-The core is based on NetherSX2 v2.2n-4248 and includes the spin-relax variant
-plus five length-preserving Tegra X1 patches from
-[mininxd/NetherSX2-patch](https://github.com/mininxd/NetherSX2-patch). The
-profile check confirms all 29 GSDevice and 31 HostDisplay vtable entries match;
-`patch_game()` continues to apply the emulator patches at load time.
+The core is based on NetherSX2 v2.2n-4248 and includes five length-preserving
+Tegra X1 patches from
+[mininxd/NetherSX2-patch](https://github.com/mininxd/NetherSX2-patch).
+`patch_game()` applies those patches at load time.
 
 Extract the 4248 APK into a folder named `NetherSX2-v2.2n-4248`, or set
 `CORES_DIR` to the folder containing it. `--apk-3668` is still accepted for a

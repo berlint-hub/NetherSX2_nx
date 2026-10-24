@@ -124,14 +124,19 @@ def verify_bundle(nro, workspace, cores):
             continue
         bundled.append(version)
         expected[f"cores/emucore_{version}.so"] = core
-        expected[f"res/{version}/shaders/opengl/tfx_fs.glsl"] = \
-            cores / f"NetherSX2-v2.2n-{version}/assets/shaders/opengl/tfx_fs.glsl"
+        assets = cores / f"NetherSX2-v2.2n-{version}/assets"
+        expected[f"res/{version}/GameIndex.yaml"] = assets / "GameIndex.yaml"
+        vulkan_shaders = sorted((assets / "shaders/vulkan").glob("*.glsl"))
+        if not vulkan_shaders:
+            raise ValueError(f"No Vulkan GLSL assets found under {assets / 'shaders/vulkan'}")
+        for shader in vulkan_shaders:
+            expected[f"res/{version}/shaders/vulkan/{shader.name}"] = shader
     if not bundled:
         raise ValueError(f"No core images found under {cores}")
     for name, source in expected.items():
         if name not in files or hashlib.sha256(files[name]).digest() != hashlib.sha256(source.read_bytes()).digest():
             raise ValueError(f"Missing or outdated bundled artifact: {name}")
-    print(f"{nro.name}: core {'+'.join(bundled)}, the Vulkan (NVK) NRO and per-core GS shader resources verified")
+    print(f"{nro.name}: core {'+'.join(bundled)}, the Vulkan (NVK) NRO, GameIndex and per-core Vulkan shader resources verified")
 
 def main():
     workspace = Path(__file__).resolve().parent.parent

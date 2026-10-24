@@ -181,7 +181,7 @@ jobs:
           # uploaded blob, so cloning only the branch can silently select a
           # newer driver whose SHA does not match this build's Makefile pin.
           TEST3_REF="arena/8b264db8-test3"
-          TEST3_COMMIT="41f2386e515ea65fde26398315c6ad78b853afcc"
+          TEST3_COMMIT="4c23955060cde768ec16e25062b78ae890e21b58"
           git clone --depth 1 --branch "$TEST3_REF" \
             https://github.com/berlint-hub/TEST3.git /tmp/TEST3 \
             || { echo "::error::clone TEST3 selhal (ref $TEST3_REF)"; exit 1; }
@@ -231,17 +231,20 @@ jobs:
             echo "::warning::TEST3 neobsahuje nxvk-vulkan-tegra-x1.tar.gz -> RENDERER=VK se preskoci"
           fi
 
-          # 2) core: produkt je Vulkan-only s jednim jadrem. TEST3 ho drzi pod
-          #    4248/arm64-v8a/libemucore_tegrax1_spinrelax.so; build_all.sh a
-          #    check_deko3d_build.py ale cekaji rozbalene APK usporadani, takze
-          #    se premapuje vedle repa (CORES_DIR="$(dirname $APP)").
+          # 2) Core + APK assets: use the exact upstream TEST3 inputs requested
+          #    for this build, not the separate spinrelax core variant. Remap them
+          #    into the APK-like tree expected by build_all.sh and the validators.
           root="$(dirname "$PWD")"
-          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"
-          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"; exit 1; }
+          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1.so"
+          assets="/tmp/TEST3/assets_4248"
+          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1.so"; exit 1; }
+          [ -f "$assets/GameIndex.yaml" ] || { echo "::error::TEST3 assets_4248/GameIndex.yaml chybi"; exit 1; }
+          [ -s "$assets/shaders/vulkan/tfx.glsl" ] || { echo "::error::TEST3 assets_4248 Vulkan tfx.glsl chybi"; exit 1; }
           mkdir -p "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a"
           cp "$so" "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so"
-          cp -r "/tmp/TEST3/assets_4248" "$root/NetherSX2-v2.2n-4248/assets"
+          cp -r "$assets" "$root/NetherSX2-v2.2n-4248/assets"
           echo "::notice::core tegrax1 $(stat -c%s "$so") B sha256 $(sha256sum "$so" | cut -d' ' -f1)"
+          echo "::notice::assets_4248 from TEST3 commit $TEST3_COMMIT, Vulkan shaders $(find "$assets/shaders/vulkan" -maxdepth 1 -type f -name '*.glsl' | wc -l)"
           # Po predchozich dvoujadrovych buildech muze zbyt strom pro 3668.
           # Bundle by ho jinak nesl dal, i kdyz v nem zadne jadro neni.
           rm -rf "$root/NetherSX2-v2.2n-3668"
@@ -353,36 +356,24 @@ jobs:
           cmake --build launcher/dependencies/build --parallel "$(nproc)" \
             || { echo "::error::build storage deps selhal"; exit 1; }
 
-      - name: Devaty test -- validace shaderu proti assets jader
+      - name: Devaty test -- assets Vulkan shaderu z core 4248
         run: |
-          # shader_validation potrebuje bison+flex (UAM) A zaroven rozbalene APK
-          # assets: cte <assets>/shaders/opengl/*.glsl a kompiluje z nich DKSH.
-          # Uam.cmake ho zapne jen pri DEKO3D_SHADER_TESTS=ON a NATIVNIM buildu,
-          # proto se tady konfiguruje podruhe, bez Switch.cmake.
-          cmake -S source/deko3d/compiler -B out/shader-tests -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release -DDEKO3D_SHADER_TESTS=ON \
-            || { echo "::error::native configure pro shader_validation selhal"; exit 1; }
-          cmake --build out/shader-tests --parallel "$(nproc)" \
-            || { echo "::error::build shader_validation selhal"; exit 1; }
-          # Bere "one or more" adresaru (tests/deko3d/shader_validation.cpp:
-          # for (int i = 1; i < argc; ++i)), takze staci ten jediny, ktery se
-          # skutecne zabundloval.
-          #
-          # POZOR: cely tenhle workflow je POSIX sh -- zadna pole, zadne [[.
-          # Run 39137051454 skoncil v tomhle kroku exit 2 a bez jedine ::error::
-          # anotace, tedy na syntaxi, ne na zadnem z guardu: bash pole
-          # (asset_dirs=() a +=) nejsou v kontejnerovem shellu k dispozici.
-          # Cesty neobsahuji mezery, takze se dole expanduje bez uvozovek.
-          asset_dirs=
-          for v in 4248 3668; do
-            d="$CORES_DIR/NetherSX2-v2.2n-$v/assets"
-            if [ -d "$d" ]; then asset_dirs="$asset_dirs $d"; fi
+          set -eu
+          # Tento produkt bundluje Vulkan/NVK, ne Deko3D. TEST3 assets_4248
+          # z aktualniho pinu obsahuje Vulkan GLSL a zamerne nema OpenGL shader
+          # strom, ktery potrebuje deko3d_shader_validation/UAM.
+          assets="$CORES_DIR/NetherSX2-v2.2n-4248/assets"
+          shader_dir="$assets/shaders/vulkan"
+          [ -f "$assets/GameIndex.yaml" ] || { echo "::error::assets_4248/GameIndex.yaml chybi"; exit 1; }
+          [ -d "$shader_dir" ] || { echo "::error::assets_4248/shaders/vulkan chybi"; exit 1; }
+          count=0
+          for shader in cas convert interlace merge present shadeboost tfx; do
+            file="$shader_dir/$shader.glsl"
+            [ -s "$file" ] || { echo "::error::Vulkan shader chybi nebo je prazdny: $file"; exit 1; }
+            echo "::notice::Vulkan shader $shader.glsl $(stat -c%s "$file") B sha256 $(sha256sum "$file" | cut -d' ' -f1)"
+            count=$((count + 1))
           done
-          echo "::notice::shader-test assets dirs:${asset_dirs:- ZADNE}"
-          [ -n "$asset_dirs" ] || { echo "::error::zadne assets k validaci shaderu"; exit 1; }
-          # shellcheck disable=SC2086
-          ./out/shader-tests/deko3d_shader_validation $asset_dirs \
-            || { echo "::error::shader_validation selhal za behu"; exit 1; }
+          echo "::notice::TEST3 assets_4248: $count povinnych Vulkan shaderu overeno"
 
       - name: Emulator -- Vulkan (NVK)
         run: |
@@ -858,7 +849,7 @@ jobs:
           # aditivne michanych svetel) nema zadnou opravu na strane CPU, takze
           # jedine zbyvajici paky jsou presunout praci z GPU nebo renderer
           # donutit necekat na readbacky. Kazdy klic byl pred vystavenim overen
-          # proti stringum pripnuteho spinrelax jadra: jadro sedi mezi dvema
+          # proti stringum pripnuteho standardniho 4248 jadra: jadro sedi mezi dvema
           # upstream generacemi, takze napriklad UserHacks_AutoFlushLevel,
           # UserHacks_CPUSpriteRenderLevel, UserHacks_DisableRenderFixes a
           # UserHacks_DrawBuffering v nem nejsou a radka s takovym klicem by

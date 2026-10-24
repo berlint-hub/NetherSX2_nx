@@ -66,7 +66,7 @@ NXVK_PKG_CONFIG ?= $(PREFIX)pkg-config
 # reproducible test candidate; hardware validation is still required before a
 # release recommendation. Override with NXVK_EXPECTED_SHA256= to test another.
 # Current tarball: TEST3 branch arena/8b264db8-test3 at
-# 41f2386e515ea65fde26398315c6ad78b853afcc. Pin the SHA256 of the tarball
+# 4c23955060cde768ec16e25062b78ae890e21b58. Pin the SHA256 of the tarball
 # itself (not the enclosing GitHub Actions artifact ZIP); refresh it whenever
 # TEST3 updates the NXVK package. Hardware validation is still required.
 NXVK_EXPECTED_SHA256 ?= 87a6061eed373806328968121ee7a500e647f0c140e6ee95702c2fca685fdb51
