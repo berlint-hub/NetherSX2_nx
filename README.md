@@ -247,7 +247,7 @@ enabled for prepared LSFG sessions so only unique game frames are interpolated.
 - **Fractional (target rate)** interpolates on only *some* frames so the output
   lands on **Target output rate** instead of always doubling. A game at 40 FPS
   aiming for 60 gets one generated frame every two; a game at 47 aiming for 50
-  gets one every seventeen. Output can never exceed twice the source rate,
+  gets about one every sixteen. Output can never exceed twice the source rate,
   because one interpolation per source frame is all the bridge produces. The
   cost is one frame of latency plus the GPU work of each generated frame.
 
@@ -344,7 +344,12 @@ limited by: CPU share per heavy thread, time actually blocked waiting on the GPU
 pipelines compiled at runtime, how long the presenting thread sat inside the
 three calls that can block on the GPU without a fence (`acquire` on a FIFO
 swapchain with no free image, `submit`, `present` on a compositor that cannot
-take the frame), and how many copies and barriers the renderer issued. The
+take the frame), and how many copies and barriers the renderer issued. In the
+first line, `presents` counts emulator source presents; under fractional LSFG it
+does not include inserted outputs. `gen` counts generated frames whose present
+succeeded during that window, not merely frames the scheduler requested.
+Because the mode/source label is sampled when the report is emitted, toggling
+LSFG within a window can mix its counters. The
 fourth is the compact pacing summary; it explicitly distinguishes the shared
 panel rate from LSFG's own target and reports whether the pacer is sleeping,
 missing deadlines, or skipping refreshes. The fifth appears only when a single

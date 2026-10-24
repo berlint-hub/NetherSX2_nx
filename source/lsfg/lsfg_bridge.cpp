@@ -120,7 +120,10 @@ struct LsfgNxRuntime {
         return candidate == swapchain;
     }
 
-    VkResult present(VkQueue queue, const VkPresentInfoKHR& info, bool generate) {
+    VkResult present(VkQueue queue, const VkPresentInfoKHR& info, bool generate,
+            bool *generatedFrame) {
+        if (generatedFrame)
+            *generatedFrame = false;
         if (queue != vulkan->queue())
             throw std::runtime_error("present queue differs from borrowed LSFG queue");
         if (info.swapchainCount != 1 || info.pSwapchains[0] != swapchain)
@@ -178,6 +181,8 @@ struct LsfgNxRuntime {
             queue, info, originalImageIndex, slot.generated.handle());
         if (generatedResult != VK_SUCCESS && generatedResult != VK_SUBOPTIMAL_KHR)
             return generatedResult;
+        if (generatedFrame)
+            *generatedFrame = true;
 
         uint32_t restoredImageIndex{};
         const VkResult acquireResult = vulkan->df().AcquireNextImageKHR(
@@ -338,7 +343,10 @@ extern "C" void lsfg_nx_destroy(LsfgNxRuntime *runtime) {
 namespace {
 
 bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
-        const VkPresentInfoKHR *presentInfo, VkResult *result, bool generate) {
+        const VkPresentInfoKHR *presentInfo, VkResult *result, bool generate,
+        bool *generatedFrame) {
+    if (generatedFrame)
+        *generatedFrame = false;
     if (!runtime || !presentInfo || !result ||
             presentInfo->swapchainCount != 1 || !presentInfo->pSwapchains ||
             !presentInfo->pImageIndices ||
@@ -346,7 +354,7 @@ bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
         return false;
 
     try {
-        *result = runtime->present(queue, *presentInfo, generate);
+        *result = runtime->present(queue, *presentInfo, generate, generatedFrame);
         return true;
     } catch (...) {
     }
@@ -358,13 +366,15 @@ bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
 } // namespace
 
 extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
-        const VkPresentInfoKHR *presentInfo, VkResult *result) {
-    return presentCommon(runtime, queue, presentInfo, result, true);
+        const VkPresentInfoKHR *presentInfo, VkResult *result,
+        bool *generatedFrame) {
+    return presentCommon(runtime, queue, presentInfo, result, true,
+        generatedFrame);
 }
 
 extern "C" bool lsfg_nx_present_capture(LsfgNxRuntime *runtime, VkQueue queue,
         const VkPresentInfoKHR *presentInfo, VkResult *result) {
-    return presentCommon(runtime, queue, presentInfo, result, false);
+    return presentCommon(runtime, queue, presentInfo, result, false, nullptr);
 }
 
 #endif /* USE_VULKAN */

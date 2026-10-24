@@ -1,0 +1,39 @@
+/* SPDX-License-Identifier: MIT */
+/* Pure fractional frame schedule shared with host-side validation. */
+#ifndef NETHERSX2_LSFG_SCHEDULE_H
+#define NETHERSX2_LSFG_SCHEDULE_H
+
+/* Decide whether this source present earns interpolation for the requested
+ * output rate. The bridge emits two output frames when interpolating and one
+ * when capturing, so the extra-frame fraction is target/source - 1, clamped to
+ * [0, 1]. A source at or above target therefore passes through unchanged.
+ *
+ * phase is an error accumulator in [0,1); native_gap means the bridge missed a
+ * source present, so capture one frame to re-warm its previous-frame slot before
+ * another interpolation. */
+static inline int lsfg_fractional_schedule(double source_fps, double target_fps,
+                                           double *phase, int *native_gap) {
+  if (!phase || !native_gap)
+    return 0;
+  if (*native_gap) {
+    *native_gap = 0;
+    return 0;
+  }
+  if (!(source_fps > 0.0) || !(target_fps > 0.0))
+    return 0;
+
+  double ratio = target_fps / source_fps;
+  if (ratio < 1.0)
+    ratio = 1.0;
+  if (ratio > 2.0)
+    ratio = 2.0;
+
+  *phase += ratio - 1.0;
+  if (*phase >= 1.0) {
+    *phase -= 1.0;
+    return 1;
+  }
+  return 0;
+}
+
+#endif /* NETHERSX2_LSFG_SCHEDULE_H */

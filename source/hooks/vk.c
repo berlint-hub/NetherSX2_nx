@@ -36,6 +36,7 @@
 #include "../config.h"
 #include "../prefs.h"
 #include "../lsfg/lsfg_bridge.h"
+#include "../lsfg/lsfg_schedule.h"
 #include "../pthr.h"
 #include "../libc_shim.h"
 #include "../corelog.h"
@@ -338,31 +339,6 @@ static uint64_t low_latency_pace_before_submit(void) {
 #else
   return wait_ns;
 #endif
-}
-
-/* Pure so it can be tested without a GPU: given the frozen source rate and the
- * wanted output rate, decide whether this present gets interpolated.
- *
- * The bridge emits two display frames when it interpolates and one when it only
- * captures, so an output rate of ratio x source needs interpolation on
- * (ratio - 1) of presents. ratio is clamped to [1,2]: 2x is everything one
- * interpolation per source frame can produce, and below 1x the source is
- * already at or above the target so there is nothing to add.
- *
- * After any present that went down the native path the previous-frame slot is
- * stale, so the first present back is always capture-only. That costs one frame
- * of re-warm instead of one visibly misplaced generated frame. */
-static int lsfg_fractional_schedule(double source_fps, double target_fps,
-                                    double *phase, int *native_gap) {
-  if (*native_gap) { *native_gap = 0; return 0; }
-  if (!(source_fps > 0.0) || !(target_fps > 0.0))
-    return 0;
-  double ratio = target_fps / source_fps;
-  if (ratio < 1.0) ratio = 1.0;
-  if (ratio > 2.0) ratio = 2.0;
-  *phase += ratio - 1.0;
-  if (*phase >= 1.0) { *phase -= 1.0; return 1; }
-  return 0;
 }
 
 static double lsfg_measured_source_fps(void) {
@@ -2029,11 +2005,12 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
     const int generate = !fractional ||
         lsfg_fractional_schedule(lsfg_frozen_source_fps, target_fps,
                                  &lsfg_gen_phase, &lsfg_native_gap);
+    bool generated_frame = false;
     const int consumed = generate
-        ? lsfg_nx_present(lsfg_runtime, q, pi, &result)
+        ? lsfg_nx_present(lsfg_runtime, q, pi, &result, &generated_frame)
         : lsfg_nx_present_capture(lsfg_runtime, q, pi, &result);
 #ifdef NETHERSX2_VK_DIAGNOSTIC
-    if (generate && consumed) ++perf_generated;
+    if (generated_frame) ++perf_generated;
 #endif
     if (consumed) {
 #ifdef NETHERSX2_VK_DIAGNOSTIC

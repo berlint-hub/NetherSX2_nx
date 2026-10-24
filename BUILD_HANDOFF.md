@@ -10,9 +10,12 @@ budget NVK před clampem = 1382 MiB
 budget po shimu         = 1536 MiB
 ověřeno na device       = c6a74f2-run40109729826
 otevřeno                = P0#1 (low-latency A/B), P1 warm-cache
+LSFG device             = fractional path verified; controlled A/B pending
+savestates              = user reports working; investigation closed by user
 ```
 
-Nižší sekce jsou historie; čísla z nich se necitují.
+Nižší sekce jsou historie; čísla z nich se necitují. Savestate root cause stays
+unresolved and is no longer an active work item; no savestate code was changed.
 
 ## Follow-up candidate (2026-10-22)
 
@@ -179,3 +182,20 @@ the end of this file.
 - If the new `heapUsage[0]` peaks approach the heap limit or a Vulkan OOM is observed, the documented one-step fallback is to report `GPU_RESERVE_MB * 4 / 3` as the `sysconf` hint (1366 MiB for the current reserve), which source-estimates an NVK heap of roughly 1024 MiB. This is a contingency only: do not change the current 2048 MiB hint or the pinned 0.75 percentage now.
 - Diagnostic perf windows now sample actual `heapUsage[0]` through the saved physical-device handle and the direct NVK `vkGetPhysicalDeviceMemoryProperties2` entry point. They report per-window sampled peak and all-time peak; they do not use `heapBudget` as a usage proxy. Sampling is diagnostic-only and is not performed in production.
 - Required next device capture: with `Wrapper/AutoSyncFPSLocker=false` and `EmuCore/GS/low_latency=1`, retain the interval-zero WSI line and pacing counters, assess tearing, and capture the new heap-usage peak line. For P1, record shader-cache counts on paired first/cold and second/warm starts; neither P0 #1 nor P1 is closed until those device results are reviewed.
+
+### Device follow-up: SaltyNX/FPSLocker + LSFG (user logs, build `6efba00-run40116398561`)
+
+- SaltyNX reports shared-memory availability and returns a shared-memory handle. It opens the process-specific FPSLocker `.dat` file and logs `serviceSetDisplaySync 1` and `serviceSetDisplaySyncDocked 1`. The NetherSX2 diagnostic independently reports `fpslocker-auto-sync requested=1 detected=1`, `display-sync active=1`, `shared_ready=1`, `display_rate=50`, and later `fpslocker_target=50`. This confirms the shared-block/display-sync integration for this run; it does not validate low-latency WSI or panel behavior beyond the logged 50 Hz service rate. The NX-FPS `getBID failed` line is present, but did not prevent the wrapper from observing the shared display-sync state.
+- LSFG is prepared/capable at Vulkan initialization (`lsfg_prepared=1`, `lsfg_capable=1`). It starts Off in the quick menu and is explicitly enabled at about `1792882194.136`; subsequent windows report fractional mode with frozen source estimate 43 FPS, target 50 FPS, and about 50–51 generated frames per 300 source presents. At a steady measured presentation rate near 43 FPS, 300 source presents plus 50 generated frames over 6.975 seconds is approximately 50 output frames/s. Other windows include hitches and yield lower estimates; these log counters support functioning interpolation, not a matched on/off performance or visual-quality claim.
+- `vkQueuePresentKHR` reports `lsfg=0` only in its first four calls, before the quick-menu toggle. Later `lsfg fractional` and nonzero `gen` counters are the relevant active evidence. The first diagnostic window also includes startup/state-load work and should not be used as a steady-state comparison. Several later quick-menu toggles mix enabled/disabled intervals inside a 300-present reporting window; `gen` is accumulated for the whole window and the mode label reflects the state at report time.
+- The SaltyNX log is service-level output; it does not independently provide a synchronized per-frame panel presentation trace. Physical panel cadence, interpolation quality, latency, and tearing remain unverified. A controlled LSFG A/B still requires the same warmed scene and settings, with LSFG as the only changed variable; do not change FPSLocker-owned target or display-sync controls for this test.
+- The current settings include `Wrapper/LSFGFlowScale=0.25`, `Wrapper/LSFGPerformance=true`, `Wrapper/SaltyFPS=false`, `Wrapper/AutoSyncFPSLocker=true`, `vuCycleSteal=2`, `vu1Instant=false`, and MTVU enabled. SaltyNX/nether diagnostics confirm AutoSync/display-sync remains active despite `SaltyFPS=false`. These settings differ from prior runs; no performance or savestate cause is isolated from them.
+- The user reports that saving now works and has closed the savestate investigation. In the attached console excerpt, the explicit state operation is a successful load from slot 0 (`State loaded`, followed by SPU2/PAD/GS load and EE recompiler reset) and the app later exits normally; the excerpt does not contain a save request. Record save success as user-reported, not independently verified by this capture. No savestate code was changed; earlier async-save exceptions remain unexplained but are no longer an active work item.
+- P0 #1 low-latency A/B and P1 cold-/warm-cache validation remain open. No reserve, sizing hint, WSI, swap interval, shared-block layout, or FPSLocker policy was changed as part of this device-log review.
+
+### LSFG audit cleanup (working-tree changes; Switch build pending)
+
+- Moved the pure fractional scheduler into `source/lsfg/lsfg_schedule.h`, so runtime and host tests execute the same implementation. Added `tests/lsfg/schedule_validation.c` and wired it into the `host-tests` workflow. Coverage includes passthrough at/above target, 2x clamp, representative fractional ratios, invalid rates, phase preservation over a native-path gap, and safe handling of null state pointers.
+- Corrected the 47→50 example in README and launcher help: the accumulator schedules about one generated frame per 16 source presents, not 17.
+- Corrected diagnostic accounting: `gen` now increments only after the bridge confirms the generated image was accepted by the swapchain present call. The first bridge warm-up present and failed generated presents no longer inflate the counter. README now clarifies that `presents` counts emulator source presents and that toggling LSFG within a reporting window can mix counters.
+- Host validation run directly with the system C compiler: `cc -std=c11 -Wall -Wextra -Werror ... tests/lsfg/schedule_validation.c`; all scheduler cases passed. `git diff --check` passed. This does not validate C++/Switch linking, GPU workload, FIFO cadence, image quality, latency, tearing, or physical display behavior. No full Switch build or on-device test was run for these cleanup changes; use GitHub Actions before distributing a new package.

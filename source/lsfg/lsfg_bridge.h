@@ -45,11 +45,14 @@ void lsfg_nx_destroy(LsfgNxRuntime *runtime);
 
 /*
  * Returns true when the bridge consumed the presentation and wrote result.
- * Runtime faults are reported as errors. They deliberately do not fall back to
- * an ordinary presentation while the user has LSFG enabled.
+ * generated_frame is set only after an interpolated output was accepted by the
+ * swapchain present call; the first warm-up frame may be capture-only. Runtime
+ * faults are reported as errors and deliberately do not fall back to ordinary
+ * presentation while the user has LSFG enabled.
  */
 bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
-                     const VkPresentInfoKHR *present_info, VkResult *result);
+                     const VkPresentInfoKHR *present_info, VkResult *result,
+                     bool *generated_frame);
 
 /*
  * Capture the source frame into the bridge's ping-pong slot and present it
