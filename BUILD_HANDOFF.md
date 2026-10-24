@@ -120,6 +120,7 @@ current follow-up at the end of this file.
 - TEST3 branch `arena/8b264db8-test3` is pinned at commit `0f5878e08cd37dd25b23ba5e090ae5c292560eca`. That commit adds the updated NXVK tarball; the same tree supplies `assets_4248/` and `4248/arm64-v8a/libemucore_tegrax1_spinrelax.so`.
 - The package tarball SHA-256 is `c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74`, computed over the tarball in the TEST3 git tree (not the Actions ZIP). Its `BUILDINFO.txt` identifies NXVK source commit `d6dcd9fb860e398abb8081bc5d23c38d4162052e`, Mesa 26.2.2, and package run `40103062558`. That run completed successfully, including its Switch cross-build and tests.
 - The selected spinrelax core SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`. Its profile hash and vtable checks are set to this image.
+- NetherSX2 commit `75935aa0e62a86d6bb81d0461ab315d66fb21741` passed both `host-tests` and the Switch build in Actions run `40105680609`: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40105680609. Build ID: `75935aa-run40105680609`. Artifacts: `nethersx2-switch` ID `12564124596` (43,599,392 bytes) and `nethersx2-vk-link-map` ID `12564303817` (742,474 bytes).
 
 ### Findings and changes
 
