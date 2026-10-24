@@ -102,5 +102,7 @@ This is the Vulkan/NVK production build. It keeps the previously implemented PAL
 
 ### Validation status
 
-- `git diff --check`, host tests, Switch CI build, and hardware smoke tests: **pending** at the time this handoff was written.
+- `git diff --check` and focused source assertions passed. The sandbox lacks local CMake, so tests/build ran through GitHub Actions.
+- GitHub Actions run `40096770681` for commit `94d49674b7409186abd69b610d18d878b949e7ce` passed both `host-tests` and the Switch build: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40096770681
+- Artifacts: `nethersx2-switch` ID `12561481144` (43,600,400 bytes) and `nethersx2-vk-link-map` ID `12560719476` (742,315 bytes).
 - Hardware verification is unavailable for the GPU-reserve decision, effective low-latency mode, and shader-cache persistence/performance. The exact pinned source makes the current low-latency override explicit; software-only CI cannot establish tearing or panel behavior.
