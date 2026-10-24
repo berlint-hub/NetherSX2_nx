@@ -551,6 +551,11 @@ static void run_startup_sequence(void) {
   prefs_set_string("Logging/EnableEEConsole", "0");
   prefs_set_string("Logging/EnableIOPConsole", "0");
 #endif
+#if defined(NETHERSX2_VK_DIAGNOSTIC) && defined(USE_VULKAN)
+  vk_diag_note("savestate diagnostic: effective MTVU=%d InstantVU1=%d (MTVU override is diagnostic-only; INI unchanged)",
+               prefs_get_bool("EmuCore/Speedhacks/vuThread", true) ? 1 : 0,
+               prefs_get_bool("EmuCore/Speedhacks/vu1Instant", true) ? 1 : 0);
+#endif
   prefs_save_display_sync_safe();
 
   if (!nl.isBIOSAvailable(fake_env, NATIVE_CLASS))

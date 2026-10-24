@@ -335,6 +335,13 @@ bool prefs_contains(const char *key) {
 }
 
 bool prefs_get_bool(const char *key, bool def) {
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  /* A controlled savestate experiment: the recent device log still reported
+   * "MTVU speedhack is enabled" despite the user's attempted off test. Override
+   * only the getter in diagnostic builds so the persisted INI is not changed. */
+  if (key && strcmp(key, "EmuCore/Speedhacks/vuThread") == 0)
+    return false;
+#endif
   int i = prefs_find(key);
   if (i < 0)
     return def;
