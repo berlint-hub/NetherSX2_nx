@@ -191,8 +191,9 @@ static bool normalizeLsfgStore(Store &store) {
   if (storeHas(store, "Wrapper/LSFGFlowScale")) {
     const double flow = std::strtod(
         storeGet(store, "Wrapper/LSFGFlowScale", "0.25"), nullptr);
-    const char *normalized = flow == 0.125 ? "0.125" :
-                            flow == 0.5 ? "0.5" : "0.25";
+    const char *normalized = flow == 1.0 ? "1.0" :
+                            flow == 0.5 ? "0.5" :
+                            flow == 0.125 ? "0.125" : "0.25";
     if (strcmp(storeGet(store, "Wrapper/LSFGFlowScale", "0.25"), normalized)) {
       storeSet(store, "Wrapper/LSFGFlowScale", normalized);
       changed = true;
@@ -387,7 +388,9 @@ static const Choice C_upscale[]  = { {"0.25x","0.25"},{"0.5x","0.5"},{"0.75x","0
                                      {"2x (~720p)","2"},{"2.25x","2.25"},{"2.5x","2.5"},{"2.75x","2.75"},{"3x (~1080p)","3"},
                                      {"4x (~1440p)","4"},{"5x (~1800p)","5"},{"6x (4K ~2160p)","6"} };
 static const Choice C_bool[]     = { {"Off","false"}, {"On","true"} };
-static const Choice C_lsfgFlow[] = { {"Quarter (recommended)","0.25"}, {"Half","0.5"}, {"Eighth (fastest)","0.125"} };
+static const Choice C_lsfgFlow[] = { {"Quarter (recommended)","0.25"}, {"Half","0.5"},
+                                      {"Full (native, highest cost)","1.0"},
+                                      {"Eighth (fastest)","0.125"} };
 static const Choice C_lsfgMode[] = { {"Auto (2x below 33 FPS)","auto"}, {"Fractional (target rate)","fractional"} };
 static const Choice C_lsfgTarget[]= { {"40 Hz","40"}, {"50 Hz","50"}, {"60 Hz","60"} };
 static const Choice C_aspect[]   = { {"4:3","4:3"}, {"16:9","16:9"}, {"Stretch","Stretch"}, {"Auto","Auto 4:3/3:2"} };
@@ -806,7 +809,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"Wrapper/LSFGEnabled", "Frame generation",
    "Makes LSFG 2x available for this launch. Frame generation starts Off in-game and must be enabled from the overlay. Native 50/60 FPS sources use protected passthrough. Requires a user-supplied Lossless.dll at /switch/nethersx2/lsfg/."},
   {"Wrapper/LSFGFlowScale", "Frame generation quality",
-   "Sets the resolution used for optical-flow analysis. Eighth is cheapest, Quarter is recommended on Switch, and Half can retain more motion detail at a higher GPU cost. Small mip levels are clamped to at least one pixel."},
+   "Sets the resolution used for optical-flow analysis. Eighth is cheapest and Quarter is recommended on Switch. Full resolution can retain the most motion detail but uses 4x as many flow pixels as Half and may significantly reduce performance; it is an optional A/B test, not a guaranteed fix for visual glitches. Small mip levels are clamped to at least one pixel."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
    "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
 

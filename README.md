@@ -268,10 +268,13 @@ The source rate is frozen after 16 valid samples and before generation begins,
 because once the display saturates its FIFO back-pressure reads as a slower
 source, which would raise the ratio and generate more: positive feedback.
 
-**Flow resolution** offers Eighth (0.125) as well as Quarter and Half; the
-bridge clamps the value to 0.125–0.5. The mip pyramid clamps each axis to at
-least one pixel, so small output sizes cannot create invalid zero-sized Vulkan
-images at Eighth resolution.
+**Flow resolution** offers Eighth (0.125), Quarter, Half, and Full (1.0). Full
+uses the output resolution for optical-flow analysis: at a fixed output size it
+processes four times as many flow pixels as Half and can significantly increase
+GPU cost. Treat it as an optional image-quality A/B test, not as a guaranteed
+fix for flicker or proof of available GPU headroom. The mip pyramid clamps each
+axis to at least one pixel, so small output sizes cannot create invalid
+zero-sized Vulkan images at Eighth resolution.
 
 ### Diagnostics
 

@@ -1833,7 +1833,8 @@ static int lsfg_try_create(VkQueue queue) {
   }
 
   float flow_scale = prefs_get_float("Wrapper/LSFGFlowScale", 0.25f);
-  if (flow_scale != 0.125f && flow_scale != 0.25f && flow_scale != 0.5f)
+  if (flow_scale != 0.125f && flow_scale != 0.25f && flow_scale != 0.5f &&
+      flow_scale != 1.0f)
     flow_scale = 0.25f;
 
   LsfgNxCreateInfo info = {

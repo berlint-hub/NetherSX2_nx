@@ -290,7 +290,8 @@ void prefs_init(const char *ini_path) {
   prefs_seed_defaults();
   prefs_remove("Wrapper/LSFGDllPath");
   const float lsfg_flow = prefs_get_float("Wrapper/LSFGFlowScale", 0.25f);
-  if (lsfg_flow != 0.125f && lsfg_flow != 0.25f && lsfg_flow != 0.5f)
+  if (lsfg_flow != 0.125f && lsfg_flow != 0.25f && lsfg_flow != 0.5f &&
+      lsfg_flow != 1.0f)
     prefs_set_float("Wrapper/LSFGFlowScale", lsfg_flow > 0.375f ? 0.5f : 0.25f);
 }
 

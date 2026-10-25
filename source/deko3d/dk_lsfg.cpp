@@ -248,7 +248,9 @@ void lsfg_prepare() {
   if (!read) return;
   auto prepared = std::make_unique<Session>();
   prepared->config.performance = prefs_get_bool("Wrapper/LSFGPerformance", true);
-  prepared->config.flow_denominator = atof(prefs_get_string("Wrapper/LSFGFlowScale", "0.25")) >= 0.5 ? 2 : 4;
+  const double flow_scale = atof(prefs_get_string("Wrapper/LSFGFlowScale", "0.25"));
+  prepared->config.flow_denominator = flow_scale >= 1.0 ? 1 :
+      flow_scale >= 0.5 ? 2 : flow_scale >= 0.25 ? 4 : 8;
   lsfg::prepare::Options options;
   options.graph.performance = prepared->config.performance;
   const auto key = lsfg::cache::cache_key({dll, lsfg::cache::extractor_version,

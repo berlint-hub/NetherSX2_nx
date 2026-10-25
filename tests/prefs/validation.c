@@ -77,6 +77,18 @@ int main(void) {
   CHECK(prefs_get_float("EmuCore/GS/upscale_multiplier", 0.0f) == 2.0f,
         "historical flat numeric keys remain supported");
 
+  const char *flow_scales[] = {"0.125", "0.25", "0.5", "1.0"};
+  const float flow_values[] = {0.125f, 0.25f, 0.5f, 1.0f};
+  for (size_t i = 0; i < sizeof(flow_scales) / sizeof(flow_scales[0]); ++i) {
+    char flow_fixture[96];
+    snprintf(flow_fixture, sizeof(flow_fixture),
+             "[Wrapper]\nLSFGFlowScale = %s\n", flow_scales[i]);
+    CHECK(write_fixture(path, flow_fixture), "write supported flow-scale fixture");
+    prefs_init(path);
+    CHECK(prefs_get_float("Wrapper/LSFGFlowScale", 0.0f) == flow_values[i],
+          "supported LSFG flow scale survives preference normalization");
+  }
+
   CHECK(!prefs_get_bool("Wrapper/nonexistent", false),
         "missing boolean returns its supplied default");
   CHECK(unlink(path) == 0, "remove temporary INI fixture");
