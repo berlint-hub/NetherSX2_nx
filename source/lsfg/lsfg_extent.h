@@ -25,4 +25,23 @@ static inline LsfgMipExtent lsfg_mip_extent(uint32_t width, uint32_t height,
   return mip;
 }
 
+/* Dispatch extents must keep the zero that a fully-shifted level produces:
+ * image dimensions clamp to >=1, but dispatch counts must not be derived from
+ * that clamped size. If either shifted axis is zero, the mip has no area and
+ * the whole stage is skipped (0x0 groups). */
+static inline LsfgMipExtent lsfg_mip_dispatch(uint32_t width, uint32_t height,
+                                              uint32_t level, uint32_t add,
+                                              uint32_t shift) {
+  LsfgMipExtent dispatch = {0, 0};
+  if (level >= 32 || shift >= 32)
+    return dispatch;
+  width >>= level;
+  height >>= level;
+  if (!width || !height)
+    return dispatch;
+  dispatch.width = (width + add) >> shift;
+  dispatch.height = (height + add) >> shift;
+  return dispatch;
+}
+
 #endif /* NETHERSX2_LSFG_EXTENT_H */

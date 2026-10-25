@@ -3,6 +3,27 @@
 ## Current state
 
 ```text
+source/build baseline     = ea5eb2b-run40178672405 (Actions host-tests + Switch: success)
+latest short device log   = shared display-sync active; present_fps updates
+LSFG overlay/generation   = not conclusively validated by latest capture
+memory sizing             = device-confirmed 1536 MiB heap; keep 1024 MiB reserve
+hint / WSI / swap interval= unchanged; 1366 MiB is documentation-only fallback
+open                      = P0#1 low-latency A/B; P1 paired cold/warm cache
+savestates                 = user reports working; investigation closed by user
+pending review patch       = dispatch-vs-image mip extents + LSFG present accounting
+```
+
+The `ea5eb2b` artifact validates compilation and host tests only. The short device
+capture mostly reports `src=50, target=50, gen=0`, so it does not establish steady
+fractional generation or the FPSLocker overlay state. Do not interpret the
+`getBID failed! Err: 0x0` line as a proven root cause. Reserve, sizing hint,
+WSI, and swap interval are out of scope for the pending patch. P0 #1 and P1 stay
+open; software tests cannot establish panel cadence, tearing, latency, or cache
+persistence. Savestates remain closed by the user; do not reopen that work.
+
+## Historical snapshot (as of 2c4bac7 — superseded history)
+
+```text
 hint sysconf            = 2048 MiB (2 * GPU_RESERVE_MB), NENÍ total RAM
 GPU_RESERVE_MB          = 1024
 VkMemoryHeap[0].size    = 1536 MiB   (NVK heap_memory_percent = 0.75)
@@ -14,8 +35,8 @@ LSFG device             = fractional path verified; controlled A/B pending
 savestates              = user reports working; investigation closed by user
 ```
 
-Nižší sekce jsou historie; čísla z nich se necitují. Savestate root cause stays
-unresolved and is no longer an active work item; no savestate code was changed.
+Historical sections below are retained for audit and are superseded by the
+Current state above. No savestate code was changed.
 
 ## Follow-up candidate (2026-10-22)
 
@@ -211,3 +232,12 @@ the end of this file.
 - The vendored Vulkan backend formed a seven-level flow mip pyramid with raw right shifts. At Eighth flow resolution, non-32-aligned/smaller surfaces can reach a zero width or height at the deepest levels; creating a Vulkan image with a zero dimension can make LSFG context creation fail. `shift_extent()` now uses a small shared host-testable helper that clamps each mip dimension to at least one pixel and avoids shifts of 32 or more.
 - Added a host regression for a 106x60 flow extent (the sixth mip must be 1x1), plus 160x90, base-size, and oversized-shift cases. Existing Fractional scheduling logic was reviewed and left unchanged: its phase accumulator has bounded sub-frame error and correctly produces 45 generated frames per 360 source frames at 44.444→50 FPS (one in eight), and 10 per 490 at 49→50 FPS. Added these cases as regression tests rather than retuning the scheduler without device evidence.
 - Direct C host tests for the LSFG scheduler and mip extents passed with `-Wall -Wextra -Werror`; `git diff --check` passed. GitHub Actions run `40178672405` passed both `host-tests` and `switch` for commit `ea5eb2b404ac323ca6e7fd21f9d02ad3d37374fa`: https://github.com/berlint-hub/NetherSX2_nx/actions/runs/40178672405. Its `nethersx2-switch` artifact is 43,601,175 bytes and contains the Vulkan NRO (`NetherSX2_nx_vk.nro`, 16,874,371 bytes; embedded build ID `ea5eb2b-run40178672405`). CI validates compilation/linking and the host tests, not the 1/8 setting on device or panel cadence, quality, latency, or tearing; hardware validation remains outstanding.
+
+### Follow-up review after `ea5eb2b` (source changes pending build)
+
+- **Separate mip image sizes from dispatch sizes.** The seventh mip image level is real (`i < 7`); at a 106x60 Eighth-flow extent its image remains clamped to 1x1. Dispatch now derives from the unclamped source extent instead. If either shifted axis is zero, `lsfg_mip_dispatch()` returns 0x0 groups, avoiding any reliance on an unavailable extracted shader bounds check. The beta1 and mipmaps image pyramids and their loop counts are unchanged; only the downsample dispatch extents changed. Host cases cover 106x60 level 6 (image 1x1, dispatch 0x0), 106x60 level 5 (image 3x1, dispatch 1x1), 40x30 level 5 (dispatch 0x0), and base 106x60 (14x8).
+- **Vendored-source maintenance warning:** `third_party/lsfg-vk/lsfg-vk-backend/src/helpers/utils.cpp` includes the project-owned `source/lsfg/lsfg_extent.h`. This is a local patch against upstream lsfg-vk `v2.0.0-dev`, tag commit `0213be9ff93121283ad46a27119f40ece0e6f301`; the vendored snapshot did not record its upstream provenance independently, so verify that base when next refreshing the vendor. Reapply/audit this patch after every lsfg-vk bump; otherwise the mip image clamp can silently disappear.
+- **Peak `heapUsage[0]` is diagnostic evidence with three blind spots, not a complete peak-memory measurement.** First, it depends on `vkGetPhysicalDeviceMemoryProperties2`: if the core calls only the v1 `vkGetPhysicalDeviceMemoryProperties`, `real_memprops2_pd` remains null and the usage line may never appear. CI currently checks that the diagnostic string exists in the binary, not that this runtime route is reached. On the next device log, first check whether the line appears; if absent, instrument the v1 path too. Second, this is a lower bound: NVK updates `heap->used` in `vkAllocateMemory`/`vkFreeMemory` and its source notes “TODO: Include internal allocations?”. Third, the current sample runs at present boundaries, so a short-lived allocation created and freed wholly inside one frame can be missed.
+- **LSFG present-time accounting:** the diagnostic `perf:` present total previously covered `vkQueuePresentKHR_native()` only, while LSFG submits direct driver `QueuePresentKHR()` calls from its bridge. The bridge now measures the duration and call count of those direct driver calls and adds them to the same `gpu_pres_*` counters and frame-attributed present time. Generated frames can issue two driver present calls (generated output and restored source); capture/pass-through uses one. This accounting change needs a diagnostic device run to validate its reported numbers.
+- **Low-latency A/B is not comparable to LSFG-enabled runs.** In `vkQueuePresentKHR_shim`, `EmuCore/GS/low_latency=1` returns via the native present path before invoking the LSFG bridge. The early diagnostic `vkQueuePresentKHR enter ... lsfg=1` line is emitted before that return and therefore does not prove that generation occurred. README now says explicitly that LSFG is bypassed in this mode. A low-latency run with `LSFGEnabled=true` is not comparable to earlier runs where the LSFG bridge actually ran; retain the requested A/B settings `AutoSyncFPSLocker=false`, `low_latency=1`, and record interval zero, pace counters, and tearing separately.
+- Remaining device checks: paired cold/warm cache starts for P1; low-latency A/B as above; inspect whether the peak-usage line appears and interpret it with the limitations above; and explicitly test `Wrapper/LSFGFlowScale=0.125` at a low GS resolution so the level-6 zero-area dispatch path is exercised. This review changes no GPU reserve, sizing hint, WSI behavior, or swap interval. The source patch is not yet represented by `ea5eb2b-run40178672405` and has no new build/device validation yet.

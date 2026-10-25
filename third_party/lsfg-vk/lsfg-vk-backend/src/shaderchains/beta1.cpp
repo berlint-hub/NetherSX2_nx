@@ -2,6 +2,7 @@
 
 #include "beta1.hpp"
 #include "../helpers/utils.hpp"
+#include "lsfg_extent.h"
 #include "lsfg-vk-common/helpers/pointers.hpp"
 #include "lsfg-vk-common/vulkan/command_buffer.hpp"
 #include "lsfg-vk-common/vulkan/image.hpp"
@@ -74,10 +75,12 @@ Beta1::Beta1(const Ctx& ctx,
     // All four beta stages and the replacement downsampler use 8x8 groups.
     this->dispatchExtent0 = backend::add_shift_extent(extent, 7, 3);
     for (size_t i = 0; i < this->downsampleDispatchExtents.size(); ++i) {
-        const VkExtent2D outputExtent =
-            backend::shift_extent(extent, static_cast<uint32_t>(i + 1));
-        this->downsampleDispatchExtents.at(i) =
-            backend::add_shift_extent(outputExtent, 7, 3);
+        const LsfgMipExtent dispatch = lsfg_mip_dispatch(
+            extent.width, extent.height, static_cast<uint32_t>(i + 1), 7, 3);
+        this->downsampleDispatchExtents.at(i) = VkExtent2D{
+            .width = dispatch.width,
+            .height = dispatch.height
+        };
     }
 }
 

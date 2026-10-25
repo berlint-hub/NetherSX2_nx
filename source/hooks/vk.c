@@ -706,13 +706,10 @@ static unsigned long long gpu_pres_calls, gpu_pres_ns;
 #define PERF_HITCH_NS UINT64_C(40000000)  /* 40 ms */
 
 /* Wall time inside the calls that can block the presenting thread. acquire and
- * submit accumulate within the frame they are called in. present is measured in
- * vkQueuePresentKHR_native, which for frame N runs *after* perf_observe_present
- * of frame N, so at attribution time frame_pres_ns still holds the previous
- * present's duration -- which is exactly the part of the interval just measured
- * that the present call consumed. (The LSFG bridge path bypasses
- * vkQueuePresentKHR_native, so with frame generation enabled this term reads 0;
- * every hardware run so far has lsfg off.) */
+ * submit accumulate within the frame they are called in. Native presents are
+ * timed in vkQueuePresentKHR_native; LSFG reports the time and count spent in
+ * its direct driver QueuePresentKHR calls. Both happen after perf_observe_present
+ * for their source frame, so frame_pres_ns is attributed to the next interval. */
 static uint64_t frame_acq_ns, frame_sub_ns, frame_pres_ns;
 
 /* Window counters as of the previous present, so a frame's own share can be
@@ -2009,10 +2006,26 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
         lsfg_fractional_schedule(lsfg_frozen_source_fps, target_fps,
                                  &lsfg_gen_phase, &lsfg_native_gap);
     bool generated_frame = false;
-    const int consumed = generate
-        ? lsfg_nx_present(lsfg_runtime, q, pi, &result, &generated_frame)
-        : lsfg_nx_present_capture(lsfg_runtime, q, pi, &result);
 #ifdef NETHERSX2_VK_DIAGNOSTIC
+    uint64_t bridge_present_ns = 0;
+    uint32_t bridge_present_calls = 0;
+    uint64_t *bridge_present_ns_out = &bridge_present_ns;
+    uint32_t *bridge_present_calls_out = &bridge_present_calls;
+#else
+    uint64_t *bridge_present_ns_out = NULL;
+    uint32_t *bridge_present_calls_out = NULL;
+#endif
+    const int consumed = generate
+        ? lsfg_nx_present(lsfg_runtime, q, pi, &result, &generated_frame,
+                          bridge_present_ns_out, bridge_present_calls_out)
+        : lsfg_nx_present_capture(lsfg_runtime, q, pi, &result,
+                                  bridge_present_ns_out, bridge_present_calls_out);
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+    if (bridge_present_calls) {
+      frame_pres_ns += bridge_present_ns;
+      __atomic_fetch_add(&gpu_pres_calls, bridge_present_calls, __ATOMIC_RELAXED);
+      __atomic_fetch_add(&gpu_pres_ns, bridge_present_ns, __ATOMIC_RELAXED);
+    }
     if (generated_frame) ++perf_generated;
 #endif
     if (consumed) {

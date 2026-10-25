@@ -19,6 +19,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <time.h>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,14 @@ struct FrameSlot {
     vk::Semaphore original;
     bool pending{};
 };
+
+uint64_t monotonicNs() {
+    timespec now{};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return static_cast<uint64_t>(now.tv_sec) * UINT64_C(1000000000) +
+        static_cast<uint64_t>(now.tv_nsec);
+}
 
 } // namespace
 
@@ -121,7 +130,8 @@ struct LsfgNxRuntime {
     }
 
     VkResult present(VkQueue queue, const VkPresentInfoKHR& info, bool generate,
-            bool *generatedFrame) {
+            bool *generatedFrame, uint64_t *presentNs,
+            uint32_t *presentCalls) {
         if (generatedFrame)
             *generatedFrame = false;
         if (queue != vulkan->queue())
@@ -162,8 +172,8 @@ struct LsfgNxRuntime {
             sourceInitialized.at(sourceIndex) = true;
             slot.pending = true;
             ++realFrameIndex;
-            return presentOriginal(
-                queue, info, originalImageIndex, slot.original.handle(), true);
+            return presentOriginal(queue, info, originalImageIndex,
+                slot.original.handle(), true, presentNs, presentCalls);
         }
 
         backend->recordFrame(*context, slot.frame);
@@ -177,8 +187,9 @@ struct LsfgNxRuntime {
             {slot.generated.handle()}, VK_NULL_HANDLE, 0);
         sourceInitialized.at(sourceIndex) = true;
 
-        const VkResult generatedResult = presentGenerated(
-            queue, info, originalImageIndex, slot.generated.handle());
+        const VkResult generatedResult = presentGenerated(queue, info,
+            originalImageIndex, slot.generated.handle(), presentNs,
+            presentCalls);
         if (generatedResult != VK_SUCCESS && generatedResult != VK_SUBOPTIMAL_KHR)
             return generatedResult;
         if (generatedFrame)
@@ -204,8 +215,9 @@ struct LsfgNxRuntime {
             slot.completion.handle());
         slot.pending = true;
 
-        const VkResult originalResult = presentOriginal(
-            queue, info, restoredImageIndex, slot.original.handle(), false);
+        const VkResult originalResult = presentOriginal(queue, info,
+            restoredImageIndex, slot.original.handle(), false, presentNs,
+            presentCalls);
         ++realFrameIndex;
         return originalResult;
     }
@@ -290,25 +302,40 @@ private:
             });
     }
 
+    VkResult queuePresent(VkQueue queue, const VkPresentInfoKHR& info,
+            uint64_t *presentNs, uint32_t *presentCalls) const {
+        if (!presentNs || !presentCalls)
+            return vulkan->df().QueuePresentKHR(queue, &info);
+        const uint64_t start = monotonicNs();
+        const VkResult result = vulkan->df().QueuePresentKHR(queue, &info);
+        const uint64_t end = monotonicNs();
+        if (end > start)
+            *presentNs += end - start;
+        ++*presentCalls;
+        return result;
+    }
+
     VkResult presentGenerated(VkQueue queue, const VkPresentInfoKHR& original,
-            uint32_t imageIndex, VkSemaphore waitSemaphore) const {
+            uint32_t imageIndex, VkSemaphore waitSemaphore,
+            uint64_t *presentNs, uint32_t *presentCalls) const {
         VkPresentInfoKHR generated = original;
         generated.waitSemaphoreCount = 1;
         generated.pWaitSemaphores = &waitSemaphore;
         generated.pImageIndices = &imageIndex;
         generated.pResults = nullptr;
-        return vulkan->df().QueuePresentKHR(queue, &generated);
+        return queuePresent(queue, generated, presentNs, presentCalls);
     }
 
     VkResult presentOriginal(VkQueue queue, const VkPresentInfoKHR& original,
             uint32_t imageIndex, VkSemaphore waitSemaphore,
-            bool keepNextChain) const {
+            bool keepNextChain, uint64_t *presentNs,
+            uint32_t *presentCalls) const {
         VkPresentInfoKHR output = original;
         output.pNext = keepNextChain ? original.pNext : nullptr;
         output.waitSemaphoreCount = 1;
         output.pWaitSemaphores = &waitSemaphore;
         output.pImageIndices = &imageIndex;
-        return vulkan->df().QueuePresentKHR(queue, &output);
+        return queuePresent(queue, output, presentNs, presentCalls);
     }
 
     VkSwapchainKHR swapchain{};
@@ -344,9 +371,13 @@ namespace {
 
 bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
         const VkPresentInfoKHR *presentInfo, VkResult *result, bool generate,
-        bool *generatedFrame) {
+        bool *generatedFrame, uint64_t *presentNs, uint32_t *presentCalls) {
     if (generatedFrame)
         *generatedFrame = false;
+    if (presentNs)
+        *presentNs = 0;
+    if (presentCalls)
+        *presentCalls = 0;
     if (!runtime || !presentInfo || !result ||
             presentInfo->swapchainCount != 1 || !presentInfo->pSwapchains ||
             !presentInfo->pImageIndices ||
@@ -354,7 +385,8 @@ bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
         return false;
 
     try {
-        *result = runtime->present(queue, *presentInfo, generate, generatedFrame);
+        *result = runtime->present(queue, *presentInfo, generate, generatedFrame,
+            presentNs, presentCalls);
         return true;
     } catch (...) {
     }
@@ -367,14 +399,16 @@ bool presentCommon(LsfgNxRuntime *runtime, VkQueue queue,
 
 extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
         const VkPresentInfoKHR *presentInfo, VkResult *result,
-        bool *generatedFrame) {
+        bool *generatedFrame, uint64_t *presentNs, uint32_t *presentCalls) {
     return presentCommon(runtime, queue, presentInfo, result, true,
-        generatedFrame);
+        generatedFrame, presentNs, presentCalls);
 }
 
 extern "C" bool lsfg_nx_present_capture(LsfgNxRuntime *runtime, VkQueue queue,
-        const VkPresentInfoKHR *presentInfo, VkResult *result) {
-    return presentCommon(runtime, queue, presentInfo, result, false, nullptr);
+        const VkPresentInfoKHR *presentInfo, VkResult *result,
+        uint64_t *presentNs, uint32_t *presentCalls) {
+    return presentCommon(runtime, queue, presentInfo, result, false, nullptr,
+        presentNs, presentCalls);
 }
 
 #endif /* USE_VULKAN */

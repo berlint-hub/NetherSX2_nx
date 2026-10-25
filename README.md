@@ -171,7 +171,10 @@ follows the panel with swap interval 1.
 Vulkan low latency is a separate, explicit `EmuCore/GS/low_latency = 1`
 preference; AutoSyncFPSLocker never enables it. Low latency is not compatible
 with display sync: if both are requested, display sync takes precedence and
-NetherSX2 requests FIFO without its wall-clock submit pacer. For a clean A/B,
+NetherSX2 requests FIFO without its wall-clock submit pacer. When
+`EmuCore/GS/low_latency = 1` is active, `vkQueuePresentKHR_shim` returns through
+the native path before the LSFG bridge, so LSFG is not applied even if its UI
+setting or the earlier diagnostic entry line says it is enabled. For a clean A/B,
 set `Wrapper/AutoSyncFPSLocker = false` and manually set
 `EmuCore/GS/low_latency = 1`; AutoSync never enables low latency. When used on
 its own, NetherSX2 requests IMMEDIATE when the surface advertises it, falling
