@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "utils.hpp"
+#include "lsfg_extent.h"
 
 #include <array>
 #include <cstddef>
@@ -22,9 +23,10 @@ ConstantBuffer backend::getDefaultConstantBuffer(
 }
 
 VkExtent2D backend::shift_extent(VkExtent2D extent, uint32_t i) {
+    const LsfgMipExtent mip = lsfg_mip_extent(extent.width, extent.height, i);
     return VkExtent2D{
-        .width = extent.width >> i,
-        .height = extent.height >> i
+        .width = mip.width,
+        .height = mip.height
     };
 }
 

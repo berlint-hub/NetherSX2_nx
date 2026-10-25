@@ -263,8 +263,9 @@ display saturates its FIFO back-pressure reads as a slower source, which would
 raise the ratio and generate more: positive feedback.
 
 **Flow resolution** offers Eighth (0.125) as well as Quarter and Half; the
-bridge clamps the value to 0.125–0.5, so Eighth is the cheapest optical-flow
-pass it accepts.
+bridge clamps the value to 0.125–0.5. The mip pyramid clamps each axis to at
+least one pixel, so small output sizes cannot create invalid zero-sized Vulkan
+images at Eighth resolution.
 
 ### Diagnostics
 

@@ -30,6 +30,10 @@ int main(void) {
                     generated_count(25.0, 50.0, 300) == 300);
   failures += check("43-to-50 uses fractional cadence",
                     generated_count(43.0, 50.0, 300) == 48);
+  failures += check("44.444-to-50 schedules one in eight",
+                    generated_count(44.44444444444444, 50.0, 360) == 45);
+  failures += check("49-to-50 preserves low generation cadence",
+                    generated_count(49.0, 50.0, 490) == 10);
   failures += check("27.3-to-50 rounds accumulated phase",
                     generated_count(27.3, 50.0, 300) == 249);
   failures += check("ratio is capped at 2x",

@@ -806,7 +806,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"Wrapper/LSFGEnabled", "Frame generation",
    "Makes LSFG 2x available for this launch. Frame generation starts Off in-game and must be enabled from the overlay. Native 50/60 FPS sources use protected passthrough. Requires a user-supplied Lossless.dll at /switch/nethersx2/lsfg/."},
   {"Wrapper/LSFGFlowScale", "Frame generation quality",
-   "Sets the resolution used for optical-flow analysis. Half can retain more motion detail but costs considerably more GPU time and memory; Quarter is recommended on Switch."},
+   "Sets the resolution used for optical-flow analysis. Eighth is cheapest, Quarter is recommended on Switch, and Half can retain more motion detail at a higher GPU cost. Small mip levels are clamped to at least one pixel."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
    "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
 

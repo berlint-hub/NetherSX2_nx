@@ -1791,8 +1791,6 @@ vkQueuePresentKHR_native(VkQueue queue, const VkPresentInfoKHR *present_info) {
   const uint64_t t0 = lsfg_monotonic_ns();
 #endif
   VkResult result = present(queue, present_info);
-  /* Timestamp the completed present call rather than source-frame entry. */
-  saltysd_display_sync_note_present();
   if (vk_low_latency_enabled())
     low_latency_next_vblank_ns = lsfg_monotonic_ns() + low_latency_period_ns();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
@@ -1865,6 +1863,11 @@ static int lsfg_try_create(VkQueue queue) {
 static VkResult VKAPI_CALL
 vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   ++vk_present_count;
+  /* This is the source present boundary. LSFG's bridge issues its own Vulkan
+   * presents and returns without going through vkQueuePresentKHR_native(), so
+   * record one cadence sample here for every emulator frame, regardless of
+   * whether it is passed through or interpolated. */
+  saltysd_display_sync_note_present();
 #ifdef NETHERSX2_VK_DIAGNOSTIC
   /* Every present, whatever the path below decides to do with it. */
   perf_observe_present();

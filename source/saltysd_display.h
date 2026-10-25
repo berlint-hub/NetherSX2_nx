@@ -20,6 +20,7 @@ void saltysd_display_sync_poll(void);
 /* Publish the latest integer cadence to SaltyNX at 10 Hz, without doing IPC. */
 void saltysd_display_sync_publish(void);
 void saltysd_display_sync_shutdown(void);
+/* Record one emulator/source-present event, not generated output presents. */
 void saltysd_display_sync_note_present(void);
 bool saltysd_display_sync_active(void);
 /* Estimated NetherSX2 present rate from recent presentation timestamps; zero
