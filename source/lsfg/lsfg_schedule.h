@@ -22,6 +22,29 @@ static inline int lsfg_fractional_should_activate(double source_fps,
          source_fps < target_fps * 0.98;
 }
 
+/* After fractional generation starts, a source rate that recovers above target
+ * should return to native presentation. Keep a 2% hysteresis band (activation
+ * requires source < 98% of target) and require a sustained run to avoid routing
+ * flaps caused by individual cadence spikes. */
+#define LSFG_FRACTIONAL_RECHECK_SAMPLES 16
+static inline unsigned lsfg_fractional_recovery_run(double source_fps,
+                                                     double target_fps,
+                                                     unsigned stable_samples) {
+  if (!(source_fps > 0.0) || !(target_fps > 0.0) ||
+      source_fps < target_fps * 1.02)
+    return 0;
+  return stable_samples < LSFG_FRACTIONAL_RECHECK_SAMPLES
+      ? stable_samples + 1 : LSFG_FRACTIONAL_RECHECK_SAMPLES;
+}
+
+static inline int lsfg_fractional_should_rearm_native(double source_fps,
+                                                       double target_fps,
+                                                       unsigned stable_samples) {
+  return source_fps > 0.0 && target_fps > 0.0 &&
+         source_fps >= target_fps * 1.02 &&
+         stable_samples >= LSFG_FRACTIONAL_RECHECK_SAMPLES;
+}
+
 /* Decide whether this source present earns interpolation for the requested
  * output rate. The bridge emits two output frames when interpolating and one
  * when capturing, so the extra-frame fraction is target/source - 1, clamped to

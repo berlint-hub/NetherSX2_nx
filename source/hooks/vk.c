@@ -209,6 +209,7 @@ static int    lsfg_fractional_ready;   /* source estimate frozen */
 static double lsfg_frozen_source_fps;  /* measured before any generation */
 static double lsfg_gen_phase;          /* accumulator in [0,1) */
 static int    lsfg_native_gap;         /* a present the bridge never saw */
+static unsigned lsfg_source_recovered_run; /* sustained high-side recheck */
 
 static PFN_vkCreateDevice real_create_device;
 static PFN_vkGetDeviceQueue real_get_device_queue;
@@ -537,6 +538,7 @@ static void reset_tracked_swapchain(void) {
   lsfg_frozen_source_fps = 0.0;
   lsfg_gen_phase = 0.0;
   lsfg_native_gap = 0;
+  lsfg_source_recovered_run = 0;
   __atomic_store_n(&lsfg_runtime_available, 0, __ATOMIC_RELEASE);
 }
 
@@ -1961,9 +1963,39 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
     lsfg_frozen_source_fps = 0.0;
     lsfg_gen_phase = 0.0;
     lsfg_native_gap = 0;
+    lsfg_source_recovered_run = 0;
     lsfg_init_attempted = 0;
     lsfg_rate_decision = -1;
     lsfg_previous_requested = requested;
+  }
+
+  /* The source-rate latch must not remain stale if cadence recovers while the
+   * bridge is active. Use the independent present-rate estimator, not intervals
+   * measured across generated-frame FIFO blocking; require the same 2% hysteresis
+   * and a sustained run before switching back to the native path. */
+  if (fractional && lsfg_fractional_ready) {
+    const double live_source_fps = (double)saltysd_display_sync_rate();
+    lsfg_source_recovered_run = lsfg_fractional_recovery_run(
+        live_source_fps, target_fps, lsfg_source_recovered_run);
+    if (lsfg_fractional_should_rearm_native(
+            live_source_fps, target_fps, lsfg_source_recovered_run)) {
+      lsfg_fractional_ready = 0;
+      lsfg_frozen_source_fps = live_source_fps;
+      lsfg_last_source_present_ns = 0;
+      lsfg_source_interval_ns = 0.0;
+      lsfg_source_samples = 0;
+      lsfg_at_cap_run = 0;
+      lsfg_source_recovered_run = 0;
+      lsfg_gen_phase = 0.0;
+      lsfg_native_gap = 1;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+      vk_diag_note("LSFG fractional native passthrough re-entered live_src=%.1f target=%.1f",
+                   live_source_fps, target_fps);
+#endif
+      return vkQueuePresentKHR_native(q, pi);
+    }
+  } else {
+    lsfg_source_recovered_run = 0;
   }
 
   if (!requested && lsfg_runtime) {

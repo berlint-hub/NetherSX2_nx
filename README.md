@@ -270,7 +270,13 @@ presents it unchanged. If a native present occurs after bridge activation, the
 scheduler forces one capture-only re-warm frame before it interpolates again.
 The source rate is frozen after 16 valid samples and before generation begins,
 because once the display saturates its FIFO back-pressure reads as a slower
-source, which would raise the ratio and generate more: positive feedback.
+source, which would raise the ratio and generate more: positive feedback. While
+the bridge is active, the independent display-sync estimate is still checked for
+recovery: after 16 consecutive samples at least 2% above target, fractional mode
+returns to native presentation and measures again. This high-side hysteresis
+avoids flapping near the target and does not use intervals distorted by the
+bridge's FIFO blocking. It is a cadence safeguard, not a confirmed fix for visual
+flicker.
 
 **Flow resolution** offers Eighth (0.125), Quarter, Half, and Full (1.0). Full
 uses the output resolution for optical-flow analysis: at a fixed output size it

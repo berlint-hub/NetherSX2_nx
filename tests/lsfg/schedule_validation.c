@@ -37,6 +37,17 @@ int main(void) {
                     !lsfg_fractional_should_activate(40.0, 40.0));
   failures += check("meaningful source deficit activates fractional mode",
                     lsfg_fractional_should_activate(39.0, 40.0));
+  failures += check("recovery needs sustained source above hysteresis band",
+                    !lsfg_fractional_should_rearm_native(41.0, 40.0, 15) &&
+                    lsfg_fractional_should_rearm_native(41.0, 40.0, 16));
+  failures += check("recovery run saturates and resets below the band",
+                    lsfg_fractional_recovery_run(41.0, 40.0, 15) == 16 &&
+                    lsfg_fractional_recovery_run(41.0, 40.0, 16) == 16 &&
+                    lsfg_fractional_recovery_run(40.5, 40.0, 15) == 0 &&
+                    lsfg_fractional_recovery_run(0.0, 40.0, 15) == 0);
+  failures += check("recovery does not trigger inside hysteresis band",
+                    !lsfg_fractional_should_rearm_native(40.5, 40.0, 20) &&
+                    !lsfg_fractional_should_rearm_native(0.0, 40.0, 20));
 
   failures += check("50-to-50 passes through",
                     generated_count(50.0, 50.0, 300) == 0);
