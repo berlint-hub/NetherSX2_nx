@@ -1969,6 +1969,18 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
     lsfg_init_attempted = 0;
   }
 
+  /* Fractional mode only needs the bridge after a genuinely sub-target source
+   * rate has been measured. Keep native presentation while warming up or while
+   * the source is already at/above target: capture-only still submits an extra
+   * copy and semaphore path, which can needlessly pull a 50 FPS game below its
+   * target. Mark the bypass so the first later bridge present is capture-only
+   * and refreshes the ping-pong source before any interpolation. */
+  if (lsfg_fractional_use_native_passthrough(
+          fractional, lsfg_fractional_ready)) {
+    lsfg_native_gap = 1;
+    return vkQueuePresentKHR_native(q, pi);
+  }
+
   if (requested && lsfg_rate_decision < 0 && lsfg_source_samples >= 8)
     lsfg_rate_decision = lsfg_source_is_high_rate() ? 1 : 0;
 
@@ -1988,9 +2000,8 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
   }
 
   /* Keep native presentation active until source-rate classification completes.
-   * Fractional mode has no such wait: it routes every present through the bridge
-   * from the start, capture-only while measuring, so the ping-pong source slot
-   * is already warm when the first interpolation is earned. */
+   * Fractional mode does the same while measuring, then uses a single bridge
+   * capture to re-warm its source slot before the scheduler's first interpolation. */
   if (!fractional && requested && lsfg_rate_decision < 0) {
     if (requested) lsfg_native_gap = 1;
     return vkQueuePresentKHR_native(q, pi);

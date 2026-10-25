@@ -36,4 +36,12 @@ static inline int lsfg_fractional_schedule(double source_fps, double target_fps,
   return 0;
 }
 
+/* While fractional mode is still measuring (or has not found a source rate
+ * below target), native presentation avoids the bridge's copy/submit overhead.
+ * Once ready, every source frame must pass through the bridge for interpolation. */
+static inline int lsfg_fractional_use_native_passthrough(int fractional_mode,
+                                                         int ready) {
+  return fractional_mode && !ready;
+}
+
 #endif /* NETHERSX2_LSFG_SCHEDULE_H */

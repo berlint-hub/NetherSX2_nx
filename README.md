@@ -254,16 +254,19 @@ enabled for prepared LSFG sessions so only unique game frames are interpolated.
   because one interpolation per source frame is all the bridge produces. The
   cost is one frame of latency plus the GPU work of each generated frame.
 
-Fractional needs the bridge to see *every* source frame even when it does not
-interpolate, because it interpolates between the previous source frame and the
-current one: a frame it never saw would leave the previous-frame slot stale and
-the next interpolation would span the whole gap and land in the wrong place on
-the timeline. So non-interpolated presents go through `lsfg_nx_present_capture()`,
-which copies the frame into the ping-pong slot and presents it unchanged — an
-image copy, far cheaper than interpolation. The source rate is measured during
-that capture-only warm-up (16 presents) and then frozen, because once the
-display saturates its FIFO back-pressure reads as a slower source, which would
-raise the ratio and generate more: positive feedback.
+Fractional first measures the source rate on native presents. While the source
+is at or above the target, it stays on that native path—there is no reason to pay
+the bridge's capture-copy and submit overhead when no interpolation can be
+scheduled. Once the source is stably below target, the bridge must see *every*
+source frame even when it does not interpolate: otherwise its previous-frame
+slot would be stale and the next interpolation would span the whole gap and land
+in the wrong place on the timeline. Those non-interpolated frames go through
+`lsfg_nx_present_capture()`, which copies the frame into the ping-pong slot and
+presents it unchanged. If a native present occurs after bridge activation, the
+scheduler forces one capture-only re-warm frame before it interpolates again.
+The source rate is frozen after 16 valid samples and before generation begins,
+because once the display saturates its FIFO back-pressure reads as a slower
+source, which would raise the ratio and generate more: positive feedback.
 
 **Flow resolution** offers Eighth (0.125) as well as Quarter and Half; the
 bridge clamps the value to 0.125–0.5. The mip pyramid clamps each axis to at

@@ -53,6 +53,12 @@ int main(void) {
   failures += check("null scheduler state is rejected",
                     !lsfg_fractional_schedule(25.0, 50.0, NULL, &native_gap) &&
                     !lsfg_fractional_schedule(25.0, 50.0, &phase, NULL));
+  failures += check("fractional warm-up stays on the native path",
+                    lsfg_fractional_use_native_passthrough(1, 0));
+  failures += check("latched fractional source enters the bridge",
+                    !lsfg_fractional_use_native_passthrough(1, 1));
+  failures += check("non-fractional mode keeps its existing routing",
+                    !lsfg_fractional_use_native_passthrough(0, 0));
 
   if (failures)
     return 1;
