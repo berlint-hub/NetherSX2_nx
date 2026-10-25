@@ -248,11 +248,15 @@ enabled for prepared LSFG sessions so only unique game frames are interpolated.
   runs below ~33 FPS, and passes video through untouched above that — twice
   50 FPS is 100 and the panel is 60 Hz, so there would be nothing to show.
 - **Fractional (target rate)** interpolates on only *some* frames so the output
-  lands on **Target output rate** instead of always doubling. A game at 40 FPS
-  aiming for 60 gets one generated frame every two; a game at 47 aiming for 50
-  gets about one every sixteen. Output can never exceed twice the source rate,
-  because one interpolation per source frame is all the bridge produces. The
-  cost is one frame of latency plus the GPU work of each generated frame.
+  approaches **Target output rate** instead of always doubling. The effective
+  target is capped at the refresh rate reported for the active panel (for
+  example, a 60 Hz request becomes 50 Hz on a 50 Hz display). Sources within 2%
+  of the target stay on native presentation to avoid paying capture overhead for
+  cadence noise. A game at 40 FPS aiming for 50 gets about one generated frame
+  every four; a game at 47 aiming for 50 gets about one every sixteen. Output
+  can never exceed twice the source rate, because one interpolation per source
+  frame is all the bridge produces. The cost is one frame of latency plus the
+  GPU work of each generated frame.
 
 Fractional first measures the source rate on native presents. While the source
 is at or above the target, it stays on that native path—there is no reason to pay

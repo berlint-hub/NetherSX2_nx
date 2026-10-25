@@ -22,6 +22,22 @@ static unsigned generated_count(double source_fps, double target_fps,
 
 int main(void) {
   int failures = 0;
+  failures += check("60 Hz request is capped to a 50 Hz panel",
+                    lsfg_effective_target_fps(60.0, 50.0) == 50.0);
+  failures += check("lower configured target is preserved",
+                    lsfg_effective_target_fps(40.0, 50.0) == 40.0);
+  failures += check("unknown panel rate does not change target",
+                    lsfg_effective_target_fps(60.0, 0.0) == 60.0);
+  failures += check("invalid configured target is disabled",
+                    lsfg_effective_target_fps(0.0, 50.0) == 0.0);
+  failures += check("44-to-50 source enters fractional mode",
+                    lsfg_fractional_should_activate(44.0, 50.0));
+  failures += check("near-target cadence noise stays native",
+                    !lsfg_fractional_should_activate(39.5, 40.0) &&
+                    !lsfg_fractional_should_activate(40.0, 40.0));
+  failures += check("meaningful source deficit activates fractional mode",
+                    lsfg_fractional_should_activate(39.0, 40.0));
+
   failures += check("50-to-50 passes through",
                     generated_count(50.0, 50.0, 300) == 0);
   failures += check("source above target passes through",

@@ -3,6 +3,25 @@
 #ifndef NETHERSX2_LSFG_SCHEDULE_H
 #define NETHERSX2_LSFG_SCHEDULE_H
 
+/* Do not ask a fixed-refresh panel to consume frames faster than it refreshes.
+ * A missing/invalid panel rate leaves the user's configured target unchanged. */
+static inline double lsfg_effective_target_fps(double configured_fps,
+                                               double panel_hz) {
+  if (!(configured_fps > 0.0))
+    return 0.0;
+  return panel_hz > 0.0 && panel_hz < configured_fps
+      ? panel_hz : configured_fps;
+}
+
+/* Tiny deficits are usually cadence noise and do not justify routing every
+ * source frame through the capture bridge. Require at least 2% headroom before
+ * enabling fractional capture/generation. */
+static inline int lsfg_fractional_should_activate(double source_fps,
+                                                  double target_fps) {
+  return source_fps > 0.0 && target_fps > 0.0 &&
+         source_fps < target_fps * 0.98;
+}
+
 /* Decide whether this source present earns interpolation for the requested
  * output rate. The bridge emits two output frames when interpolating and one
  * when capturing, so the extra-frame fraction is target/source - 1, clamped to

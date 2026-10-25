@@ -376,7 +376,8 @@ static double lsfg_target_fps_pref(void) {
                                       __ATOMIC_ACQUIRE);
     target = __atomic_load_n(&lsfg_target_fps_cached, __ATOMIC_ACQUIRE);
   }
-  return (double)target;
+  const unsigned panel_hz = saltysd_display_sync_service_rate();
+  return lsfg_effective_target_fps((double)target, (double)panel_hz);
 }
 
 int vk_lsfg_is_available(void) {
@@ -1936,7 +1937,7 @@ vkQueuePresentKHR_shim(VkQueue q, const VkPresentInfoKHR *pi) {
        * there is no feedback loop left to run away with. */
       if (lsfg_source_samples >= 16) {
         const double measured = lsfg_measured_source_fps();
-        if (measured > 0.0 && measured < target_fps) {
+        if (lsfg_fractional_should_activate(measured, target_fps)) {
           lsfg_frozen_source_fps = measured;
           lsfg_fractional_ready = 1;
           lsfg_gen_phase = 0.0;
