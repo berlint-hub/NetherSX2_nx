@@ -36,6 +36,7 @@
 #include "forwarder.h"
 #include "SwitchStorage.h"
 #include "CheatManager.h"
+#include "fps_mods.h"
 #include "ui_audio.h"
 #include "retroachievements.h"
 #include "launcher_update.h"
@@ -5458,19 +5459,26 @@ static void runCheatSettings(Game &game,uint32_t crc) {
   const std::string path=crc?cheatFileForCRC(crc):std::string();
   NxCheatList cheats{};
   bool loaded=crc&&nx_cheat_load(path.c_str(),&cheats);
+  const bool hasFpsMod=crc&&nx_fps_mod_available(crc);
+  bool fpsModInstalled=hasFpsMod&&nx_fps_mod_installed(crc,path.c_str());
   int sel=0,top=0;
   const int rowH=settingsRowH()+8,y0=settingsListY();
   std::string notice;
   beginScreenFx();
   for(;;){
     const int codeCount=loaded?(int)cheats.count:0;
-    const int n=codeCount+1;
+    const int fpsActionIndex=codeCount;
+    const int backIndex=codeCount+(hasFpsMod?1:0);
+    const int n=backIndex+1;
     // The status panel sits between the list and the footer, so it has to be
     // measured before the list decides how many rows fit: a full list would
     // otherwise draw its last rows underneath an opaque panel.
     std::vector<std::string> notes; SDL_Color noteColor=COL_HI;
     if(!crc){
       notes.emplace_back("Launch this game once so NetherSX2 can identify its CRC.");
+    } else if(!notice.empty()){
+      notes.push_back(notice);
+      if(notice.find("Could not")==0) noteColor=(SDL_Color){235,120,120,255};
     } else if(!loaded){
       notes.emplace_back("The PNACH file could not be read.");
     } else if(!cheats.file_exists){
@@ -5479,9 +5487,13 @@ static void runCheatSettings(Game &game,uint32_t crc) {
       notes.emplace_back(filename);
     } else if(!cheats.count){
       notes.emplace_back("No PNACH sections or named code blocks were found.");
-    } else if(!notice.empty()){
-      notes.push_back(notice);
-      if(notice.find("Could not")==0) noteColor=(SDL_Color){235,120,120,255};
+    }
+    if(crc&&hasFpsMod){
+      notes.emplace_back(fpsModInstalled
+          ? "Verified 30 FPS mod is installed below; toggle its row to change state."
+          : std::string("Available: ")+nx_fps_mod_label(crc));
+    } else if(crc){
+      notes.emplace_back("No verified FPS mod for this game CRC. FPS patches are game-specific.");
     }
     const int lineHeight=fontHeight(g_font)+8;
     const int noticeH=notes.empty()?0:(int)notes.size()*lineHeight+36;
@@ -5507,7 +5519,26 @@ static void runCheatSettings(Game &game,uint32_t crc) {
       if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_UP) sel=(sel+n-1)%n;
       else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel=(sel+1)%n;
       else if(event.cbutton.button==BTN_CANCEL) return;
-      else if(event.cbutton.button==BTN_CONFIRM&&sel==codeCount) return;
+      else if(event.cbutton.button==BTN_CONFIRM&&hasFpsMod&&sel==fpsActionIndex){
+        const NxFpsModInstallResult result=nx_fps_mod_install(crc,path.c_str());
+        if(result==NX_FPS_MOD_INSTALLED){
+          loaded=nx_cheat_load(path.c_str(),&cheats);
+          fpsModInstalled=nx_fps_mod_installed(crc,path.c_str());
+          notice="FPS mod added as Off. Select its code row to enable it.";
+        } else if(result==NX_FPS_MOD_ALREADY_INSTALLED){
+          fpsModInstalled=true;
+          notice="FPS mod already installed; enable or disable it in the list above.";
+        } else if(result==NX_FPS_MOD_UNSUPPORTED_GAME){
+          notice="Could not find a verified FPS mod for this game.";
+        } else if(result==NX_FPS_MOD_NETWORK_ERROR){
+          notice="Could not download the FPS mod. Check the internet connection.";
+        } else if(result==NX_FPS_MOD_INVALID_SOURCE){
+          notice="Could not verify the FPS mod from its source.";
+        } else {
+          notice="Could not write the FPS mod to the cheats folder.";
+        }
+      }
+      else if(event.cbutton.button==BTN_CONFIRM&&sel==backIndex) return;
       else if(sel<codeCount&&(event.cbutton.button==BTN_CONFIRM||
               event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_LEFT||
               event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_RIGHT)){
@@ -5536,7 +5567,12 @@ static void runCheatSettings(Game &game,uint32_t crc) {
     for(int row=0;row<vis&&top+row<n;row++){
       const int index=top+row,slot=y0+row*rowH;
       const bool current=index==sel;
-      if(index==codeCount){
+      if(hasFpsMod&&index==fpsActionIndex){
+        drawSettingsRowText(tr("Download 30 FPS mod"),
+                            fpsModInstalled?tr("Installed"):tr("PCSX2 database"),
+                            slot,colW,labelX,valX,current,
+                            current?COL_VAL:COL_TXT,current?COL_VAL:COL_DIM,false,rowH);
+      } else if(index==backIndex){
         drawSettingsRowText(tr("Back"),"",slot,colW,labelX,valX,current,
                             current?COL_VAL:COL_TXT,current?COL_VAL:COL_DIM,false,rowH);
       } else {
@@ -5562,7 +5598,9 @@ static void runCheatSettings(Game &game,uint32_t crc) {
     }
     // The row past the last cheat is the Back row: nothing there toggles.
     FootItem footer[4];int hintCount=0;
-    if(sel<codeCount){
+    if(hasFpsMod&&sel==fpsActionIndex){
+      footer[hintCount++]={"A",fpsModInstalled?"Check":"Download"};
+    } else if(sel<codeCount){
       footer[hintCount++]={"A","Toggle"};
       footer[hintCount++]={"Left","Off"};
       footer[hintCount++]={"Right","On"};
