@@ -1841,9 +1841,10 @@ static int lsfg_try_create(VkQueue queue) {
     flow_scale = 0.25f;
 
   /* Full-resolution flow is already the most expensive option. Keep its motion
-   * resolution, but always pair it with LSFG's performance shader variants on
-   * Switch; the quality variants caused a measurable source-FPS regression on
-   * Tegra X1. Other flow scales continue to honor the user's preference. */
+   * resolution, but pair it with LSFG's performance shader variants on Switch
+   * as a targeted mitigation for the reported source-FPS loss. The log does not
+   * isolate shader quality as the cause, so verify this change on device. Other
+   * flow scales continue to honor the user's preference. */
   const bool configured_performance_mode =
       prefs_get_bool("Wrapper/LSFGPerformance", true);
   const bool performance_mode = configured_performance_mode || flow_scale >= 1.0f;
