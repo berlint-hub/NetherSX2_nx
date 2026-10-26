@@ -29,9 +29,9 @@ game's **Y** menu, open **Collections** to add or remove that game from one or
 more collections. Collection membership is saved with the launcher settings.
 Press **X** from the library to search game titles and filenames with the system
 keyboard; submit an empty query to clear the filter. Search works inside the
-current tab. Press **+** to sort the library by title, filename, or most recently
-played; the Recent tab always stays newest-first. Use the settings icon for global
-options.
+current tab. Press **L3** on a selected game to toggle its favorite status. Press
+**+** to sort the library by title, filename, or most recently played; the Recent
+tab always stays newest-first. Use the settings icon for global options.
 
 The PS2 theme uses an animated background. Classic keeps the same menu colors
 and displays the selected game's artwork behind the library. SteamGridDB cover

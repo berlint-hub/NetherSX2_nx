@@ -116,6 +116,8 @@ constexpr Translation s_text[] = {
     {"Added to collection", "Ajouté à la collection", "Zur Sammlung hinzugefügt", "Añadido a la colección", "Aggiunto alla collezione", "Adicionado à coleção","已加入合集","已加入收藏集"},
     {"Removed from collection", "Retiré de la collection", "Aus Sammlung entfernt", "Eliminado de la colección", "Rimosso dalla collezione", "Removido da coleção","已从合集移除","已從收藏集移除"},
     {"Browse", "Parcourir", "Durchsuchen", "Explorar", "Sfoglia", "Explorar","浏览","瀏覽"},
+    {"Added to favorites", "Ajouté aux favoris", "Zu Favoriten hinzugefügt", "Añadido a favoritos", "Aggiunto ai preferiti", "Adicionado aos favoritos","已加入收藏","已加入收藏"},
+    {"Removed from favorites", "Retiré des favoris", "Aus Favoriten entfernt", "Eliminado de favoritos", "Rimosso dai preferiti", "Removido dos favoritos","已从收藏中移除","已從收藏中移除"},
     {"Sort", "Trier", "Sortieren", "Ordenar", "Ordina", "Ordenar","排序","排序"},
     {"Sort games", "Trier les jeux", "Spiele sortieren", "Ordenar juegos", "Ordina giochi", "Ordenar jogos","排序游戏","排序遊戲"},
     {"Title A-Z", "Titre A-Z", "Titel A-Z", "Título A-Z", "Titolo A-Z", "Título A-Z","标题升序","標題升序"},

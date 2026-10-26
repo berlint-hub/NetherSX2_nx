@@ -1789,7 +1789,8 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
           !strcmp(button,"B")?BTN_CANCEL:
           !strcmp(button,"X")?BTN_X:
           !strcmp(button,"Y")?BTN_Y:
-          !strcmp(button,"+")?SDL_CONTROLLER_BUTTON_START:-1;
+          !strcmp(button,"+")?SDL_CONTROLLER_BUTTON_START:
+          !strcmp(button,"L3")?SDL_CONTROLLER_BUTTON_LEFTSTICK:-1;
         g_footN++;
       }
       if(i+1<layout.rowEnd[row]) x+=layout.gapAfter[i];
@@ -1797,8 +1798,8 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
   }
 }
 // Shared by renderGrid (to draw) and gridLayout (to reserve the right height).
-static std::array<FootItem,5> libraryFooter(){
-  return {{{"A","Launch"},{"Y","Game Menu"},{"X","Search"},{"+","Sort"},{"B","Quit"}}};
+static std::array<FootItem,6> libraryFooter(){
+  return {{{"A","Launch"},{"L3","Favorite"},{"Y","Game Menu"},{"X","Search"},{"+","Sort"},{"B","Quit"}}};
 }
 
 static void drawSettingsFooter(const char *text,int cy=-1){
@@ -8259,6 +8260,24 @@ int main(int argc, char **argv){
           break;
         case SDL_CONTROLLER_BUTTON_START:
           changeLibrarySort();
+          break;
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+          if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
+            const std::string key=game->key;
+            const bool add=g_favorites.erase(key)==0;
+            if(add) g_favorites.insert(key);
+            saveLibraryOrganization();
+            rebuildVisibleGames();
+            const auto found=std::find_if(g_visibleGames.begin(),g_visibleGames.end(),[&](size_t index){
+              return g_games[index].key==key;
+            });
+            if(found!=g_visibleGames.end()) sel=(int)(found-g_visibleGames.begin());
+            else sel=g_visibleGames.empty()?0:std::min(sel,(int)g_visibleGames.size()-1);
+            const std::string message=uiText(add?"Added to favorites":"Removed from favorites");
+            toast(message.c_str());
+            keepLibrarySelection=true;
+            beginScreenFx();
+          }
           break;
         case BTN_Y:
           if(!g_libraryHeaderFocused&&g_libraryView==LibraryView::Collections){
