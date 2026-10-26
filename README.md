@@ -23,10 +23,11 @@ bundled and the launcher does not offer them.
 
 The launcher supports multiple library folders across SD, USB mass storage
 (FAT32, exFAT, NTFS), and SMB shares. The Recent, All games, Favorites, and
-Collections tabs organize the library. In Collections, press **Y** to browse a
-collection or manage them; create, rename, and delete collections there. From a
-game's **Y** menu, open **Collections** to add or remove that game from one or
-more collections. Collection membership is saved with the launcher settings.
+Collections tabs organize the library. In Collections, press **−** (or focus the
+Collections tab and press **A**) to browse collections or manage them; create,
+rename, and delete collections there. Press **Y** on a game to open its menu,
+then choose **Collections** to add or remove it from one or more collections.
+Collection membership is saved with the launcher settings.
 Press **X** from the library to search game titles and filenames with the system
 keyboard; submit an empty query to clear the filter. Search works inside the
 current tab. Press **L3** on a selected game to toggle its favorite status. Press

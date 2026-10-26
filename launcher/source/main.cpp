@@ -1790,6 +1790,7 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
           !strcmp(button,"X")?BTN_X:
           !strcmp(button,"Y")?BTN_Y:
           !strcmp(button,"+")?SDL_CONTROLLER_BUTTON_START:
+          !strcmp(button,"-")?SDL_CONTROLLER_BUTTON_BACK:
           !strcmp(button,"L3")?SDL_CONTROLLER_BUTTON_LEFTSTICK:-1;
         g_footN++;
       }
@@ -7510,7 +7511,7 @@ static void drawLibraryEmpty(){
       noMatches?"Press X to change or clear the filter.":
       g_libraryView==LibraryView::Recent?"Games you launch appear here, most recent first.":
       g_libraryView==LibraryView::Favorites?"Mark games as favorites from their game menu.":
-      g_libraryView==LibraryView::Collections?"Press A to browse collections or Y to change the collection.":
+      g_libraryView==LibraryView::Collections?"Press A or - to browse collections.":
       "Add game folders in Settings to populate your library.";
   drawTextC(g_font_big,SW/2,SH/2-80,tr(title),COL_TXT);
   drawWrappedCentered(g_font_sm,SW/2,SH/2-22,SW-240,30,2,tr(description),COL_DIM);
@@ -7566,17 +7567,24 @@ static void renderGrid(int selection,int top){
   } else drawLibraryEmpty();
   drawUpdateNotification();
   if(g_libraryHeaderFocused){
-    FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":"Open"},
+    const bool browseFocused=g_libraryView==LibraryView::Collections&&
+        g_libraryHeaderSelection==(int)LibraryView::Collections;
+    FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":browseFocused?"Browse":"Open"},
                       {"X","Search"},{"+","Sort"},{"B","Back"}};
     drawFooterHints(hints,4,SH-50);
   } else {
-    if(count){
-      auto hints=libraryFooter();
-      if(g_libraryView==LibraryView::Collections) hints[1]={"Y","Collections"};
+    if(count&&g_libraryView==LibraryView::Collections){
+      FootItem hints[]={{"A","Launch"},{"L3","Favorite"},{"Y","Game Menu"},
+                        {"X","Search"},{"+","Sort"},{"-","Browse"},{"B","Quit"}};
+      drawFooterHints(hints,7,SH-50);
+    } else if(count){
+      const auto hints=libraryFooter();
       drawFooterHints(hints.data(),(int)hints.size(),SH-50);
+    } else if(g_libraryView==LibraryView::Collections){
+      FootItem hints[]={{"A","Browse"},{"X","Search"},{"+","Sort"},{"-","Browse"},{"B","Quit"}};
+      drawFooterHints(hints,5,SH-50);
     } else {
-      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":
-                              g_libraryView==LibraryView::Collections?"Browse":"All games"},
+      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":"All games"},
                         {"X","Search"},{"+","Sort"},{"B","Quit"}};
       drawFooterHints(hints,4,SH-50);
     }
@@ -8025,7 +8033,10 @@ int main(int argc, char **argv){
   };
   auto activateLibraryHeader=[&](int item){
     if(item<libraryTabCount()){
-      changeLibraryTab(item);
+      if(g_libraryView==LibraryView::Collections&&item==(int)LibraryView::Collections){
+        chooseLibraryCollection(sel);
+        top=0;
+      } else changeLibraryTab(item);
       g_libraryHeaderFocused=false;
     } else openLibrarySettings();
   };
@@ -8261,6 +8272,13 @@ int main(int argc, char **argv){
         case SDL_CONTROLLER_BUTTON_START:
           changeLibrarySort();
           break;
+        case SDL_CONTROLLER_BUTTON_BACK:
+          if(!g_libraryHeaderFocused&&g_libraryView==LibraryView::Collections){
+            chooseLibraryCollection(sel);
+            top=0;
+            keepLibrarySelection=true;
+          }
+          break;
         case SDL_CONTROLLER_BUTTON_LEFTSTICK:
           if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
             const std::string key=game->key;
@@ -8280,11 +8298,7 @@ int main(int argc, char **argv){
           }
           break;
         case BTN_Y:
-          if(!g_libraryHeaderFocused&&g_libraryView==LibraryView::Collections){
-            chooseLibraryCollection(sel);
-            top=0;
-            keepLibrarySelection=true;
-          } else if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
+          if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
             const std::string selectedKey=game->key;
             const int result=perGameMenu(*game,g_pad);
             if(result==1) selectGame(*game);
