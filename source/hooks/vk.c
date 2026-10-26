@@ -1840,6 +1840,18 @@ static int lsfg_try_create(VkQueue queue) {
       flow_scale != 1.0f)
     flow_scale = 0.25f;
 
+  /* Full-resolution flow is already the most expensive option. Keep its motion
+   * resolution, but always pair it with LSFG's performance shader variants on
+   * Switch; the quality variants caused a measurable source-FPS regression on
+   * Tegra X1. Other flow scales continue to honor the user's preference. */
+  const bool configured_performance_mode =
+      prefs_get_bool("Wrapper/LSFGPerformance", true);
+  const bool performance_mode = configured_performance_mode || flow_scale >= 1.0f;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  vk_diag_note("LSFG Vulkan config flow_scale=%.3f performance=%d configured_performance=%d",
+               flow_scale, performance_mode, configured_performance_mode);
+#endif
+
   LsfgNxCreateInfo info = {
       .instance = tracked_instance,
       .physical_device = tracked_physical_device,
@@ -1853,7 +1865,7 @@ static int lsfg_try_create(VkQueue queue) {
       .swapchain_image_count = image_count,
       .shader_dll_path = lsfg_dll_path(),
       .flow_scale = flow_scale,
-      .performance_mode = prefs_get_bool("Wrapper/LSFGPerformance", true),
+      .performance_mode = performance_mode,
   };
   lsfg_runtime = lsfg_nx_create(&info);
   free(images);

@@ -811,7 +811,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"Wrapper/LSFGFlowScale", "Frame generation quality",
    "Sets the resolution used for optical-flow analysis. Eighth is cheapest and Quarter is recommended on Switch. Full resolution can retain the most motion detail but uses 4x as many flow pixels as Half and may significantly reduce performance; it is an optional A/B test, not a guaranteed fix for visual glitches. Small mip levels are clamped to at least one pixel."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
-   "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
+   "Uses LSFG's lighter performance-oriented path. On Vulkan, Full flow resolution always uses this path to limit FPS loss while retaining full-resolution motion analysis. Other flow scales honor this setting; keep it enabled on Switch."},
 
   {"SPU2/Mixing/FinalVolume", "Audio output",
    "Sets the final emulator volume sent to the Switch audio output. It does not change the game's internal volume setting."},
