@@ -22,11 +22,14 @@ the tree and still build (`make RENDERER=DK` / `RENDERER=GL`), but they are not
 bundled and the launcher does not offer them.
 
 The launcher supports multiple library folders across SD, USB mass storage
-(FAT32, exFAT, NTFS), and SMB shares. The Recent, All games, and Favorites tabs
-organize the library. Press **X** from the library to search game titles and
-filenames with the system keyboard; submit an empty query to clear the filter.
-Search works inside the current tab. Press **Y** for a game's menu and use the
-settings icon for global options.
+(FAT32, exFAT, NTFS), and SMB shares. The Recent, All games, Favorites, and
+Collections tabs organize the library. In Collections, press **Y** to browse a
+collection or manage them; create, rename, and delete collections there. From a
+game's **Y** menu, open **Collections** to add or remove that game from one or
+more collections. Collection membership is saved with the launcher settings.
+Press **X** from the library to search game titles and filenames with the system
+keyboard; submit an empty query to clear the filter. Search works inside the
+current tab. Use the settings icon for global options.
 
 The PS2 theme uses an animated background. Classic keeps the same menu colors
 and displays the selected game's artwork behind the library. SteamGridDB cover

@@ -2146,15 +2146,21 @@ static std::thread g_libraryScanThread;
 static std::vector<std::string> g_pendingScanSources;
 static std::vector<size_t> g_visibleGames;
 static std::unordered_set<std::string> g_favorites;
-enum class LibraryView { Recent, All, Favorites };
+struct GameCollection {
+  std::string name;
+  std::unordered_set<std::string> members;
+};
+static std::vector<GameCollection> g_collections;
+static std::string g_activeCollection;
+enum class LibraryView { Recent, All, Favorites, Collections };
 static LibraryView g_libraryView=LibraryView::Recent;
 static std::string g_librarySearch;
 static bool g_libraryHeaderFocused=false;
 static int g_libraryHeaderSelection=0;
-static std::array<float,3> g_libraryTabOpen{1,0,0};
+static std::array<float,4> g_libraryTabOpen{1,0,0,0};
 static Uint32 g_libraryAnimationTick=0;
 static float g_recentPosition=-1;
-static std::array<std::string,3> g_librarySelections;
+static std::array<std::string,4> g_librarySelections;
 
 static std::string gameCRCFile(const Game &game) {
   return std::string(GAMECRC_DIR) + "/" + game.key + ".ini";
@@ -2201,11 +2207,25 @@ static const char *LIBRARY_INI = "sdmc:/switch/nethersx2/library.ini";
 
 static void loadLibraryOrganization(){
   g_favorites.clear();
-  const int count=std::clamp(atoi(storeGet(g_global,"Library/FavoriteCount","0")),0,65536);
-  for(int index=0;index<count;index++){
+  const int favoriteCount=std::clamp(atoi(storeGet(g_global,"Library/FavoriteCount","0")),0,65536);
+  for(int index=0;index<favoriteCount;index++){
     const char *id=storeGet(g_global,("Library/Favorite"+std::to_string(index)).c_str(),"");
     if(*id) g_favorites.insert(id);
   }
+  g_collections.clear();
+  const int collectionCount=std::clamp(atoi(storeGet(g_global,"Library/CollectionCount","0")),0,128);
+  for(int index=0;index<collectionCount;index++){
+    const std::string prefix="Library/Collection"+std::to_string(index);
+    GameCollection collection;
+    collection.name=storeGet(g_global,(prefix+"Name").c_str(),"");
+    const int memberCount=std::clamp(atoi(storeGet(g_global,(prefix+"MemberCount").c_str(),"0")),0,65536);
+    for(int member=0;member<memberCount;member++){
+      const char *id=storeGet(g_global,(prefix+"Member"+std::to_string(member)).c_str(),"");
+      if(*id) collection.members.insert(id);
+    }
+    if(!collection.name.empty()) g_collections.push_back(std::move(collection));
+  }
+  g_activeCollection.clear();
   g_libraryView=LibraryView::Recent;
 }
 
@@ -2215,16 +2235,37 @@ static void saveLibraryOrganization(){
   size_t index=0;
   for(const auto &id:g_favorites)
     storeSet(g_global,("Library/Favorite"+std::to_string(index++)).c_str(),id.c_str());
+  storeRemovePrefix(g_global,"Library/Collection");
+  storeSet(g_global,"Library/CollectionCount",std::to_string(g_collections.size()).c_str());
+  for(size_t index=0;index<g_collections.size();index++){
+    const std::string prefix="Library/Collection"+std::to_string(index);
+    storeSet(g_global,(prefix+"Name").c_str(),g_collections[index].name.c_str());
+    storeSet(g_global,(prefix+"MemberCount").c_str(),
+             std::to_string(g_collections[index].members.size()).c_str());
+    size_t member=0;
+    for(const auto &id:g_collections[index].members)
+      storeSet(g_global,(prefix+"Member"+std::to_string(member++)).c_str(),id.c_str());
+  }
   storeSave(g_global,LAUNCHER_INI);
 }
 
 static void rebuildVisibleGames(){
   g_visibleGames.clear();
   const std::string query=foldedKey(trim(g_librarySearch));
+  const GameCollection *collection=nullptr;
+  if(g_libraryView==LibraryView::Collections&&!g_activeCollection.empty()&&
+     g_activeCollection!="favorites"){
+    const auto found=std::find_if(g_collections.begin(),g_collections.end(),
+        [&](const GameCollection &candidate){ return candidate.name==g_activeCollection; });
+    if(found!=g_collections.end()) collection=&*found;
+  }
   for(size_t index=0;index<g_games.size();index++){
     const Game &game=g_games[index];
     if(g_libraryView==LibraryView::Recent&&(game.biosBoot||game.played<=0)) continue;
-    if(g_libraryView==LibraryView::Favorites&&!g_favorites.count(game.key)) continue;
+    if((g_libraryView==LibraryView::Favorites||
+        (g_libraryView==LibraryView::Collections&&g_activeCollection=="favorites"))&&
+       !g_favorites.count(game.key)) continue;
+    if(collection&&!collection->members.count(game.key)) continue;
     if(!query.empty()){
       const std::string searchable=foldedKey(game.title+" "+game.file);
       if(searchable.find(query)==std::string::npos) continue;
@@ -2252,7 +2293,7 @@ static int visibleIndexForKey(const std::string &key)
   return 0;
 }
 
-static int libraryTabCount(){ return 3; }
+static int libraryTabCount(){ return 4; }
 
 static int libraryTabIndex(){ return (int)g_libraryView; }
 
@@ -4880,6 +4921,129 @@ static int dropdown(const char *title, const char *const *labels, int n, int cur
     waitForNextFrame();
   }
 }
+static int collectionChoice(const char *title,const std::vector<std::string> &choices,int current=0){
+  if(choices.empty()) return -1;
+  std::vector<const char*> labels;
+  labels.reserve(choices.size());
+  for(const auto &choice:choices) labels.push_back(choice.c_str());
+  return dropdown(title,labels.data(),(int)labels.size(),current,true,true);
+}
+
+static int findCollection(const std::string &name){
+  for(size_t index=0;index<g_collections.size();index++)
+    if(g_collections[index].name==name) return (int)index;
+  return -1;
+}
+
+static bool createCollection(Game *assignTo=nullptr){
+  if(g_collections.size()>=128){
+    modalMessage(uiText("Collection limit reached").c_str(),{uiText("Delete a collection before creating another.")});
+    return false;
+  }
+  char name[97]{};
+  if(!promptTextMode(uiText("New collection").c_str(),"",name,sizeof(name),false,false,
+                     uiText("Choose a name for this game collection").c_str(),
+                     uiText("Use the Switch keyboard to enter a name").c_str())) return false;
+  const std::string clean=trim(name),key=foldedKey(clean);
+  if(clean.empty()) return false;
+  if(key=="favorites"||key=="all games"){
+    modalMessage(uiText("Reserved collection name").c_str(),{uiText("Choose a name other than Favorites or All games.")});
+    return false;
+  }
+  if(std::any_of(g_collections.begin(),g_collections.end(),[&](const GameCollection &item){
+       return foldedKey(item.name)==key;
+     })){
+    modalMessage(uiText("Collection already exists").c_str(),{uiText("Choose a different name.")});
+    return false;
+  }
+  GameCollection collection;
+  collection.name=clean;
+  if(assignTo) collection.members.insert(assignTo->key);
+  g_collections.push_back(std::move(collection));
+  saveLibraryOrganization();
+  rebuildVisibleGames();
+  toast(uiText("Collection created").c_str());
+  return true;
+}
+
+static void manageCollections(){
+  const int action=collectionChoice("Manage collections",{"Create collection","Rename collection","Delete collection"});
+  if(action==0) createCollection();
+  else if(action==1||action==2){
+    if(g_collections.empty()){
+      modalMessage(uiText("No collections yet").c_str(),{uiText("Create a collection first.")});
+      return;
+    }
+    std::vector<std::string> names;
+    for(const auto &collection:g_collections) names.push_back(collection.name);
+    const int chosen=collectionChoice(action==1?"Rename collection":"Delete collection",names);
+    if(chosen<0) return;
+    if(action==1){
+      char name[97]{};
+      const std::string oldName=g_collections[chosen].name;
+      if(!promptTextMode(uiText("Rename collection").c_str(),oldName.c_str(),name,sizeof(name),false,false,
+                         uiText("Choose a new name for this collection").c_str(),nullptr)) return;
+      const std::string clean=trim(name),key=foldedKey(clean);
+      if(clean.empty()) return;
+      if(key=="favorites"||key=="all games"){
+        modalMessage(uiText("Reserved collection name").c_str(),{uiText("Choose a name other than Favorites or All games.")});
+        return;
+      }
+      for(size_t index=0;index<g_collections.size();index++) if((int)index!=chosen&&foldedKey(g_collections[index].name)==key){
+        modalMessage(uiText("Collection already exists").c_str(),{uiText("Choose a different name.")});
+        return;
+      }
+      g_collections[chosen].name=clean;
+      if(g_activeCollection==oldName) g_activeCollection=clean;
+      saveLibraryOrganization(); rebuildVisibleGames();
+    } else if(confirmBox(uiText("Delete collection?").c_str(),{g_collections[chosen].name,
+                   uiText("Games in the collection will remain in your library.")})){
+      const std::string removed=g_collections[chosen].name;
+      g_collections.erase(g_collections.begin()+chosen);
+      if(g_activeCollection==removed) g_activeCollection.clear();
+      saveLibraryOrganization(); rebuildVisibleGames();
+    }
+  }
+}
+
+static void editGameCollections(Game &game){
+  std::vector<std::string> choices{"Create collection"};
+  for(const auto &collection:g_collections)
+    choices.push_back(std::string(collection.members.count(game.key)?"[x]  ":"[ ]  ")+collection.name);
+  const int selected=collectionChoice("Game collections",choices);
+  if(selected<0) return;
+  if(selected==0){ createCollection(&game); return; }
+  GameCollection &collection=g_collections[selected-1];
+  if(!collection.members.erase(game.key)) collection.members.insert(game.key);
+  saveLibraryOrganization(); rebuildVisibleGames();
+  const std::string message=uiText(collection.members.count(game.key)?"Added to collection":"Removed from collection");
+  toast(message.c_str());
+}
+
+static bool chooseLibraryCollection(int &selection){
+  std::vector<std::string> choices{"All games","Favorites"};
+  for(const auto &collection:g_collections) choices.push_back(collection.name);
+  choices.push_back("Manage collections");
+  int current=0;
+  if(g_activeCollection=="favorites") current=1;
+  else if(!g_activeCollection.empty()){
+    const int found=findCollection(g_activeCollection);
+    if(found>=0) current=found+2;
+  }
+  const int chosen=collectionChoice("Browse collections",choices,current);
+  if(chosen<0) return false;
+  if(chosen==choices.size()-1){ manageCollections(); return false; }
+  g_activeCollection=chosen==0?std::string{}:chosen==1?"favorites":g_collections[chosen-2].name;
+  g_libraryView=LibraryView::Collections;
+  rebuildVisibleGames();
+  selection=visibleIndexForKey(g_librarySelections[(int)LibraryView::Collections]);
+  if(!visibleGame(selection)) selection=0;
+  g_librarySelections[(int)LibraryView::Collections]=visibleGame(selection)?visibleGame(selection)->key:"";
+  g_recentPosition=-1;
+  beginScreenFx();
+  return true;
+}
+
 static void optChoosePopup(const Opt &o) {
   if(o.type!=OT_CHOICE || o.nch<=0) return;
   std::vector<std::string> translated;
@@ -6689,10 +6853,10 @@ static void drawWrappedCentered(TTF_Font *font,int centerX,int y,int maxWidth,in
 }
 
 static const char *GAME_MENU_ITEMS[]={"Launch","Game settings","Rename game","Cover settings",
-  "Create HOME shortcut","Favorite","Clear game settings","Delete game"};
-static constexpr int GAME_MENU_COUNT=8;
+  "Create HOME shortcut","Favorite","Collections","Clear game settings","Delete game"};
+static constexpr int GAME_MENU_COUNT=9;
 // Everything from this index down is destructive and sits in its own group.
-static constexpr int GAME_MENU_MANAGE_FIRST=6;
+static constexpr int GAME_MENU_MANAGE_FIRST=7;
 struct GameMenuLayout {
   GameDetailLayout detail;
   int start,rowHeight;
@@ -6719,7 +6883,7 @@ static void drawGameMenu(Game &game,int selection){
   drawRowHighlight(menu.x,(int)g_hy,menu.w,layout.rowHeight-4);
   for(int index=0;index<GAME_MENU_COUNT;index++){
     const bool current=index==selection;
-    const bool submenu=index==1||index==3||index==4;
+    const bool submenu=index==1||index==3||index==4||index==6;
     const SDL_Color color=index==GAME_MENU_COUNT-1?(SDL_Color){238,135,135,255}:(current?COL_VAL:COL_TXT);
     drawSettingsRowText(tr(GAME_MENU_ITEMS[index]),index==5?(g_favorites.count(game.key)?tr("Yes"):tr("No")):(submenu?">":""),layout.rowY(index),menu.w,
                         menu.x+24,menu.x+menu.w-24,current,color,current?COL_VAL:COL_DIM,false,
@@ -6796,13 +6960,14 @@ static int perGameMenu(Game &g, SDL_GameController *pad) {
             if(!g_favorites.erase(g.key)) g_favorites.insert(g.key);
             saveLibraryOrganization(); rebuildVisibleGames(); beginScreenFx();
           }
-          else if(sel==6){
+          else if(sel==6){ editGameCollections(g); beginScreenFx(); }
+          else if(sel==7){
             g_game.kv.clear(); remove(gp.c_str());
             if(!g.pathKey.empty()) remove(pathGp.c_str());
             if(g.legacyUnique&&!g.legacyKey.empty()) remove(legacyGp.c_str());
             g.hasCfg=false; toastStatic("Game settings cleared"); beginScreenFx();
           }
-          else if(sel==7){
+          else if(sel==8){
             if(confirmBox(uiText("Delete game?").c_str(), { g.title, "", uiText("This permanently deletes the game file from"),
                                             uiText("its storage device. This cannot be undone.") })){
               if(remove(g.path.c_str())!=0){
@@ -6813,7 +6978,9 @@ static int perGameMenu(Game &g, SDL_GameController *pad) {
               remove(coverPath(g).c_str());
               remove(backgroundPath(g).c_str());
               storeRemovePrefix(g_global,("Artwork/"+g.key+"/").c_str());
-              g_favorites.erase(g.key);saveLibraryOrganization();
+              g_favorites.erase(g.key);
+              for(auto &collection:g_collections) collection.members.erase(g.key);
+              saveLibraryOrganization();
               remove(gp.c_str());
               remove(gameCRCFile(g).c_str());
               if(!g.pathKey.empty()){
@@ -7048,11 +7215,11 @@ static void migrateLegacyEmuHosts() {
 }
 
 static std::string libraryTabLabel(int tab){
-  static const char *labels[]={"Recent","All games","Favorites"};
+  static const char *labels[]={"Recent","All games","Favorites","Collections"};
   return tab>=0&&tab<libraryTabCount()?uiText(labels[tab]):std::string{};
 }
 
-enum class LibraryIcon { Recent, Games, Favorite, Settings };
+enum class LibraryIcon { Recent, Games, Favorite, Collections, Settings };
 
 static void drawLibraryIcon(LibraryIcon icon,int cx,int cy,int size,SDL_Color color){
   if(icon==LibraryIcon::Settings){
@@ -7066,6 +7233,10 @@ static void drawLibraryIcon(LibraryIcon icon,int cx,int cy,int size,SDL_Color co
     const int cell=std::max(3,size/4),gap=std::max(2,size/7);
     for(int row=0;row<2;row++) for(int column=0;column<3;column++)
       roundedRect(cx-(3*cell+2*gap)/2+column*(cell+gap),cy-(2*cell+gap)/2+row*(cell+gap),cell,cell,1,color);
+  } else if(icon==LibraryIcon::Collections){
+    const int card=std::max(3,size/2);
+    roundedRect(cx-card/2-3,cy-card/2-3,card,card,2,color);
+    roundedRect(cx-card/2+3,cy-card/2+3,card,card,2,color);
   } else {
     const int points=icon==LibraryIcon::Favorite?10:48;
     const auto point=[&](int index,float radius){
@@ -7096,7 +7267,7 @@ static void drawLibraryIcon(LibraryIcon icon,int cx,int cy,int size,SDL_Color co
 }
 
 struct LibraryHeaderLayout {
-  std::array<SDL_Rect,3> tabs;
+  std::array<SDL_Rect,4> tabs;
   SDL_Rect settings;
 };
 
@@ -7167,7 +7338,9 @@ static void drawLibraryHeader(){
     const bool focused=g_libraryHeaderFocused&&g_libraryHeaderSelection==tab;
     const SDL_Color color=tab==libraryTabIndex()||focused?COL_TXT:COL_DIM;
     if(focused) roundedPanel(rect.x,rect.y,rect.w,rect.h,{255,255,255,8},COL_SEL,14,2);
-    drawLibraryIcon(tab==0?LibraryIcon::Recent:tab==1?LibraryIcon::Games:LibraryIcon::Favorite,rect.x+26,46,28,color);
+    const LibraryIcon icon=tab==0?LibraryIcon::Recent:tab==1?LibraryIcon::Games:
+        tab==2?LibraryIcon::Favorite:LibraryIcon::Collections;
+    drawLibraryIcon(icon,rect.x+26,46,28,color);
     if(rect.w>52){
       const SDL_Rect clip{rect.x+52,rect.y,rect.w-52,rect.h};
       SDL_RenderSetClipRect(g_ren,&clip);
@@ -7178,14 +7351,21 @@ static void drawLibraryHeader(){
   const bool focused=g_libraryHeaderFocused&&g_libraryHeaderSelection==libraryTabCount();
   if(focused) roundedPanel(layout.settings.x,layout.settings.y,layout.settings.w,layout.settings.h,{255,255,255,8},COL_SEL,14,2);
   drawLibraryIcon(LibraryIcon::Settings,layout.settings.x+27,46,28,focused?COL_TXT:COL_DIM);
+  std::string scope;
+  if(g_libraryView==LibraryView::Collections){
+    scope=uiText("Collections");
+    if(g_activeCollection=="favorites") scope+=" / "+uiText("Favorites");
+    else if(!g_activeCollection.empty()) scope+=" / "+g_activeCollection;
+    else scope+=" / "+uiText("All games");
+  }
   if(!g_librarySearch.empty()){
     std::string query=g_librarySearch;
     if(query.size()>28) query=query.substr(0,25)+"...";
-    char searchLabel[192];
-    snprintf(searchLabel,sizeof(searchLabel),"%s: %s (%zu)",tr("Search"),
-             query.c_str(),g_visibleGames.size());
-    drawTextR(g_font_sm,SW-100,82,searchLabel,COL_VAL);
+    if(!scope.empty()) scope+="  |  ";
+    scope+=std::string(tr("Search"))+": "+query+" ("+std::to_string(g_visibleGames.size())+")";
   }
+  if(!scope.empty()) drawTextR(g_font_sm,SW-100,82,
+      fittedText(g_font_sm,scope,SW-240).c_str(),COL_VAL);
 }
 
 struct RecentLayout { int x,y,focusedWidth,width,titleY; };
@@ -7307,11 +7487,14 @@ static void drawLibraryEmpty(){
   const bool noMatches=!scanning&&!g_librarySearch.empty();
   const char *title=scanning?"Loading game library...":noMatches?"No matches":
       g_libraryView==LibraryView::Recent?"Nothing played yet":
-      g_libraryView==LibraryView::Favorites?"No favorites yet":"No games found";
+      g_libraryView==LibraryView::Favorites?"No favorites yet":
+      g_libraryView==LibraryView::Collections&& !g_activeCollection.empty()&&g_activeCollection!="favorites"?"This collection is empty":
+      g_libraryView==LibraryView::Collections&&g_activeCollection=="favorites"?"No favorites yet":"No games found";
   const char *description=scanning?"The first page will appear as soon as it is ready.":
       noMatches?"Press X to change or clear the filter.":
       g_libraryView==LibraryView::Recent?"Games you launch appear here, most recent first.":
       g_libraryView==LibraryView::Favorites?"Mark games as favorites from their game menu.":
+      g_libraryView==LibraryView::Collections?"Press A to browse collections or Y to change the collection.":
       "Add game folders in Settings to populate your library.";
   drawTextC(g_font_big,SW/2,SH/2-80,tr(title),COL_TXT);
   drawWrappedCentered(g_font_sm,SW/2,SH/2-22,SW-240,30,2,tr(description),COL_DIM);
@@ -7372,10 +7555,12 @@ static void renderGrid(int selection,int top){
     drawFooterHints(hints,3,SH-50);
   } else {
     if(count){
-      const auto hints=libraryFooter();
+      auto hints=libraryFooter();
+      if(g_libraryView==LibraryView::Collections) hints[1]={"Y","Collections"};
       drawFooterHints(hints.data(),(int)hints.size(),SH-50);
     } else {
-      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":"All games"},
+      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":
+                              g_libraryView==LibraryView::Collections?"Browse":"All games"},
                         {"X","Search"},{"B","Quit"}};
       drawFooterHints(hints,3,SH-50);
     }
@@ -7814,8 +7999,10 @@ int main(int argc, char **argv){
     beginScreenFx();
   };
   auto activateLibraryEmpty=[&](){
-    if(g_libraryView==LibraryView::All) openLibrarySettings();
+    if(g_libraryView==LibraryView::Collections) chooseLibraryCollection(sel);
+    else if(g_libraryView==LibraryView::All) openLibrarySettings();
     else changeLibraryTab(1);
+    top=0;
     g_libraryHeaderFocused=false;
     g_recentPosition=-1;
     beginScreenFx();
@@ -8042,7 +8229,11 @@ int main(int argc, char **argv){
           searchLibrary();
           break;
         case BTN_Y:
-          if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
+          if(!g_libraryHeaderFocused&&g_libraryView==LibraryView::Collections){
+            chooseLibraryCollection(sel);
+            top=0;
+            keepLibrarySelection=true;
+          } else if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
             const std::string selectedKey=game->key;
             const int result=perGameMenu(*game,g_pad);
             if(result==1) selectGame(*game);
