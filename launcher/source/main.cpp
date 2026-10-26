@@ -1075,6 +1075,7 @@ static bool g_showRegionFlags = true;
 static bool g_showCustomSettingsBadges = true;
 static int g_gridColumns = 6;
 static int g_gridRows = 2;
+static int g_librarySortMode = 0;
 static SDL_Texture *g_glowTexture = nullptr;
 static SDL_Texture *g_roundTexture = nullptr;
 // Footer hit rects live here (not next to drawFooterHints) so clearUiBackground()
@@ -1320,6 +1321,7 @@ static void applyLauncherAppearance() {
       strcmp(storeGet(g_global, "Wrapper/ShowCustomSettingsBadges", "true"), "false") != 0;
   g_gridColumns = std::max(3, std::min(8, atoi(storeGet(g_global, "Wrapper/GridColumns", "6"))));
   g_gridRows = std::max(1, std::min(3, atoi(storeGet(g_global, "Wrapper/GridRows", "2"))));
+  g_librarySortMode = std::clamp(atoi(storeGet(g_global, "Wrapper/LibrarySort", "0")),0,3);
 
   COL_BG={8,12,24,255}; COL_TXT={235,239,247,255}; COL_DIM={151,163,184,255};
   COL_HI={100,211,255,255}; COL_VAL={255,215,120,255}; COL_SEL={116,200,255,255};
@@ -1795,8 +1797,8 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
   }
 }
 // Shared by renderGrid (to draw) and gridLayout (to reserve the right height).
-static std::array<FootItem,4> libraryFooter(){
-  return {{{"A","Launch"},{"Y","Game Menu"},{"X","Search"},{"B","Quit"}}};
+static std::array<FootItem,5> libraryFooter(){
+  return {{{"A","Launch"},{"Y","Game Menu"},{"X","Search"},{"+","Sort"},{"B","Quit"}}};
 }
 
 static void drawSettingsFooter(const char *text,int cy=-1){
@@ -2326,10 +2328,23 @@ static int detectRegion(const std::string &file) {
   return 0;
 }
 static void sortLibraryGames() {
-  auto cmpTitle = [](const Game &a, const Game &b){ return strcasecmp(a.title.c_str(), b.title.c_str()) < 0; };
-  std::sort(g_games.begin(), g_games.end(), [&](const Game &a, const Game &b){
-    if (a.biosBoot != b.biosBoot) return a.biosBoot;
-    return cmpTitle(a, b);
+  const auto cmpTitle=[](const Game &a,const Game &b){
+    const int compared=strcasecmp(a.title.c_str(),b.title.c_str());
+    return compared?compared<0: a.key<b.key;
+  };
+  std::sort(g_games.begin(),g_games.end(),[&](const Game &a,const Game &b){
+    if(a.biosBoot!=b.biosBoot) return a.biosBoot;
+    switch(g_librarySortMode){
+      case 1: return cmpTitle(b,a);
+      case 2:
+        if(a.played!=b.played) return a.played>b.played;
+        return cmpTitle(a,b);
+      case 3: {
+        const int compared=strcasecmp(a.file.c_str(),b.file.c_str());
+        return compared?compared<0:a.key<b.key;
+      }
+      default: return cmpTitle(a,b);
+    }
   });
   rebuildVisibleGames();
 }
@@ -7551,8 +7566,8 @@ static void renderGrid(int selection,int top){
   drawUpdateNotification();
   if(g_libraryHeaderFocused){
     FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":"Open"},
-                      {"X","Search"},{"B","Back"}};
-    drawFooterHints(hints,3,SH-50);
+                      {"X","Search"},{"+","Sort"},{"B","Back"}};
+    drawFooterHints(hints,4,SH-50);
   } else {
     if(count){
       auto hints=libraryFooter();
@@ -7561,8 +7576,8 @@ static void renderGrid(int selection,int top){
     } else {
       FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":
                               g_libraryView==LibraryView::Collections?"Browse":"All games"},
-                        {"X","Search"},{"B","Quit"}};
-      drawFooterHints(hints,3,SH-50);
+                        {"X","Search"},{"+","Sort"},{"B","Quit"}};
+      drawFooterHints(hints,4,SH-50);
     }
   }
   drawFadeIn(); SDL_RenderPresent(g_ren);
@@ -8030,6 +8045,20 @@ int main(int argc, char **argv){
     g_recentPosition=-1;
     beginScreenFx();
   };
+  auto changeLibrarySort=[&](){
+    static const char *const labels[]={"Title A-Z","Title Z-A","Recently played","Filename A-Z"};
+    const std::string selected=visibleGame(sel)?visibleGame(sel)->key:std::string{};
+    const int mode=dropdown("Sort games",labels,4,g_librarySortMode,true,true);
+    if(mode<0) return;
+    g_librarySortMode=mode;
+    storeSet(g_global,"Wrapper/LibrarySort",std::to_string(mode).c_str());
+    storeSave(g_global,LAUNCHER_INI);
+    sortLibraryGames();
+    sel=visibleIndexForKey(selected);
+    top=0;
+    keepLibrarySelection=true;
+    beginScreenFx();
+  };
   auto pageLibrary=[&](int direction){
     const GLay layout=gridLayout();
     sel=gridPage(sel,direction,layout.cols,layout.rows,(int)g_visibleGames.size());
@@ -8227,6 +8256,9 @@ int main(int argc, char **argv){
           break;
         case BTN_X:
           searchLibrary();
+          break;
+        case SDL_CONTROLLER_BUTTON_START:
+          changeLibrarySort();
           break;
         case BTN_Y:
           if(!g_libraryHeaderFocused&&g_libraryView==LibraryView::Collections){
