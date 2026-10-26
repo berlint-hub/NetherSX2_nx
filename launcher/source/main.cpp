@@ -1795,8 +1795,8 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
   }
 }
 // Shared by renderGrid (to draw) and gridLayout (to reserve the right height).
-static std::array<FootItem,3> libraryFooter(){
-  return {{{"A","Launch"},{"Y","Game Menu"},{"B","Quit"}}};
+static std::array<FootItem,4> libraryFooter(){
+  return {{{"A","Launch"},{"Y","Game Menu"},{"X","Search"},{"B","Quit"}}};
 }
 
 static void drawSettingsFooter(const char *text,int cy=-1){
@@ -2148,6 +2148,7 @@ static std::vector<size_t> g_visibleGames;
 static std::unordered_set<std::string> g_favorites;
 enum class LibraryView { Recent, All, Favorites };
 static LibraryView g_libraryView=LibraryView::Recent;
+static std::string g_librarySearch;
 static bool g_libraryHeaderFocused=false;
 static int g_libraryHeaderSelection=0;
 static std::array<float,3> g_libraryTabOpen{1,0,0};
@@ -2219,10 +2220,15 @@ static void saveLibraryOrganization(){
 
 static void rebuildVisibleGames(){
   g_visibleGames.clear();
+  const std::string query=foldedKey(trim(g_librarySearch));
   for(size_t index=0;index<g_games.size();index++){
     const Game &game=g_games[index];
     if(g_libraryView==LibraryView::Recent&&(game.biosBoot||game.played<=0)) continue;
     if(g_libraryView==LibraryView::Favorites&&!g_favorites.count(game.key)) continue;
+    if(!query.empty()){
+      const std::string searchable=foldedKey(game.title+" "+game.file);
+      if(searchable.find(query)==std::string::npos) continue;
+    }
     g_visibleGames.push_back(index);
   }
   if(g_libraryView==LibraryView::Recent)
@@ -7172,6 +7178,14 @@ static void drawLibraryHeader(){
   const bool focused=g_libraryHeaderFocused&&g_libraryHeaderSelection==libraryTabCount();
   if(focused) roundedPanel(layout.settings.x,layout.settings.y,layout.settings.w,layout.settings.h,{255,255,255,8},COL_SEL,14,2);
   drawLibraryIcon(LibraryIcon::Settings,layout.settings.x+27,46,28,focused?COL_TXT:COL_DIM);
+  if(!g_librarySearch.empty()){
+    std::string query=g_librarySearch;
+    if(query.size()>28) query=query.substr(0,25)+"...";
+    char searchLabel[192];
+    snprintf(searchLabel,sizeof(searchLabel),"%s: %s (%zu)",tr("Search"),
+             query.c_str(),g_visibleGames.size());
+    drawTextR(g_font_sm,SW-100,82,searchLabel,COL_VAL);
+  }
 }
 
 struct RecentLayout { int x,y,focusedWidth,width,titleY; };
@@ -7290,9 +7304,12 @@ static SDL_Rect libraryEmptyActionRect(){ return {SW/2-148,SH/2+82,296,48}; }
 
 static void drawLibraryEmpty(){
   const bool scanning=g_libraryScan!=nullptr&&g_games.empty();
-  const char *title=scanning?"Loading game library...":g_libraryView==LibraryView::Recent?"Nothing played yet":
+  const bool noMatches=!scanning&&!g_librarySearch.empty();
+  const char *title=scanning?"Loading game library...":noMatches?"No matches":
+      g_libraryView==LibraryView::Recent?"Nothing played yet":
       g_libraryView==LibraryView::Favorites?"No favorites yet":"No games found";
   const char *description=scanning?"The first page will appear as soon as it is ready.":
+      noMatches?"Press X to change or clear the filter.":
       g_libraryView==LibraryView::Recent?"Games you launch appear here, most recent first.":
       g_libraryView==LibraryView::Favorites?"Mark games as favorites from their game menu.":
       "Add game folders in Settings to populate your library.";
@@ -7350,15 +7367,17 @@ static void renderGrid(int selection,int top){
   } else drawLibraryEmpty();
   drawUpdateNotification();
   if(g_libraryHeaderFocused){
-    FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":"Open"},{"B","Back"}};
-    drawFooterHints(hints,2,SH-50);
+    FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":"Open"},
+                      {"X","Search"},{"B","Back"}};
+    drawFooterHints(hints,3,SH-50);
   } else {
     if(count){
       const auto hints=libraryFooter();
       drawFooterHints(hints.data(),(int)hints.size(),SH-50);
     } else {
-      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":"All games"},{"B","Quit"}};
-      drawFooterHints(hints,2,SH-50);
+      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":"All games"},
+                        {"X","Search"},{"B","Quit"}};
+      drawFooterHints(hints,3,SH-50);
     }
   }
   drawFadeIn(); SDL_RenderPresent(g_ren);
@@ -7807,6 +7826,23 @@ int main(int argc, char **argv){
       g_libraryHeaderFocused=false;
     } else openLibrarySettings();
   };
+  auto searchLibrary=[&](){
+    char query[192];
+    snprintf(query,sizeof(query),"%s",g_librarySearch.c_str());
+    if(!promptTextMode(tr("Search games"),g_librarySearch.c_str(),query,sizeof(query),
+                       false,true,tr("Search game titles and filenames"),
+                       tr("Leave blank to clear the filter"))) return;
+    g_librarySearch=trim(query);
+    rebuildVisibleGames();
+    sel=visibleIndexForKey(g_librarySelections[libraryTabIndex()]);
+    if(!visibleGame(sel)) sel=0;
+    top=0;
+    g_librarySelections[libraryTabIndex()]=visibleGame(sel)?visibleGame(sel)->key:"";
+    keepLibrarySelection=true;
+    g_libraryHeaderFocused=false;
+    g_recentPosition=-1;
+    beginScreenFx();
+  };
   auto pageLibrary=[&](int direction){
     const GLay layout=gridLayout();
     sel=gridPage(sel,direction,layout.cols,layout.rows,(int)g_visibleGames.size());
@@ -8001,6 +8037,9 @@ int main(int argc, char **argv){
           if(g_libraryHeaderFocused) activateLibraryHeader(g_libraryHeaderSelection);
           else if(count) selectGame(*visibleGame(sel));
           else activateLibraryEmpty();
+          break;
+        case BTN_X:
+          searchLibrary();
           break;
         case BTN_Y:
           if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
