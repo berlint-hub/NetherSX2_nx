@@ -33,7 +33,188 @@
 #include "util.h"
 #include "so_util.h"
 #include "libc_shim.h"
+#include "corelog.h"
 #include "hooks.h"
+
+// ---------------------------------------------------------------------------
+// Synthetic read-only files: the /sys and /proc paths cpuinfo probes
+//
+// The core statically links Facebook's cpuinfo, which reads processor topology
+// out of sysfs and /proc/cpuinfo. Horizon has neither, so every read fails and
+// the boot log ends with
+//
+//   [E] cpuinfo: failed to parse the list of possible processors in
+//                /sys/devices/system/cpu/possible
+//   [E] cpuinfo: failed to parse the list of present processors in .../present
+//   [E] cpuinfo: failed to parse both lists of possible and present processors
+//   [I] NativeLibrary: Failed to initialize cpuinfo
+//
+// fopen_fake() already answered some of these paths with fmemopen(), but that
+// never helped cpuinfo: it uses open()/read()/close(), and this library imports
+// the fortified __read_chk rather than plain read -- checked against the core's
+// dynamic symbol table, where `read` is absent from the 338 undefined symbols
+// while `open`, `close`, `lseek` and `fstat` are present. open_fake() passed the
+// path straight to fix_path(), the open failed, and cpuinfo gave up before it
+// ever reached /proc/cpuinfo.
+//
+// Both entry points now share one table, so they cannot disagree. Content is
+// built once from the core mask Horizon actually granted (InfoType_CoreMask),
+// the same source pthr.c pins threads from, rather than hardcoded -- so it stays
+// truthful if the OS grants a different set than the documented 0x7.
+//
+// Descriptors come from SYNFILE_FD_BASE, the same trick the ashmem regions use,
+// and close_fake()/fstat_fake()/__read_chk_fake()/lseek_fake() recognise them.
+// ---------------------------------------------------------------------------
+
+#define SYNFILE_FD_BASE 0x40010000
+#define MAX_SYNFILES    8
+
+typedef struct {
+  int used;
+  const char *content;
+  size_t len;
+  size_t offset;
+} SynFile;
+
+static SynFile g_synfiles[MAX_SYNFILES];
+static Mutex   g_synfile_lock;
+
+static char    g_syn_cpu_list[16];       // "0-2\n"
+static char    g_syn_kernel_max[16];     // "2\n"
+static char    g_syn_package_id[8];      // "0\n"
+static char    g_syn_freq_max[16];       // "1020000\n"
+static char    g_syn_freq_min[16];       // "102000\n"
+static char    g_syn_proc_cpuinfo[2048]; // one block per granted core
+static unsigned g_syn_ncpu;
+static int     g_syn_ready;
+
+static void synfile_build(void) {
+  u64 mask = 0;
+  if (R_FAILED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || mask == 0)
+    mask = 0x7; // fallback: cores 0,1,2 -- same as pthr.c's core_init_once()
+
+  unsigned n = 0;
+  for (unsigned c = 0; c < 8; c++)
+    if (mask & ((u64)1 << c))
+      n++;
+  if (n == 0)
+    n = 1;
+  g_syn_ncpu = n;
+
+  snprintf(g_syn_cpu_list,   sizeof g_syn_cpu_list,   "0-%u\n", n - 1);
+  snprintf(g_syn_kernel_max, sizeof g_syn_kernel_max, "%u\n",   n - 1);
+  snprintf(g_syn_package_id, sizeof g_syn_package_id, "0\n");
+  /* Tegra X1 (Cortex-A57) CPU clock range, in kHz as sysfs reports it. */
+  snprintf(g_syn_freq_max,   sizeof g_syn_freq_max,   "1020000\n");
+  snprintf(g_syn_freq_min,   sizeof g_syn_freq_min,   "102000\n");
+
+  size_t off = 0;
+  for (unsigned c = 0; c < n && off + 256 < sizeof g_syn_proc_cpuinfo; c++) {
+    const int w = snprintf(g_syn_proc_cpuinfo + off,
+                           sizeof g_syn_proc_cpuinfo - off,
+                           "processor\t: %u\n"
+                           "BogoMIPS\t: 38.40\n"
+                           "Features\t: fp asimd evtstrm aes pmull sha1 sha2 "
+                           "crc32 cpuid\n"
+                           "CPU implementer\t: 0x41\n"
+                           "CPU architecture\t: 8\n"
+                           "CPU variant\t: 0x1\n"
+                           "CPU part\t: 0xd07\n"
+                           "CPU revision\t: 1\n"
+                           "\n",
+                           c);
+    if (w <= 0)
+      break;
+    off += (size_t)w;
+  }
+  __atomic_store_n(&g_syn_ready, 1, __ATOMIC_RELEASE);
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  corelog_log(CORELOG_INFO, "host",
+              "synthetic cpu files built: %u core(s) mask=0x%llx", n,
+              (unsigned long long)mask);
+#endif
+}
+
+/* Content for a synthetic path, or NULL when `path` is not one we serve.
+ * Caller must not hold g_synfile_lock. */
+static const char *synfile_content(const char *path, size_t *out_len) {
+  if (!path || !out_len)
+    return NULL;
+  /* Double-checked: cpuinfo probes these from the boot thread, but nothing
+   * forces that, and two threads building the same static buffers could hand
+   * out a half-written string. Safe to lock here because every caller reaches
+   * synfile_content() before taking g_synfile_lock, never while holding it. */
+  if (!__atomic_load_n(&g_syn_ready, __ATOMIC_ACQUIRE)) {
+    mutexLock(&g_synfile_lock);
+    if (!__atomic_load_n(&g_syn_ready, __ATOMIC_RELAXED))
+      synfile_build();
+    mutexUnlock(&g_synfile_lock);
+  }
+
+  if (!strcmp(path, "/proc/cpuinfo")) {
+    *out_len = strlen(g_syn_proc_cpuinfo);
+    return g_syn_proc_cpuinfo;
+  }
+
+  if (!strncmp(path, "/sys/devices/system/cpu/", 24)) {
+    const char *leaf = path + 24;
+    if (!strcmp(leaf, "possible") || !strcmp(leaf, "present") ||
+        !strcmp(leaf, "online")) {
+      *out_len = strlen(g_syn_cpu_list);
+      return g_syn_cpu_list;
+    }
+    if (!strcmp(leaf, "kernel_max")) {
+      *out_len = strlen(g_syn_kernel_max);
+      return g_syn_kernel_max;
+    }
+    unsigned cpu = 0;
+    char rest[64];
+    if (sscanf(leaf, "cpu%u/%63s", &cpu, rest) == 2 && cpu < g_syn_ncpu) {
+      const char *c = NULL;
+      if (!strcmp(rest, "topology/physical_package_id"))     c = g_syn_package_id;
+      else if (!strcmp(rest, "topology/core_siblings_list")) c = g_syn_cpu_list;
+      else if (!strcmp(rest, "cpufreq/cpuinfo_max_freq"))    c = g_syn_freq_max;
+      else if (!strcmp(rest, "cpufreq/cpuinfo_min_freq"))    c = g_syn_freq_min;
+      if (c) {
+        *out_len = strlen(c);
+        return c;
+      }
+    }
+  }
+  return NULL;
+}
+
+static SynFile *synfile_get(int fd) {
+  if (fd < SYNFILE_FD_BASE || fd >= SYNFILE_FD_BASE + MAX_SYNFILES)
+    return NULL;
+  SynFile *s = &g_synfiles[fd - SYNFILE_FD_BASE];
+  return s->used == 1 ? s : NULL;
+}
+
+static int synfile_open(const char *path) {
+  size_t len = 0;
+  const char *content = synfile_content(path, &len);
+  if (!content || len == 0)
+    return -1;
+
+  mutexLock(&g_synfile_lock);
+  int fd = -1;
+  for (int i = 0; i < MAX_SYNFILES; i++) {
+    if (!g_synfiles[i].used) {
+      g_synfiles[i].used    = 1;
+      g_synfiles[i].content = content;
+      g_synfiles[i].len     = len;
+      g_synfiles[i].offset  = 0;
+      fd = SYNFILE_FD_BASE + i;
+      break;
+    }
+  }
+  mutexUnlock(&g_synfile_lock);
+  if (fd < 0)
+    errno = EMFILE;
+  return fd;
+}
 
 // ---------------------------------------------------------------------------
 // fortify (_chk) wrappers: ignore the object-size argument
@@ -54,9 +235,83 @@ void *__memset_chk_fake(void *dst, int c, size_t n, size_t dstlen) {
   return memset(dst, c, n);
 }
 
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+/* Updated from several threads (EE, GS, and whatever thread the core's CDVD
+ * uses), so every field is a relaxed atomic; see FileIoStats in libc_shim.h for
+ * why this is measured at all. The two clock reads per call are the cost: a
+ * hundred reads in one frame add ~10 us to a 20 ms frame, which is 0.05% and
+ * only in the diagnostic build. */
+static unsigned long long g_io_calls, g_io_bytes, g_io_ns;
+
+static uint64_t fileio_now_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    return 0;
+  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+
+static void fileio_note(long long bytes, uint64_t t0, uint64_t t1) {
+  __atomic_fetch_add(&g_io_calls, 1, __ATOMIC_RELAXED);
+  if (bytes > 0)
+    __atomic_fetch_add(&g_io_bytes, (unsigned long long)bytes, __ATOMIC_RELAXED);
+  if (t1 > t0)
+    __atomic_fetch_add(&g_io_ns, t1 - t0, __ATOMIC_RELAXED);
+}
+
+void fileio_stats_snapshot(FileIoStats *out) {
+  out->calls = __atomic_load_n(&g_io_calls, __ATOMIC_RELAXED);
+  out->bytes = __atomic_load_n(&g_io_bytes, __ATOMIC_RELAXED);
+  out->ns    = __atomic_load_n(&g_io_ns, __ATOMIC_RELAXED);
+}
+#endif
+
 long __read_chk_fake(int fd, void *buf, size_t count, size_t buf_size) {
   (void)buf_size;
+  SynFile *s = synfile_get(fd);
+  if (s) {
+    mutexLock(&g_synfile_lock);
+    const size_t avail = s->len - s->offset;
+    const size_t n = count < avail ? count : avail;
+    if (n) {
+      memcpy(buf, s->content + s->offset, n);
+      s->offset += n;
+    }
+    mutexUnlock(&g_synfile_lock);
+    return (long)n; // 0 at EOF, exactly like read()
+  }
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  /* The synthetic-descriptor branch above is a memcpy and must not be timed as
+   * I/O; only this one really touches the SD card. */
+  {
+    const uint64_t t0 = fileio_now_ns();
+    const long r = read(fd, buf, count);
+    fileio_note(r, t0, fileio_now_ns());
+    return r;
+  }
+#else
   return read(fd, buf, count);
+#endif
+}
+
+/* lseek over a synthetic descriptor. The import table used to bind lseek and
+ * lseek64 straight to newlib's lseek, which would return EBADF for these fds. */
+off_t lseek_fake(int fd, off_t offset, int whence) {
+  SynFile *s = synfile_get(fd);
+  if (!s)
+    return lseek(fd, offset, whence);
+
+  mutexLock(&g_synfile_lock);
+  long long base = whence == SEEK_CUR ? (long long)s->offset
+                 : whence == SEEK_END ? (long long)s->len
+                                      : 0;
+  long long target = base + (long long)offset;
+  if (target < 0)
+    target = 0;
+  if ((unsigned long long)target > (unsigned long long)s->len)
+    target = (long long)s->len;
+  s->offset = (size_t)target;
+  mutexUnlock(&g_synfile_lock);
+  return (off_t)target;
 }
 
 char *__strcat_chk_fake(char *dst, const char *src, size_t dstlen) {
@@ -137,8 +392,11 @@ int sched_get_priority_max_fake(int policy) {
   return 0;
 }
 
+// Bionic calls this immediately before abort() with the reason the core is
+// giving up (typically a failed assert or an uncaught C++ exception's what()).
+// abort_fake in imports.c replays it into the core console log.
 void android_set_abort_message_fake(const char *msg) {
-  (void)msg;
+  corelog_abort_message(msg);
 }
 
 size_t __ctype_get_mb_cur_max_fake(void) {
@@ -184,8 +442,13 @@ long sysconf_fake(int name) {
     case BIONIC_SC_PAGE_SIZE:
       return 0x1000;
     case BIONIC_SC_NPROCESSORS_CONF:
-    case BIONIC_SC_NPROCESSORS_ONLN:
-      return 3;
+    case BIONIC_SC_NPROCESSORS_ONLN: {
+      /* Keep Bionic's sysconf answers consistent with the synthetic /proc and
+       * sysfs CPU topology built from Horizon's actual process core mask. */
+      size_t ignored_len = 0;
+      (void)synfile_content("/proc/cpuinfo", &ignored_len);
+      return g_syn_ncpu ? (long)g_syn_ncpu : 3;
+    }
     case BIONIC_SC_PHYS_PAGES:
       return (3ll * 1024 * 1024 * 1024) / 0x1000;
     default:
@@ -241,6 +504,10 @@ const char *fix_path(const char *path) {
 // open() flag translation (bionic/linux -> newlib)
 // ---------------------------------------------------------------------------
 
+#define LINUX_O_RDONLY 0
+#define LINUX_O_WRONLY 01
+#define LINUX_O_RDWR   02
+#define LINUX_O_ACCMODE 03
 #define LINUX_O_CREAT  0100
 #define LINUX_O_EXCL   0200
 #define LINUX_O_TRUNC  01000
@@ -257,6 +524,14 @@ static int convert_open_flags(int flags) {
 }
 
 int open_fake(const char *path, int flags, ...) {
+  /* Synthetic sysfs/procfs files are read-only, so only a plain read-only open
+   * is intercepted: a create or a write open must reach the real filesystem and
+   * fail honestly instead of silently succeeding on a fabricated file. */
+  if ((flags & LINUX_O_ACCMODE) == LINUX_O_RDONLY && !(flags & LINUX_O_CREAT)) {
+    const int sfd = synfile_open(path);
+    if (sfd >= 0)
+      return sfd;
+  }
   int mode = 0666;
   if (flags & LINUX_O_CREAT) {
     va_list va;
@@ -270,6 +545,11 @@ int open_fake(const char *path, int flags, ...) {
 
 // bionic's fortified open with no variadic mode (read/existing files)
 int open2_fake(const char *path, int flags) {
+  if ((flags & LINUX_O_ACCMODE) == LINUX_O_RDONLY && !(flags & LINUX_O_CREAT)) {
+    const int sfd = synfile_open(path);
+    if (sfd >= 0)
+      return sfd;
+  }
   return open(fix_path(path), convert_open_flags(flags), 0666);
 }
 
@@ -335,7 +615,24 @@ static void convert_stat(const struct stat *in, struct bionic_stat *out) {
   out->st_ctim.tv_sec = in->st_ctime;
 }
 
+/* Fill a bionic stat for a synthetic file: a small world-readable regular file. */
+static void synfile_stat(size_t len, struct bionic_stat *out) {
+  struct stat fake;
+  memset(&fake, 0, sizeof fake);
+  fake.st_mode    = S_IFREG | 0444;
+  fake.st_nlink   = 1;
+  fake.st_size    = (off_t)len;
+  fake.st_blksize = 4096;
+  fake.st_blocks  = 0;
+  convert_stat(&fake, out);
+}
+
 int stat_fake(const char *path, struct bionic_stat *st) {
+  size_t syn_len = 0;
+  if (st && synfile_content(path, &syn_len)) {
+    synfile_stat(syn_len, st);
+    return 0;
+  }
   struct stat real;
   const int ret = stat(fix_path(path), &real);
   if (ret == 0)
@@ -344,6 +641,13 @@ int stat_fake(const char *path, struct bionic_stat *st) {
 }
 
 int fstat_fake(int fd, struct bionic_stat *st) {
+  const SynFile *s = synfile_get(fd);
+  if (s) {
+    if (!st)
+      return -1;
+    synfile_stat(s->len, st);
+    return 0;
+  }
   struct stat real;
   const int ret = fstat(fd, &real);
   if (ret == 0)
@@ -525,7 +829,19 @@ size_t fwrite_fake(const void *ptr, size_t size, size_t n, FILE *f) {
 size_t fread_fake(void *ptr, size_t size, size_t n, FILE *f) {
   if (is_fake_file(f))
     return 0;
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  /* PCSX2's isoFile reads through stdio, so this is the path a CDVD sector
+   * actually takes; newlib's own internal read() below it is not one of our
+   * imports and would otherwise go unmeasured. */
+  {
+    const uint64_t t0 = fileio_now_ns();
+    const size_t r = fread(ptr, size, n, f);
+    fileio_note((long long)r * (long long)size, t0, fileio_now_ns());
+    return r;
+  }
+#else
   return fread(ptr, size, n, f);
+#endif
 }
 
 int fputc_fake(int c, FILE *f) {
@@ -600,26 +916,49 @@ int getc_fake(FILE *f) {
   return getc(f);
 }
 
-// fopen with a large stream buffer for the big game archives: the engine
-// streams the multi-hundred-MB .dat packs with many small reads/seeks, and
-// fsdev round trips dominate without buffering.
+// fopen with a large stream buffer.
+//
+// Reads: the engine streams the multi-hundred-MB .dat packs with many small
+// reads/seeks. Writes: creating an 8 MB memory card took 6.68 s on device --
+// 1.2 MB/s, i.e. ~819 us per write, which is an fsdev IPC round trip to the SD
+// card. newlib's default stream buffer is BUFSIZ (1024), so PCSX2 writing the
+// card page by page became thousands of syscalls. Only read-mode .dat files
+// were buffered, so memory cards (.ps2), save states and everything else written
+// through stdio paid the full per-write cost. One 256 KiB buffer turns 8 MB of
+// small writes into 32 syscalls.
+//
+// Skipped for fmemopen streams (the synthetic /sys files below return earlier)
+// and for anything already buffering itself.
 FILE *fopen_fake(const char *path, const char *mode) {
-  // CPU topology: the Switch has no /sys, and the core reads these to size its
-  // worker-thread pool -- a failed/garbage read here can spawn a runaway number
-  // of threads. Report 4 present/online CPUs (matches the 3 app cores we use).
-  if (path && strchr(mode, 'r') && !strncmp(path, "/sys/devices/system/cpu/", 24)) {
-    const char *leaf = path + 24;
-    const char *content = (!strcmp(leaf, "kernel_max")) ? "63\n" : "0-3\n";
-    FILE *m = fmemopen((void *)content, strlen(content), "r");
-
-    if (m) return m;
+  /* Synthetic sysfs/procfs files. Shares one table with open_fake() so the two
+   * entry points cannot disagree about the topology they report -- the core reads
+   * these to size its worker-thread pool, and a garbage answer there could spawn
+   * a runaway number of threads. fmemopen rather than fdopen(synthetic fd): a
+   * newlib FILE would call the real read/lseek/close on it and fail. */
+  if (path && mode && strchr(mode, 'r') && !strchr(mode, 'w') &&
+      !strchr(mode, 'a')) {
+    size_t syn_len = 0;
+    const char *syn = synfile_content(path, &syn_len);
+    if (syn) {
+      FILE *m = fmemopen((void *)syn, syn_len, "r");
+      if (m)
+        return m;
+    }
   }
   const char *p = fix_path(path);
   FILE *f = fopen(p, mode);
-  if (f && strchr(mode, 'r')) {
-    const char *ext = strrchr(p, '.');
-    if (ext && strcasecmp(ext, ".dat") == 0)
-      setvbuf(f, NULL, _IOFBF, 256 * 1024);
+  if (f) {
+    /* Reads get the bigger buffer: nothing is at risk and the .dat packs are
+     * streamed with many small reads and seeks.
+     *
+     * Writes get a deliberately smaller one. PCSX2 keeps memory cards and save
+     * states open for the whole session, and a hard kill (Home -> close the
+     * app) loses whatever is still buffered, so the buffer size is also the
+     * worst-case data loss. 64 KiB still cuts 8 MB of small writes from
+     * thousands of fsdev round trips to ~128, which is where the 6.68 s went. */
+    const int writing = mode && (strchr(mode, 'w') || strchr(mode, 'a') ||
+                                 strchr(mode, '+'));
+    setvbuf(f, NULL, _IOFBF, writing ? 64 * 1024 : 256 * 1024);
   }
   return f;
 }
@@ -761,6 +1100,13 @@ int AndroidBitmap_unlockPixels_fake(void *env, void *bitmap) {
 #define FASTMEM_AREA_SIZE       0x100000000ULL
 #define FASTMEM_PAGE_COUNT      (FASTMEM_AREA_SIZE / MMAP_PAGE)
 #define FASTMEM_BACKING_MIN     0x08000000ULL
+/* MEASURED on GT3 (build 8bc47ee, diag, ~7 min session): peak 8550 of 16384
+ * pages, limit hits 0, map failures 0, and lazy faults fall to 0/page after the
+ * first two windows. 8550 pages is ~33.4 MB, i.e. the 32 MB of PS2 RAM mapped
+ * ONCE -- the kseg0/kseg1 mirrors do not consume separate slots, so the worry
+ * that three aliases of RAM would overflow a 64 MB ceiling does not happen.
+ * Raising this to 32768 would therefore buy nothing; do not "optimise" it
+ * without a perf line showing limit > 0 first. */
 #define FASTMEM_MAPPED_PAGE_LIMIT 16384u
 #define FASTMEM_ENTRY_EMPTY     UINT32_MAX
 #define FASTMEM_ENTRY_PROTECTED 0x80000000u
@@ -790,6 +1136,48 @@ static uintptr_t g_fastmem_base;
 static uint32_t *g_fastmem_pages;
 static uint32_t *g_fastmem_reverse_next;
 static unsigned g_fastmem_live_pages;
+
+// Fault accounting for the diag perf line (vk.c). Every first touch of a lazy
+// fastmem page is a full exception round trip (__libnx_exception_handler ->
+// trampoline -> fastmem_dispatch_fault), and once g_fastmem_live_pages reaches
+// FASTMEM_MAPPED_PAGE_LIMIT a new page is NOT mapped: the fault goes to the
+// core's handler, which backpatches that access onto the slow path for good.
+// None of that was visible anywhere, so "fastmem is on" could not be told from
+// "fastmem is on but half the hot pages fell off the fast path". Mapping
+// counters are written under g_fastmem_lock and copied under the same lock;
+// exception-dispatch counters are atomic so the reporter can sample them
+// without taking a lock in the fault path.
+static unsigned long long g_fastmem_stat_lazy_faults;   // faults resolved by mapping
+static unsigned long long g_fastmem_stat_lazy_pages;    // pages mapped by those faults
+static unsigned long long g_fastmem_stat_limit_hits;    // lazy fault refused: page limit
+static unsigned long long g_fastmem_stat_map_failures;  // svcMapProcessMemory failed
+static unsigned long long g_fastmem_stat_to_core;       // forwarded to the core's handler
+static unsigned long long g_fastmem_stat_to_core_prot;  // ...of which on a PROTECTED page
+static unsigned g_fastmem_live_pages_peak;
+
+static void fastmem_live_pages_note_peak(void) {
+  if (g_fastmem_live_pages > g_fastmem_live_pages_peak)
+    g_fastmem_live_pages_peak = g_fastmem_live_pages;
+}
+
+void fastmem_stats_snapshot(FastmemStats *out) {
+  if (!out)
+    return;
+  /* The mapping counters are updated under this lock, not atomically; reading
+   * them with __atomic_load_n alone still races with those plain writes. */
+  mutexLock(&g_fastmem_lock);
+  out->lazy_faults  = g_fastmem_stat_lazy_faults;
+  out->lazy_pages   = g_fastmem_stat_lazy_pages;
+  out->limit_hits   = g_fastmem_stat_limit_hits;
+  out->map_failures = g_fastmem_stat_map_failures;
+  out->live_pages   = g_fastmem_live_pages;
+  out->peak_pages   = g_fastmem_live_pages_peak;
+  out->page_limit   = FASTMEM_MAPPED_PAGE_LIMIT;
+  mutexUnlock(&g_fastmem_lock);
+  /* These are incremented from the exception dispatch path and remain atomic. */
+  out->to_core      = __atomic_load_n(&g_fastmem_stat_to_core, __ATOMIC_RELAXED);
+  out->to_core_prot = __atomic_load_n(&g_fastmem_stat_to_core_prot, __ATOMIC_RELAXED);
+}
 static char g_smc_reason[128] = "not configured";
 
 void fastmem_set_mode(FastmemMode mode) {
@@ -1066,6 +1454,16 @@ int ASharedMemory_create_fake(const char *name, size_t size) {
 
 // Ashmem mappings outlive their descriptors.
 int close_fake(int fd) {
+  if (fd >= SYNFILE_FD_BASE && fd < SYNFILE_FD_BASE + MAX_SYNFILES) {
+    mutexLock(&g_synfile_lock);
+    SynFile *s = &g_synfiles[fd - SYNFILE_FD_BASE];
+    const int was_used = s->used;
+    s->used = 0;
+    s->offset = 0;
+    mutexUnlock(&g_synfile_lock);
+    if (was_used)
+      return 0;
+  }
   if (ashmem_get(fd)) return 0;
   return close(fd);
 }
@@ -1454,6 +1852,7 @@ static Result fastmem_map_run_locked(size_t first, size_t count,
     return rc;
 
   g_fastmem_live_pages += (unsigned)count;
+  fastmem_live_pages_note_peak();
 
   for (size_t i = 0; i < count; i++) {
     const uint32_t entry = __atomic_load_n(&g_fastmem_pages[first + i],
@@ -1551,6 +1950,7 @@ static int fastmem_try_resolve_fault(uintptr_t fault_addr) {
   }
 
   if (g_fastmem_live_pages >= FASTMEM_MAPPED_PAGE_LIMIT) {
+    g_fastmem_stat_limit_hits++;
     mutexUnlock(&g_fastmem_lock);
     return 0;
   }
@@ -1572,8 +1972,16 @@ static int fastmem_try_resolve_fault(uintptr_t fault_addr) {
   }
 
   Result rc = fastmem_map_run_locked(first, count, region, source_offset);
-  if (R_FAILED(rc) && count > 1)
+  if (R_FAILED(rc) && count > 1) {
+    count = 1;
     rc = fastmem_map_run_locked(first, 1, region, source_offset);
+  }
+  if (R_SUCCEEDED(rc)) {
+    g_fastmem_stat_lazy_faults++;
+    g_fastmem_stat_lazy_pages += count;
+  } else {
+    g_fastmem_stat_map_failures++;
+  }
   mutexUnlock(&g_fastmem_lock);
   return R_SUCCEEDED(rc);
 }
@@ -1633,6 +2041,24 @@ int fastmem_dispatch_fault(uintptr_t pc, uintptr_t fault_addr) {
   BionicSigaction action;
   if (!fastmem_select_signal_action(&sig, &action))
     return 0;
+
+  // Everything from here on is the core's own handler: either a page it
+  // mprotect()ed itself (PROTECTED -- its write tracking, expected and
+  // bounded) or a page the lazy path refused (limit hit, map failure, no
+  // mapping at all), which the core answers by backpatching the faulting
+  // access onto the slow path permanently. The PROTECTED split is what tells
+  // the two apart in the log.
+  __atomic_fetch_add(&g_fastmem_stat_to_core, 1, __ATOMIC_RELAXED);
+  {
+    uint32_t *pages = __atomic_load_n(&g_fastmem_pages, __ATOMIC_ACQUIRE);
+    const uintptr_t base = __atomic_load_n(&g_fastmem_base, __ATOMIC_ACQUIRE);
+    if (pages && base && fault_addr >= base && fault_addr - base < FASTMEM_AREA_SIZE) {
+      const uint32_t entry = __atomic_load_n(&pages[(fault_addr - base) / MMAP_PAGE],
+                                             __ATOMIC_ACQUIRE);
+      if (entry != FASTMEM_ENTRY_EMPTY && (entry & FASTMEM_ENTRY_PROTECTED))
+        __atomic_fetch_add(&g_fastmem_stat_to_core_prot, 1, __ATOMIC_RELAXED);
+    }
+  }
 
   uint8_t siginfo[128] __attribute__((aligned(16))) = {0};
   FaultUcontext context __attribute__((aligned(16))) = {0};
@@ -2017,6 +2443,80 @@ int munmap_fake(void *addr, size_t length) {
   mutexUnlock(&g_mmap_lock);
   free(released_fastmem_pages);
   free(released_fastmem_reverse_next);
+  return 0;
+}
+
+/* Name an address that is not inside libemucore.so.
+ *
+ * corelog_death() records abort()'s caller so the faulting instruction can be
+ * located without a debugger, but __builtin_return_address(0) often lands
+ * outside the core image: the recompiler's RX cache, the ashmem-backed PS2 RAM
+ * mirrors and the 4 GiB fastmem reservation are all handed out by this file at
+ * ASLR addresses the core never reports. On device the death note read
+ * "called from 0x41b1667c68" and there was no way to tell JIT'd code from a RAM
+ * mirror from a value that was never a code address at all -- which matters,
+ * because the first two point at the recompiler and the last one points at a
+ * corrupted stack. This says which of the regions we mapped it fell in.
+ *
+ * Returns 1 and fills `out` on a match, 0 otherwise. Deliberately lock-free: the
+ * caller may be on the abort path with other threads wedged inside
+ * mmap_fake()/munmap_fake(), and a stale or torn answer beats a deadlock. */
+int shim_describe_address(uintptr_t addr, char *out, size_t outsz) {
+  if (!out || outsz == 0)
+    return 0;
+  out[0] = '\0';
+  if (!addr)
+    return 0;
+
+  for (int i = 0; i < MAX_MMAP_REGIONS; i++) {
+    const MmapRegion *r = &g_mmaps[i];
+    if (!r->dst || !r->size)
+      continue;
+    const uintptr_t base = (uintptr_t)r->dst;
+    if (addr < base || addr >= base + r->size)
+      continue;
+    /* is_code: 1 = executable RX mapping (the recompiler), 2 = PROT_NONE
+     * address-space reservation, 0 = plain data mapping. */
+    const char *what = r->is_code == 1 ? "mmap RX (recompiler/JIT)"
+                     : r->is_code == 2 ? "mmap PROT_NONE reservation"
+                                       : "mmap data region";
+    snprintf(out, outsz, "%s #%d base=0x%llx size=0x%llx addr=base+0x%llx",
+             what, i, (unsigned long long)base, (unsigned long long)r->size,
+             (unsigned long long)(addr - base));
+    return 1;
+  }
+
+  const uintptr_t fastmem_base = __atomic_load_n(&g_fastmem_base, __ATOMIC_ACQUIRE);
+  if (fastmem_base && addr >= fastmem_base &&
+      addr < fastmem_base + FASTMEM_AREA_SIZE) {
+    snprintf(out, outsz,
+             "fastmem mirror base=0x%llx (4 GiB PS2 address space) "
+             "addr=base+0x%llx",
+             (unsigned long long)fastmem_base,
+             (unsigned long long)(addr - fastmem_base));
+    return 1;
+  }
+
+  for (int i = 0; i < MAX_ASHMEM; i++) {
+    const AshmemRegion *a = &g_ashmem[i];
+    if (a->used != 1 || !a->size)
+      continue;
+    uintptr_t hit = 0;
+    if (a->raw && addr >= (uintptr_t)a->raw &&
+        addr < (uintptr_t)a->raw + a->size)
+      hit = (uintptr_t)a->raw;
+    else if (a->ptr && addr >= (uintptr_t)a->ptr &&
+             addr < (uintptr_t)a->ptr + a->size)
+      hit = (uintptr_t)a->ptr;
+    if (!hit)
+      continue;
+    snprintf(out, outsz, "ashmem region #%d size=0x%llx addr=base+0x%llx%s",
+             i, (unsigned long long)a->size,
+             (unsigned long long)(addr - hit),
+             a->alias_backed ? " (alias-backed)" : "");
+    return 1;
+  }
+
   return 0;
 }
 

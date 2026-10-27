@@ -136,12 +136,59 @@ int sigaction_fake(int sig, const void *act, void *old_act);
 int fastmem_fault_can_dispatch(uintptr_t pc, uintptr_t fault_addr);
 int fastmem_dispatch_fault(uintptr_t pc, uintptr_t fault_addr);
 
+// Cumulative fastmem fault counters since boot; the perf reporter in vk.c
+// differences consecutive snapshots into per-window rates. See the comment at
+// the counters in libc_shim.c for what each one means.
+typedef struct {
+  unsigned long long lazy_faults;   // resolved by mapping the page(s)
+  unsigned long long lazy_pages;    // pages mapped by those faults (batched)
+  unsigned long long limit_hits;    // refused: FASTMEM_MAPPED_PAGE_LIMIT reached
+  unsigned long long map_failures;  // refused: svcMapProcessMemory failed
+  unsigned long long to_core;       // forwarded to the core's SIGSEGV handler
+  unsigned long long to_core_prot;  // ...of which hit a PROTECTED (mprotect) page
+  unsigned live_pages;              // currently mapped fastmem pages
+  unsigned peak_pages;              // high-water mark of live_pages
+  unsigned page_limit;              // FASTMEM_MAPPED_PAGE_LIMIT
+} FastmemStats;
+void fastmem_stats_snapshot(FastmemStats *out);
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+// Cumulative wall time the core spent blocked in file reads. The GPU counters in
+// vk.c cover the Vulkan side of a stall and pthr.c covers the three heavy CPU
+// roles, which leaves one plausible sink for a single long frame unmeasured:
+// synchronous SD-card access. GT3 streams from its ISO while racing, and a read
+// that blocks for tens of milliseconds shows up as a hitched frame with no
+// thread above ~70% and no Vulkan call taking any time at all -- exactly the
+// shape of the 82.4 ms worst frame in the e0e44b4 hardware log. Counts only the
+// core's own reads (its imports are bound through this file); the statically
+// linked NVK/Mesa driver reaches newlib directly and is NOT included.
+typedef struct {
+  unsigned long long calls;  // read/fread calls that reached the filesystem
+  unsigned long long bytes;  // bytes they returned
+  unsigned long long ns;     // wall time inside them, summed
+} FileIoStats;
+void fileio_stats_snapshot(FileIoStats *out);
+#endif
+
 int jit_redirect_lookup(uintptr_t address, uintptr_t *redirected);
 
 // JIT-capable anonymous mmap (PS2 recompiler RX memory via process code memory)
 void *mmap_fake(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 int mprotect_fake(void *addr, size_t length, int prot);
 int munmap_fake(void *addr, size_t length);
+
+/* Name an address outside libemucore.so: which of the regions this file mapped
+ * on the core's behalf (recompiler RX, fastmem mirror, ashmem PS2 RAM) contains
+ * it. Returns 1 and fills `out` on a match, 0 otherwise. Used by corelog.c to
+ * make abort()'s return address interpretable. Lock-free by design -- callers
+ * may be on the abort path with other threads wedged. */
+int shim_describe_address(uintptr_t addr, char *out, size_t outsz);
+
+/* Synthetic read-only files (/sys/devices/system/cpu/*, /proc/cpuinfo) that
+ * cpuinfo probes but Horizon does not have. open_fake() hands out descriptors
+ * from SYNFILE_FD_BASE for them, so read/lseek/fstat/close must recognise those
+ * fds instead of forwarding to newlib -- hence these wrappers. */
+off_t lseek_fake(int fd, off_t offset, int whence);
 
 void libc_memory_shutdown(void);
 

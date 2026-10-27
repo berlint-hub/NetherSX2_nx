@@ -13,23 +13,26 @@ if [[ -z "${CORES_DIR:-}" ]]; then
   if [[ -d "$APP/out/cores" ]]; then CORES_DIR="$APP/out/cores"; fi
 fi
 if [[ -n "${APK_4248:-}${APK_3668:-}" ]]; then
-  [[ -n "${APK_4248:-}" && -n "${APK_3668:-}" ]] || {
-    echo "Set both APK_4248 and APK_3668." >&2; exit 1;
+  # The product ships one core, so APK_4248 alone is a complete input set.
+  # APK_3668 stays accepted for a two-core tree but is no longer required.
+  [[ -n "${APK_4248:-}" ]] || {
+    echo "Set APK_4248 (APK_3668 alone would ship no core at all)." >&2; exit 1;
   }
   CORES_DIR="$APP/out/cores"
-  python3 "$APP/tools/prepare_build_inputs.py" --apk-4248 "$APK_4248" \
-    --apk-3668 "$APK_3668" --cores-dir "$CORES_DIR"
+  apk_args=(--apk-4248 "$APK_4248")
+  [[ -n "${APK_3668:-}" ]] && apk_args+=(--apk-3668 "$APK_3668")
+  python3 "$APP/tools/prepare_build_inputs.py" "${apk_args[@]}" --cores-dir "$CORES_DIR"
 fi
 if [[ -n "${MESA_SDK_ZIP:-}" ]]; then
   export MESA_SDK_ROOT="$APP/out/mesa-sdk"
   python3 "$APP/tools/prepare_build_inputs.py" --mesa-sdk "$MESA_SDK_ZIP" --sdk-dir "$MESA_SDK_ROOT"
 fi
 
+# Single core: 4248 only. A 3668 tree may still sit in CORES_DIR, but nothing
+# here requires it and nothing below bundles it.
 required=(
   "$CORES_DIR/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so"
   "$CORES_DIR/NetherSX2-v2.2n-4248/assets/GameIndex.yaml"
-  "$CORES_DIR/NetherSX2-v2.2n-3668/lib/arm64-v8a/libemucore.so"
-  "$CORES_DIR/NetherSX2-v2.2n-3668/assets/GameIndex.yaml"
 )
 if [[ -n "${MESA_SDK_ROOT:-}" ]]; then
   required+=(
@@ -39,10 +42,27 @@ if [[ -n "${MESA_SDK_ROOT:-}" ]]; then
     "$MESA_SDK_ROOT/lib/libEGL.a"
   )
 else
-  required+=(
-    "$APP/vulkan/include/vulkan/vulkan_core.h"
-    "$APP/vulkan/lib/libnvk.a"
-  )
+  # Mesa NVK, same two layouts the Makefile detects: the nxvk portlib package
+  # (preferred) or the older vendored tree under $APP/vulkan.
+  # NXVK_PKG_CONFIG muze byt i vice slov (PKG_CONFIG_LIBDIR=... /cesta/pkg-config),
+  # proto se expanduje bez uvozovek -- presne tak ho pouziva Makefile.
+  NXVK_PKG_CONFIG="${NXVK_PKG_CONFIG:-$DEVKITA64/bin/aarch64-none-elf-pkg-config}"
+  if $NXVK_PKG_CONFIG --exists nxvk 2>/dev/null; then
+    NXVK_PREFIX=$($NXVK_PKG_CONFIG --variable=prefix nxvk)
+    echo "NVK: portlib balicek $NXVK_PREFIX ($($NXVK_PKG_CONFIG --modversion nxvk))"
+    required+=(
+      "$NXVK_PREFIX/lib/libnvk.a"
+      "$NXVK_PREFIX/lib/libnvk_support.a"
+      "$NXVK_PREFIX/lib/pkgconfig/nxvk.pc"
+      "$NXVK_PREFIX/include/vulkan/vulkan_core.h"
+    )
+  else
+    echo "NVK: vendored tree $APP/vulkan (nxvk.pc not found)"
+    required+=(
+      "$APP/vulkan/include/vulkan/vulkan_core.h"
+      "$APP/vulkan/lib/libnvk.a"
+    )
+  fi
 fi
 for file in "${required[@]}"; do
   [[ -f "$file" ]] || { echo "Missing build input: $file" >&2; exit 1; }
@@ -75,44 +95,23 @@ fi
 cmake "${deps_args[@]}"
 cmake --build "$DEPS_BUILD" --parallel "$JOBS"
 
-echo "==== native Deko3D shader compiler + LSFG dependencies ===="
-DEKO3D_DEPS_ROOT="${DEKO3D_DEPS_ROOT:-$APP/out/deko3d-deps}"
-dk_args=(
-  -S "$APP/source/deko3d/compiler"
-  -B "$DEKO3D_DEPS_ROOT"
-  -G Ninja
-  -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake"
-  -DCMAKE_BUILD_TYPE=Release
-  -DDEKO3D_SHADER_TESTS=OFF
-)
-if [[ -n "${UAM_SOURCE:-}" ]]; then
-  dk_args+=( -DFETCHCONTENT_SOURCE_DIR_DOLPHIN_UAM="$UAM_SOURCE" )
-fi
-if [[ -n "${SPIRV_CROSS_SOURCE:-}" ]]; then
-  dk_args+=( -DFETCHCONTENT_SOURCE_DIR_SPIRV_CROSS="$SPIRV_CROSS_SOURCE" )
-fi
-cmake "${dk_args[@]}"
-cmake --build "$DEKO3D_DEPS_ROOT" --parallel "$JOBS"
-
-echo "==== emulator: native Deko3D ===="
-cd "$APP"
-DK_BUILD=build-dk
-DK_TARGET=NetherSX2_nx_dk
-make -j"$JOBS" RENDERER=DK BUILD="$DK_BUILD" TARGET="$DK_TARGET" DEKO3D_DEPS_ROOT="$DEKO3D_DEPS_ROOT"
-
 echo "==== emulator: Vulkan (NVK) ===="
+# Vulkan-only: this is the shipped backend. The native Deko3D and OpenGL targets
+# still build (make RENDERER=DK / RENDERER=GL) but are not part of the bundle,
+# so their dependency step (out/deko3d-deps: UAM + SPIRV-Cross + LSFG-deko3d) is
+# not configured here either.
+cd "$APP"
 make -j"$JOBS" RENDERER=VK BUILD=build-vk TARGET=NetherSX2_nx_vk
 
-echo "==== emulator: OpenGL ===="
-make -j"$JOBS" RENDERER=GL BUILD=build-gl TARGET=NetherSX2_nx_gl
-
-echo "==== bundle cores + emulator binaries into the launcher romfs ===="
+echo "==== bundle cores + the Vulkan emulator into the launcher romfs ===="
 mkdir -p "$APP/launcher/romfs/cores" "$APP/launcher/romfs/emu"
 cp -f "$CORES_DIR/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so" "$APP/launcher/romfs/cores/emucore_4248.so"
-cp -f "$CORES_DIR/NetherSX2-v2.2n-3668/lib/arm64-v8a/libemucore.so" "$APP/launcher/romfs/cores/emucore_3668.so"
+# Single core: drop a stale 3668 image an older two-core bundle left in romfs.
+rm -f "$APP/launcher/romfs/cores/emucore_3668.so"
 cp -f "$APP/NetherSX2_nx_vk.nro" "$APP/launcher/romfs/emu/NetherSX2_nx_vk.nro"
-cp -f "$APP/NetherSX2_nx_gl.nro" "$APP/launcher/romfs/emu/NetherSX2_nx_gl.nro"
-cp -f "$APP/$DK_TARGET.nro" "$APP/launcher/romfs/emu/NetherSX2_nx_dk.nro"
+# Remove stale binaries an older multi-renderer bundle left in the romfs, so a
+# rebuilt bundle cannot ship an emulator the launcher no longer offers.
+rm -f "$APP/launcher/romfs/emu/NetherSX2_nx_dk.nro" "$APP/launcher/romfs/emu/NetherSX2_nx_gl.nro"
 
 echo "==== bundle per-build resources into the launcher romfs ===="
 python3 "$APP/tools/bundle_resources.py" --cores-dir "$CORES_DIR"
@@ -125,8 +124,9 @@ cd "$APP/launcher"
 make -j"$JOBS"
 
 mv -f "$APP/launcher/NetherSX2.nro" "$APP/NetherSX2.nro"
-python3 "$APP/tools/check_deko3d_build.py" --cores-dir "$CORES_DIR" \
-  --map "$APP/$DK_BUILD/$DK_TARGET.map" --native-nro "$APP/$DK_TARGET.nro" --bundle "$APP/NetherSX2.nro"
+# No --map: the Deko3D target is not built, so there is no link map to verify.
+# verify_profiles (core hashes + vtables) and verify_bundle still run.
+python3 "$APP/tools/check_deko3d_build.py" --cores-dir "$CORES_DIR" --bundle "$APP/NetherSX2.nro"
 
 echo
 echo "Done. The only file to copy:"

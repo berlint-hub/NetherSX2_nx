@@ -67,6 +67,64 @@ void pthr_set_priority(int priority);
 
 void pthr_pin_ee_core(void);
 
+// Role-based affinity keyed on the name the core hands to prctl(PR_SET_NAME).
+// No-op when Wrapper/ThreadPinning is "auto", and for names with no role.
+void pthr_pin_by_name(const char *name);
+
+// Affinity for threads created by statically linked third-party code -- in
+// practice Mesa/NVK's. Reached only through __wrap_pthread_create.
+void pthr_pin_driver_core(void);
+
+// Our own creation sites use this so they bypass the wrap and keep whatever
+// affinity they arrange themselves. See pthr.c.
+int pthr_create_self(pthread_t *thread, const pthread_attr_t *attr,
+                     void *(*start)(void *), void *arg);
+
+// Counting replacement for the core's sched_yield. The core imports it as its
+// only spin primitive, so how often each thread calls it is what separates
+// "MTVU is computing" from "MTVU is spinning idle waiting for the EE".
+int pthr_sched_yield(void);
+
 void pthr_ensure_fake_tls(void);
+const char *pthr_debug_current_name(void);
+
+// Number of heavy roles whose CPU time is tracked (EE, GS, MTVU). Outside the
+// diagnostic guard because the slot table itself is always compiled.
+#define PTHR_CPU_ROLES 3
+
+// Formats "EE 97% GS 61% MTVU 95%": scheduled CPU time of the three heavy
+// roles as a share of wall time since the previous call, from
+// svcGetInfo(InfoType_ThreadTickCount). "-" = thread has not named itself yet,
+// "?" = its handle no longer answers (thread exited). Returns 0 if no role is
+// registered at all. Meant for the perf window line in the Vulkan diag log.
+int pthr_cpu_time_report(char *buf, size_t len);
+
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+// Last completed stage of save-state worker bridge #4, sampled by the fatal
+// exception report. Values: 0 none; 1 TLS installed; 2 entry log returned; 3
+// before core_lock; 4 lock acquired; 5 pool initialized; 6 assignment selected;
+// 7 lock released; 8 affinity syscall returned; 9 assignment log started; 10
+// assignment complete; 11 assignment function returned; 12 pre-target marker
+// returned; 13 immediately before start(arg).
+unsigned pthr_debug_bridge4_stage(void);
+uint32_t pthr_debug_bridge4_handle(void);
+
+// Per-frame sampling of the same three roles, for the hitch line in vk.c.
+// pthr_cpu_time_report() consumes its own baselines (it is a rate), which is
+// wrong for a single frame: a 82 ms frame is 1.4% of a 6 s window, so the
+// window percentage cannot say whether that frame was CPU-bound at all. These
+// two read absolute tick counts and leave every baseline alone, so both can be
+// used from the same window without disturbing each other.
+typedef struct {
+  uint64_t ticks[PTHR_CPU_ROLES];  // absolute ThreadTickCount, 0 when unavailable
+  int      have[PTHR_CPU_ROLES];   // role registered and its handle answered
+} CpuTimeSample;
+
+void pthr_cpu_time_sample(CpuTimeSample *out);
+// Formats "EE 51.2 GS 12.0 MTVU 8.4 ms" for the tick delta between two samples.
+// Returns 0 when no role produced a usable delta.
+int pthr_cpu_time_ms(const CpuTimeSample *from, const CpuTimeSample *to,
+                     char *buf, size_t len);
+#endif
 
 #endif

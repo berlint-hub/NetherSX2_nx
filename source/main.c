@@ -26,7 +26,9 @@
 #include "imports.h"
 #include "jni_fake.h"
 #include "prefs.h"
+#include "saltysd_display.h"
 #include "libc_shim.h"
+#include "corelog.h"
 #include "pthr.h"
 #include "keycodes.h"
 #include "syslang.h"
@@ -66,6 +68,15 @@ static void *FAKE_SURFACE = NULL; // android.view.Surface
 // device if nvMap/instance creation fails.
 u32 __nx_nv_transfermem_size = 16 * 1024 * 1024;
 #endif
+
+// Full-memory application, never an applet. Mesa sizes itself from the core mask
+// Horizon grants the process (0xf, four cores) and NVK needs the memory it gets
+// only in this applet type; an applet is silently short of both. libnx declares
+// this weak, so a strong definition here pins it.
+// __nx_heap_size is deliberately NOT defined: __libnx_initheap() below replaces
+// libnx's heap sizing outright and already claims all available memory minus the
+// GPU and .so reserves, so the libnx knob would be dead.
+u32 __nx_applet_type = AppletType_Application;
 
 // separate the newlib heap from the .so load region (see config.h SO_REGION_MB)
 void __libnx_initheap(void) {
@@ -188,10 +199,14 @@ static void set_screen_size(int w, int h) {
 
 typedef unsigned char jbool;
 
+static void prefs_save_display_sync_safe(void);
+static void display_sync_poll_and_apply(void);
+static void display_sync_restore(void);
+
 static struct {
   int  (*JNI_OnLoad)(void *vm, void *reserved);
   void (*JNI_OnUnload)(void *vm, void *reserved);
-  jbool(*initialize)(void *env, void *cls, void *ctx, void *dataDir, void *devName, void *cacheDir);
+  jbool(*initialize)(void *env, void *cls, void *ctx, void *dataDir, void *cacheDir, void *deviceName);
   void (*applySettings)(void *env, void *cls);
   jbool(*isBIOSAvailable)(void *env, void *cls);
   void (*setDefaultPadSettings)(void *env, void *cls);
@@ -221,6 +236,81 @@ static struct {
   int (*getCheevoMaximumPointsForGame)(void *env, void *cls);
   void *(*getCheevoGameTitle)(void *env, void *cls);
 } nl;
+
+static void prefs_save_display_sync_safe(void) {
+  /* Frame pacing reports to FPSLocker; it never rewrites PAL/NTSC core prefs. */
+  prefs_save();
+}
+
+static void display_sync_restore(void) {
+  saltysd_display_sync_shutdown();
+}
+
+static void display_sync_poll_and_apply(void) {
+  saltysd_display_sync_poll();
+  saltysd_display_sync_publish();
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  /* Log state changes only. SaltySD's GetDisplayRefreshRate handler is silent,
+   * so this shows source cadence and the target currently owned by FPSLocker. */
+  {
+    static int last_query_status = -2;
+    static int last_active = -1;
+    static unsigned last_connect_result;
+    static unsigned last_nethfps_result;
+    static unsigned last_legacy_result;
+    static unsigned last_connect_port;
+    static unsigned last_service_rate;
+    static unsigned last_fpslocker_target;
+    static unsigned last_session_limit_result = UINT32_MAX;
+    static int last_target_ready = -1;
+    static int last_effective_rate_bucket = -1;
+    const int query_status = saltysd_display_sync_query_status();
+    const int active = saltysd_display_sync_active();
+    const unsigned connect_result = saltysd_display_sync_connect_result();
+    const unsigned nethfps_result = saltysd_display_sync_nethfps_connect_result();
+    const unsigned legacy_result = saltysd_display_sync_legacy_connect_result();
+    const unsigned connect_port = saltysd_display_sync_connect_port();
+    const unsigned service_rate = saltysd_display_sync_service_rate();
+    const unsigned fpslocker_target = saltysd_display_sync_fpslocker_target();
+    const unsigned session_limit_result =
+        saltysd_display_sync_session_limit_result();
+    const int target_ready = saltysd_display_sync_target_ready();
+    const float effective_rate = saltysd_display_sync_rate();
+    const int effective_rate_bucket = effective_rate > 0.0f ?
+        (int)(effective_rate / 5.0f + 0.5f) : 0;
+    if (query_status >= 0 &&
+        (query_status != last_query_status || active != last_active ||
+         connect_result != last_connect_result ||
+         nethfps_result != last_nethfps_result ||
+         legacy_result != last_legacy_result || connect_port != last_connect_port ||
+         service_rate != last_service_rate || fpslocker_target != last_fpslocker_target ||
+         session_limit_result != last_session_limit_result ||
+         target_ready != last_target_ready ||
+         effective_rate_bucket != last_effective_rate_bucket)) {
+      vk_diag_note("display-sync state query=%d active=%d connect_rc=0x%08x "
+                   "session_limit_rc=0x%08x nethfps_rc=0x%08x "
+                   "legacy_rc=0x%08x port=%u display_rate=%u "
+                   "present_fps=%.0f present_bucket=%d shared_ready=%d "
+                   "fpslocker_target=%u",
+                   query_status, active, connect_result, session_limit_result,
+                   nethfps_result, legacy_result, connect_port, service_rate,
+                   effective_rate, effective_rate_bucket, target_ready,
+                   fpslocker_target);
+      last_query_status = query_status;
+      last_active = active;
+      last_connect_result = connect_result;
+      last_nethfps_result = nethfps_result;
+      last_legacy_result = legacy_result;
+      last_connect_port = connect_port;
+      last_service_rate = service_rate;
+      last_fpslocker_target = fpslocker_target;
+      last_session_limit_result = session_limit_result;
+      last_target_ready = target_ready;
+      last_effective_rate_bucket = effective_rate_bucket;
+    }
+  }
+#endif
+}
 
 #define RESOLVE(field, sym) \
   nl.field = (void *)so_find_addr_rx(&emu_mod, sym)
@@ -427,12 +517,46 @@ static void run_startup_sequence(void) {
   prefs_set_int("EmuCore/GS/CropBottom", 0);
   prefs_set_int("EmuCore/GS/StretchY", 100);
   apply_network_settings();
+  /* PCSX2's Log:: system is gated behind these five keys, and until this build
+   * every one of them was forced to "0" -- so the core's own console was muted
+   * by us, not by the emulator. That is why the GS could abort() with not one
+   * word in nethersx2-core.log: the four [I] lines that did appear come from
+   * NativeLibrary's folder setup calling __android_log_print() directly, which
+   * bypasses Log:: entirely.
+   *
+   * The diagnostic build turns the console and verbose levels on, because the
+   * core's message is the only thing that can name the fault. EnableFileLogging
+   * stays off -- corelog already captures the same stream, and PCSX2's own file
+   * sink would write a second copy under a path we do not control.
+   *
+   * Production keeps everything off: verbose PCSX2 logging is megabytes per
+   * boot and measurable time on a Tegra X1, for output nobody reads. */
+#ifdef NETHERSX2_VK_DIAGNOSTIC
+  prefs_set_string("Logging/EnableSystemConsole", "1");
+  prefs_set_string("Logging/EnableFileLogging",   "0");
+  prefs_set_string("Logging/EnableVerbose",       "1");
+  prefs_set_string("Logging/EnableEEConsole",     "1");
+  prefs_set_string("Logging/EnableIOPConsole",    "1");
+#ifdef USE_VULKAN
+  /* Proves at runtime that this run really did have the core's logging forced
+   * on -- the pref values are the same string literals in both branches, so
+   * nothing in the binary distinguishes them. run_startup_sequence() is called
+   * well after the diagnostic log is opened. */
+  vk_diag_note("core logging forced on: SystemConsole+Verbose+EEConsole+IOPConsole");
+#endif
+#else
   prefs_set_string("Logging/EnableSystemConsole", "0");
   prefs_set_string("Logging/EnableFileLogging", "0");
   prefs_set_string("Logging/EnableVerbose", "0");
   prefs_set_string("Logging/EnableEEConsole", "0");
   prefs_set_string("Logging/EnableIOPConsole", "0");
-  prefs_save();
+#endif
+#if defined(NETHERSX2_VK_DIAGNOSTIC) && defined(USE_VULKAN)
+  vk_diag_note("savestate diagnostic: MTVU=%d InstantVU1=%d (read from preferences; no diagnostic override)",
+               prefs_get_bool("EmuCore/Speedhacks/vuThread", true) ? 1 : 0,
+               prefs_get_bool("EmuCore/Speedhacks/vu1Instant", true) ? 1 : 0);
+#endif
+  prefs_save_display_sync_safe();
 
   if (!nl.isBIOSAvailable(fake_env, NATIVE_CLASS))
     fatal_error("No usable PS2 BIOS found in\n%s.", BIOS_DIR);
@@ -469,9 +593,11 @@ static void run_startup_sequence(void) {
 
   nl.applySettings(fake_env, NATIVE_CLASS);
 
-  pthread_create(&emu_thread, NULL, emu_thread_main, NULL);
+  pthread_create_self_marker: pthr_create_self(&emu_thread, NULL, emu_thread_main, NULL);
 
   svcSleepThread(250000000ull);
+  /* Keep the surface hint at the panel default; FPSLocker receives NetherSX2's
+   * own measured present target independently through the SaltyNX shared block. */
   nl.changeSurface(fake_env, NATIVE_CLASS, FAKE_SURFACE,
                    screen_width, screen_height, 60.0f);
   nl.applySettings(fake_env, NATIVE_CLASS);
@@ -820,6 +946,8 @@ static float g_quick_menu_pal_rate;
 static int g_quick_menu_ee_cycle_rate;
 static int g_quick_menu_ee_cycle_skip;
 static int g_quick_menu_restore_messages;
+static int g_quick_menu_savestate_pending;
+static unsigned g_quick_menu_savestate_polls;
 static int g_quick_menu_ready;
 #ifdef USE_FRAME_GENERATION
 static int g_quick_menu_lsfg_enabled;
@@ -934,7 +1062,8 @@ static void quick_menu_draw_main(void) {
         text_append(text, sizeof(text), "%s%s: %s\n", marker, labels[i],
                     !g_quick_menu_lsfg_enabled ? "Off" :
                     (vk_lsfg_is_high_fps_passthrough() ?
-                        "On (native FPS protected)" : "On"));
+                        "On (native FPS protected)" :
+                        (vk_lsfg_is_fractional() ? "On (fractional)" : "On")));
     }
 #endif
     else if (i == QUICK_ITEM_ACHIEVEMENTS) {
@@ -1255,15 +1384,49 @@ static void quick_menu_draw_capture(void) {
   quick_menu_message("nethersx2_quick_menu", text, 3600.0f);
 }
 
+static void quick_menu_restore_messages(void) {
+  if (!g_quick_menu_restore_messages) return;
+  prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
+  prefs_save_display_sync_safe();
+  nl.applySettings(fake_env, NATIVE_CLASS);
+  g_quick_menu_restore_messages = 0;
+}
+
+static void quick_menu_poll_savestate(void) {
+  if (!g_quick_menu_savestate_pending)
+    return;
+
+  int result = imports_savestate_watch_result();
+  if (!result && ++g_quick_menu_savestate_polls < 60000) // 120 s at 500 Hz
+    return;
+  const int timed_out = result == 0;
+  if (timed_out) {
+    result = -1;
+    corelog_log(CORELOG_WARN, "SaveState",
+                "slot %d: no terminal core status after 120 s; ending save wait defensively",
+                g_quick_menu_slot);
+  }
+
+  // The core's terminal status means VM-thread serialization has finished. Only
+  // now is waitForSaveStateFlush meaningful, and only after it returns may an
+  // applySettings call rebuild CPU/GS configuration without racing the save.
+  corelog_log(CORELOG_INFO, "SaveState",
+              "slot %d: core reported %s; waiting for writer flush",
+              g_quick_menu_slot, result > 0 ? "save complete" : "save failure");
+  nl.waitForSaveStateFlush(fake_env, NATIVE_CLASS);
+  imports_savestate_watch_end();
+
+  quick_menu_restore_messages();
+  g_quick_menu_savestate_pending = 0;
+  g_quick_menu_savestate_polls = 0;
+  quick_menu_status(result > 0 ? "State saved" :
+                     (timed_out ? "Save status timed out" : "Save state failed"));
+}
+
 static void quick_menu_close(void) {
   quick_menu_message("nethersx2_quick_menu", "", 0.01f);
   g_quick_menu_mode = QUICK_MENU_CLOSED;
-  if (g_quick_menu_restore_messages) {
-    prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
-    prefs_save();
-    nl.applySettings(fake_env, NATIVE_CLASS);
-    g_quick_menu_restore_messages = 0;
-  }
+  quick_menu_restore_messages();
 }
 
 static void quick_menu_open(void) {
@@ -1378,7 +1541,7 @@ static void quick_menu_persist_game_crc(void) {
 static void quick_menu_save_prefs_preserving_messages(void) {
   if (g_quick_menu_restore_messages)
     prefs_set_bool("EmuCore/GS/OsdShowMessages", false);
-  prefs_save();
+  prefs_save_display_sync_safe();
   if (g_quick_menu_restore_messages)
     prefs_set_bool("EmuCore/GS/OsdShowMessages", true);
 }
@@ -1410,6 +1573,11 @@ static bool quick_menu_store_binding(const char *token) {
 }
 
 static bool quick_menu_update(u64 down, u64 pressed) {
+  if (g_quick_menu_savestate_pending) {
+    quick_menu_poll_savestate();
+    return true;
+  }
+
   const bool chord = (pressed & HidNpadButton_Plus) &&
                      (down & HidNpadButton_L) && (down & HidNpadButton_R);
   if (g_quick_menu_mode == QUICK_MENU_CLOSED) {
@@ -1477,11 +1645,24 @@ static bool quick_menu_update(u64 down, u64 pressed) {
           quick_menu_close();
           quick_menu_status("State loaded");
           return true;
-        case QUICK_ITEM_SAVE_STATE:
+        case QUICK_ITEM_SAVE_STATE: {
+          /* Keep the user's CPU configuration intact during serialization.
+           * applySettings() to disable MTVU reconfigures the CPU and resets the
+           * EE recompiler while the asynchronous save is starting, which is the
+           * last event before the observed GS-save crash. The EE/CPU thread is
+           * already pinned to core 0; saveStateSlot() only queues the request. */
+          corelog_log(CORELOG_INFO, "SaveState",
+                      "slot %d: begin async save; preserve MTVU preference, defer OSD restore=%d",
+                      g_quick_menu_slot, g_quick_menu_restore_messages);
+          quick_menu_message("nethersx2_quick_menu", "", 0.01f);
+          g_quick_menu_mode = QUICK_MENU_CLOSED;
+          g_quick_menu_savestate_polls = 0;
+          imports_savestate_watch_begin();
+          g_quick_menu_savestate_pending = 1;
           nl.saveStateSlot(fake_env, NATIVE_CLASS, g_quick_menu_slot);
-          quick_menu_close();
-          quick_menu_status("State saved");
+          quick_menu_status("Saving state...");
           return true;
+        }
         case QUICK_ITEM_CHANGE_DISC:
           g_quick_menu_mode = QUICK_MENU_DISC;
           quick_menu_refresh_discs();
@@ -1869,19 +2050,124 @@ static void update_touch(void) {
   }
 }
 
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+/* The line that separates "the VM loop returned and the emulator exited cleanly"
+ * from "the process died". It is called EXPLICITLY at the end of main(), not
+ * only through atexit: main() finishes with __libnx_exit(0), and like
+ * crash.c's svcExitProcess() that bypasses atexit entirely -- so relying on the
+ * handler alone meant the note never appeared, on a clean exit or any other.
+ * The atexit registration stays for the paths that do go through exit(). */
+static void vk_diag_exit_note(void) {
+  vk_diag_note("host exiting normally");
+}
+#endif
+
 int main(void) {
   extern int crash_in_progress(void);
+  // The core's console: Bionic logcat -> DATA_ROOT/nethersx2-core.log. Opened
+  // before anything that can fail so a failure always has somewhere to say what
+  // happened. It is line-buffered, because main() ends in __libnx_exit(0) and
+  // that bypasses atexit; abort(), __stack_chk_fail and the CPU exception handler
+  // each make their own line durable first.
+  corelog_open();
+  atexit(corelog_flush);
+#if defined(USE_VULKAN)
+  /* NVK's Mesa disk cache otherwise falls back to its default one-GiB cap and
+   * implicit home-directory discovery, neither of which is appropriate on SD. */
+  (void)mkdir(DATA_ROOT, 0777);
+  (void)mkdir(CACHE_DIR, 0777);
+  (void)mkdir(CACHE_DIR "/mesa", 0777);
+  setenv("MESA_SHADER_CACHE_DIR", CACHE_DIR "/mesa", 1);
+  setenv("MESA_SHADER_CACHE_MAX_SIZE", "2G", 1);
+#endif
 #if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
   unlink(DATA_ROOT "/nethersx2-exception.log");
   unlink(DATA_ROOT "/nethersx2-mesa.log");
   setenv("MESA_LOG_FILE", DATA_ROOT "/nethersx2-mesa.log", 1);
+  // NVK's own tracing, into that same file, and it has to be set before the
+  // driver is first touched. wsi prints the presentation path and per-frame
+  // totals -- exactly the stage that fails when the screen flashes once and the
+  // process exits; vm prints memory mapping, which is how an OOM or a failed
+  // import shows up. Both are the flags nxvk's bringing-an-application.md names
+  // for an attributable report.
+  setenv("NVK_DEBUG", "wsi,vm", 1);
+  setenv("MESA_SHADER_CACHE_SHOW_STATS", "1", 1);
   vk_diag_reset();
-  vk_diag_note("host main entered renderer=%d", GS_RENDERER);
+  atexit(vk_diag_exit_note);
+  vk_diag_note("host main entered renderer=%d applet=%u", GS_RENDERER,
+               (unsigned)__nx_applet_type);
+#endif
+#if defined(USE_VULKAN)
+  // Not optional, and it must precede vkCreateInstance: on a device NVK is not
+  // conformant for, nvk_physical_device_create() returns
+  // VK_ERROR_INCOMPATIBLE_DRIVER unless this is set. In a release build that is
+  // the entire symptom -- no message, and no physical device to enumerate.
+  setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
 #endif
   cpu_boost(1);
 
   // settings store: load nethersx2.ini + seed OpenGL/folder defaults
   prefs_init(PREFS_PATH);
+#if defined(USE_VULKAN) || defined(USE_DEKO3D)
+  const bool auto_fpslocker_sync =
+      prefs_get_bool("Wrapper/AutoSyncFPSLocker", true);
+#else
+  const bool auto_fpslocker_sync = false;
+#endif
+#if defined(USE_VULKAN)
+  const bool manual_low_latency =
+      prefs_get_bool("EmuCore/GS/low_latency", false);
+#endif
+  /* Auto mode probes the NX-FPS shared block during startup. Low-latency is
+   * independent: it must not activate the FPSLocker shared-block publisher. */
+  const bool display_sync_enabled =
+      prefs_get_bool("Wrapper/SyncFrameLimitToDisplay", false) ||
+      auto_fpslocker_sync;
+  saltysd_display_sync_configure(display_sync_enabled);
+#if defined(USE_VULKAN)
+  /* Configure after display-sync shutdown/configuration so an explicit opt-out
+   * of auto-sync does not disable the independent FPSLocker buffer bridge. */
+  saltysd_fpslocker_buffers_configure(true);
+#endif
+  saltysd_display_sync_poll();
+#if defined(USE_VULKAN)
+  const bool display_sync_active = saltysd_display_sync_active();
+  /* The user's low-latency preference is independent from auto-sync. If both
+   * are requested, panel/display sync wins and NVK keeps its FIFO path. */
+  const bool low_latency = manual_low_latency && !display_sync_active;
+  /* NVK reads this during WSI setup. Auto-sync never enables it; when a shared
+   * display-sync block is active, display sync takes priority. */
+  setenv("NVK_LOW_LATENCY", low_latency ? "1" : "0", 1);
+  vk_low_latency_configure(low_latency ? 1 : 0);
+#endif
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  const bool auto_fpslocker_sync_active =
+      auto_fpslocker_sync && saltysd_display_sync_active();
+  const char *low_latency_env = getenv("NVK_LOW_LATENCY");
+  vk_diag_note("fpslocker-auto-sync requested=%d detected=%d low_latency=%d",
+               auto_fpslocker_sync ? 1 : 0,
+               auto_fpslocker_sync_active ? 1 : 0,
+               low_latency ? 1 : 0);
+  vk_diag_note("low-latency enabled=%d NVK_LOW_LATENCY=%s",
+               low_latency ? 1 : 0,
+               low_latency_env ? low_latency_env : "<unset>");
+  vk_diag_note("display-sync enabled=%d query=%d active=%d connect_rc=0x%08x "
+               "session_limit_rc=0x%08x nethfps_rc=0x%08x "
+               "legacy_rc=0x%08x port=%u display_rate=%u "
+               "present_fps=%.0f shared_ready=%d fpslocker_target=%u",
+               display_sync_enabled ? 1 : 0,
+               saltysd_display_sync_query_status(),
+               saltysd_display_sync_active() ? 1 : 0,
+               saltysd_display_sync_connect_result(),
+               saltysd_display_sync_session_limit_result(),
+               saltysd_display_sync_nethfps_connect_result(),
+               saltysd_display_sync_legacy_connect_result(),
+               saltysd_display_sync_connect_port(),
+               saltysd_display_sync_service_rate(),
+               saltysd_display_sync_rate(),
+               saltysd_display_sync_target_ready(),
+               saltysd_display_sync_fpslocker_target());
+#endif
 #if GS_RENDERER == GS_RENDERER_OGL && !defined(USE_DEKO3D)
   // The unified Mesa SDK contains both the native NVC0 Gallium driver and Zink. Select Zink before
   // libemucore initializes EGL; leaving the override unset preserves Mesa's native default.
@@ -1932,6 +2218,108 @@ int main(void) {
                g_core_so, g_bios_boot,
                prefs_get_string("Wrapper/FastmemMode", "hybrid"),
                prefs_get_bool("Wrapper/LSFGEnabled", false));
+#endif
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  /* Records the address space this process actually booted in, so the recurring
+   * question "would a wider address space (or an application-mode forwarder that
+   * grants one) help?" is answered from Horizon instead of from an assumption.
+   *
+   * AslrRegionSize is the whole virtual address range the process may hand out:
+   * 0x8000000000 (512 GiB) is the 39-bit space a real application gets,
+   * 0x1000000000 (64 GiB) is 36-bit, 0x80000000 (2 GiB) is the 32-bit space an
+   * applet is confined to. libc_shim.c reserves a single contiguous 4 GiB
+   * fastmem area (FASTMEM_AREA_SIZE), which cannot succeed at all in the 32-bit
+   * layout, so the running game already proves we are not in it -- this line
+   * says which of the other two, plus IsApplication (9.0.0+), which is the same
+   * fact from the other side: a HOME Menu shortcut rather than the album applet
+   * is also what grants all four cores and the larger memory grant. */
+  {
+    u64 aslr_addr = 0, aslr_size = 0, is_app = 0, mem_total = 0;
+    const Result rc_addr = svcGetInfo(&aslr_addr, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0);
+    const Result rc_size = svcGetInfo(&aslr_size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0);
+    const Result rc_app  = svcGetInfo(&is_app, InfoType_IsApplication, CUR_PROCESS_HANDLE, 0);
+    const Result rc_mem  = svcGetInfo(&mem_total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    vk_diag_note("address space aslr=0x%llx+0x%llx (%llu GiB, rc %d/%d)"
+                 " app=%llu (rc %d) mem=%llu MiB (rc %d)",
+                 (unsigned long long)aslr_addr, (unsigned long long)aslr_size,
+                 (unsigned long long)(aslr_size >> 30),
+                 (int)R_FAILED(rc_addr), (int)R_FAILED(rc_size),
+                 (unsigned long long)is_app, (int)R_FAILED(rc_app),
+                 (unsigned long long)(mem_total >> 20), (int)R_FAILED(rc_mem));
+  }
+#endif
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  /* Which settings this run actually used, read back from the same store the
+   * core reads: the launcher writes nethersx2.ini and prefs.c serves it to the
+   * core's SharedPreferences shim. Until now a hardware log had to be decoded
+   * from the core's own "[Unsafe Settings]" warnings, which name a setting only
+   * when it deviates from a default and never print a value -- "CRC Fix Level is
+   * not set to default" does not say whether that is Minimum or Aggressive, and
+   * a setting left at a non-default value that the core does not consider unsafe
+   * is not mentioned at all. With this line the settings that produced a
+   * measurement are part of the measurement, which is what makes two logs
+   * comparable instead of merely both interesting.
+   *
+   * -1 means the key is absent from the ini, so the core's own default applies.
+   * Otherwise the values are the raw ones the launcher writes: upscale is a
+   * multiplier (0.50 = half native, 1.00 = native), crc -1/0/1/2/3/4 =
+   * Auto/None/Minimum/Partial/Full/Aggressive, hwdl 0/1/2/3 = Accurate/Disable
+   * readbacks/Unsynchronized/Disabled, texinrt 0/1/2 = Disabled/Inside target/
+   * Merge targets, gpuclut 0/1/2 = Disabled/Exact match/Check inside target,
+   * cpusprite 0..10, cpuclut 0..2, trifilter -1 = automatic, texbar -1/0/1 =
+   * Automatic/Force off/Force on (a tristate upstream binds as a bitfield, drawn
+   * over s_generic_options with -1 as the automatic default). */
+#define GS_PREF_I(k) (prefs_contains(k) ? prefs_get_int((k), -1) : -1)
+#define GS_PREF_B(k) (prefs_contains(k) ? (prefs_get_bool((k), false) ? 1 : 0) : -1)
+  vk_diag_note("settings upscale=%.2f crc=%d hwdl=%d paltex=%d texinrt=%d gpuclut=%d"
+               " nodepth=%d nopartial=%d estregion=%d unsafe=%d"
+               " cpusprite=%d cpuclut=%d cpufb=%d skipdraw=%d/%d trifilter=%d"
+               " texbar=%d",
+               prefs_contains("EmuCore/GS/upscale_multiplier")
+                   ? prefs_get_float("EmuCore/GS/upscale_multiplier", -1.0f)
+                   : -1.0f,
+               GS_PREF_I("EmuCore/GS/CRCHackLevel"),
+               GS_PREF_I("EmuCore/GS/HWDownloadMode"),
+               GS_PREF_B("EmuCore/GS/paltex"),
+               GS_PREF_I("EmuCore/GS/UserHacks_TextureInsideRt"),
+               GS_PREF_I("EmuCore/GS/UserHacks_GPUTargetCLUTMode"),
+               GS_PREF_B("EmuCore/GS/UserHacks_DisableDepthSupport"),
+               GS_PREF_B("EmuCore/GS/UserHacks_DisablePartialInvalidation"),
+               GS_PREF_B("EmuCore/GS/UserHacks_EstimateTextureRegion"),
+               GS_PREF_B("EmuCore/GS/UserHacks_Disable_Safe_Features"),
+               GS_PREF_I("EmuCore/GS/UserHacks_CPUSpriteRenderBW"),
+               GS_PREF_I("EmuCore/GS/UserHacks_CPUCLUTRender"),
+               GS_PREF_B("EmuCore/GS/UserHacks_CPU_FB_Conversion"),
+               GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_Start"),
+               GS_PREF_I("EmuCore/GS/UserHacks_SkipDraw_End"),
+               GS_PREF_I("EmuCore/GS/UserHacks_TriFilter"),
+               GS_PREF_I("EmuCore/GS/OverrideTextureBarriers"));
+  /* Second line, the per-pixel GPU cost knobs. These are separate because a run
+   * at 2x internal resolution turned out to be limited by the GPU rather than by
+   * the renderer thread -- five windows ended with the presenting thread parked
+   * inside vkAcquireNextImageKHR for 37-86% of the wall time while EE and GS both
+   * had headroom -- and which of these were active decides how much pixel work
+   * the GPU was actually being asked for. Blending in particular is done per
+   * pixel, so at 2x it costs four times what it costs at native, and the core's
+   * own "[Unsafe Settings]" warnings say nothing about any of them unless the
+   * value happens to be one it considers unsafe.
+   *
+   * blend 0..5 = Minimum/Basic/Medium/High/Full/Maximum, preload 0..2 =
+   * None/Partial/Full, deint and filter follow the launcher's choice lists. */
+  vk_diag_note("settings-gpu blend=%d mipmap=%d preload=%d fxaa=%d cas=%d shadeboost=%d"
+               " skipdup=%d deint=%d aniso=%d filter=%d",
+               GS_PREF_I("EmuCore/GS/accurate_blending_unit"),
+               GS_PREF_B("EmuCore/GS/mipmap_hw"),
+               GS_PREF_I("EmuCore/GS/texture_preloading"),
+               GS_PREF_B("EmuCore/GS/fxaa"),
+               GS_PREF_I("EmuCore/GS/CASMode"),
+               GS_PREF_B("EmuCore/GS/ShadeBoost"),
+               GS_PREF_B("EmuCore/GS/SkipDuplicateFrames"),
+               GS_PREF_I("EmuCore/GS/deinterlace_mode"),
+               GS_PREF_I("EmuCore/GS/MaxAnisotropy"),
+               GS_PREF_I("EmuCore/GS/filter"));
+#undef GS_PREF_I
+#undef GS_PREF_B
 #endif
 
   check_syscalls();
@@ -2052,6 +2440,7 @@ int main(void) {
       applet_running = appletMainLoop();
       if (!applet_running) break;
       quick_menu_persist_game_crc();
+      display_sync_poll_and_apply();
       update_touch();
 
       const int frame_count = FRAME_COUNT;
@@ -2114,12 +2503,19 @@ int main(void) {
 #endif
   libc_memory_shutdown();
   so_unload(&emu_mod);
+  display_sync_restore();
   prefs_save();
   const bool storage_socket = switchStorageSocketReady();
   switchStorageShutdown();
   if (g_net_ready && !storage_socket)
     socketExit();
   g_net_ready = 0;
+#if defined(USE_VULKAN) && defined(NETHERSX2_VK_DIAGNOSTIC)
+  vk_diag_exit_note();
+#endif
+  // __libnx_exit() bypasses atexit, so flush the core console here instead of
+  // trusting the handler registered at the top of main().
+  corelog_flush();
   extern void NX_NORETURN __libnx_exit(int rc);
   __libnx_exit(0);
   return 0;

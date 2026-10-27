@@ -36,6 +36,7 @@
 #include "forwarder.h"
 #include "SwitchStorage.h"
 #include "CheatManager.h"
+#include "fps_mods.h"
 #include "ui_audio.h"
 #include "retroachievements.h"
 #include "launcher_update.h"
@@ -56,7 +57,7 @@ static const char *GAMECFG_DIR= "sdmc:/switch/nethersx2/gamecfg";
 static const char *GAMECRC_DIR= "sdmc:/switch/nethersx2/gamecrc";
 static const char *CHEATS_DIR = "sdmc:/switch/nethersx2/cheats";
 static const char *TEXTURES_DIR = "sdmc:/switch/nethersx2/textures";
-static const char *DEF_GAMEDIR= "sdmc:/switch/nethersx2/games";
+static const char *DEF_GAMEDIR= "sdmc:/roms/ps2";
 static const char *BIOS_DIR   = "sdmc:/switch/nethersx2/bios";
 static const char *RESOURCES_DIR = "sdmc:/switch/nethersx2/resources";
 static const char *LSFG_DIR = "sdmc:/switch/nethersx2/lsfg";
@@ -191,7 +192,9 @@ static bool normalizeLsfgStore(Store &store) {
   if (storeHas(store, "Wrapper/LSFGFlowScale")) {
     const double flow = std::strtod(
         storeGet(store, "Wrapper/LSFGFlowScale", "0.25"), nullptr);
-    const char *normalized = flow > 0.375 ? "0.5" : "0.25";
+    const char *normalized = flow == 1.0 ? "1.0" :
+                            flow == 0.5 ? "0.5" :
+                            flow == 0.125 ? "0.125" : "0.25";
     if (strcmp(storeGet(store, "Wrapper/LSFGFlowScale", "0.25"), normalized)) {
       storeSet(store, "Wrapper/LSFGFlowScale", normalized);
       changed = true;
@@ -379,16 +382,18 @@ struct Opt {
 #define O_STATUS(l)            { l, nullptr, OT_STATUS, nullptr,0, 0,0,0, nullptr, 0, nullptr, nullptr, 1, nullptr }
 #define O_STATUSK(l,k)         { l, k, OT_STATUS, nullptr,0, 0,0,0, nullptr, 0, nullptr, nullptr, 1, nullptr }
 
-static const Choice C_backend[]  = { {"Vulkan (NVK)","14"}, {"OpenGL (NVC0)","12"},
-                                     {"OpenGL (Zink/NVK)","13"}, {"Deko3D (Native)","15"} };
-static const Choice C_build[]    = { {"Patched (4248)","4248"}, {"Classic (3668)","3668"} };
 static const Choice C_fastmem[]  = { {"Off","off"}, {"On","hybrid"} };
+static const Choice C_pin[]      = { {"By thread role","role"}, {"Auto (creation order)","auto"} };
 static const Choice C_upscale[]  = { {"0.25x","0.25"},{"0.5x","0.5"},{"0.75x","0.75"},
                                      {"1x (native ~480p)","1"},{"1.25x","1.25"},{"1.5x","1.5"},{"1.75x","1.75"},
                                      {"2x (~720p)","2"},{"2.25x","2.25"},{"2.5x","2.5"},{"2.75x","2.75"},{"3x (~1080p)","3"},
                                      {"4x (~1440p)","4"},{"5x (~1800p)","5"},{"6x (4K ~2160p)","6"} };
 static const Choice C_bool[]     = { {"Off","false"}, {"On","true"} };
-static const Choice C_lsfgFlow[] = { {"Quarter (recommended)","0.25"}, {"Half","0.5"} };
+static const Choice C_lsfgFlow[] = { {"Quarter (recommended)","0.25"}, {"Half","0.5"},
+                                      {"Full (native, highest cost)","1.0"},
+                                      {"Eighth (fastest)","0.125"} };
+static const Choice C_lsfgMode[] = { {"Auto (2x below 33 FPS)","auto"}, {"Fractional (target rate)","fractional"} };
+static const Choice C_lsfgTarget[]= { {"40 Hz","40"}, {"50 Hz","50"}, {"60 Hz","60"} };
 static const Choice C_aspect[]   = { {"4:3","4:3"}, {"16:9","16:9"}, {"Stretch","Stretch"}, {"Auto","Auto 4:3/3:2"} };
 static const Choice C_fmvasp[]   = { {"Off","Off"}, {"4:3","4:3"}, {"16:9","16:9"} };
 static const Choice C_vsync[]    = { {"Off","0"}, {"On","1"}, {"Adaptive","2"} };
@@ -403,10 +408,28 @@ static const Choice C_crc[]      = { {"Auto","-1"}, {"None","0"}, {"Minimum","1"
 static const Choice C_preload[]  = { {"None","0"}, {"Partial","1"}, {"Full","2"} };
 static const Choice C_cas[]      = { {"Off","0"}, {"Sharpen only","1"}, {"Sharpen + upscale","2"} };
 static const Choice C_hwdl[]     = { {"Accurate","0"}, {"Disable readbacks","1"}, {"Unsynchronized","2"}, {"Disabled","3"} };
+/* Value lists for the core's GS hardware hacks. The two integer knobs are
+ * bound upstream as plain integers (SettingsWrapBitfield), and what the core
+ * stores is the level index, so the labels only have to keep upstream's order:
+ * 0 is off and every higher level moves more work off the GPU. */
+static const Choice C_cpusprite[] = { {"0 (off)","0"}, {"1 (64 px)","1"}, {"2 (128 px)","2"},
+                                      {"3 (192 px)","3"}, {"4 (256 px)","4"}, {"5 (320 px)","5"},
+                                      {"6 (384 px)","6"}, {"7 (448 px)","7"}, {"8 (512 px)","8"},
+                                      {"9 (576 px)","9"}, {"10 (640 px)","10"} };
+static const Choice C_clutrender[]= { {"Off","0"}, {"Normal","1"}, {"Aggressive","2"} };
+static const Choice C_texinrt[]  = { {"Disabled","0"}, {"Inside target","1"}, {"Merge targets","2"} };
+static const Choice C_gpuclut[]  = { {"Disabled","0"}, {"Exact match","1"}, {"Check inside target","2"} };
+// Upstream binds OverrideTextureBarriers with SettingsWrapBitfieldEx and draws
+// it as a DrawIntListSetting over s_generic_options with -1 as the automatic
+// default, so the stored value is a tristate integer, not a boolean.
+static const Choice C_texbar[]   = { {"Automatic (what the driver reports)","-1"},
+                                     {"Force off (always copy targets)","0"},
+                                     {"Force on (use barriers)","1"} };
 static const Choice C_interp[]   = { {"Nearest","0"}, {"Linear","1"}, {"Cubic","2"}, {"Hermite","3"}, {"Catmull-Rom","4"} };
 static const Choice C_sync[]     = { {"TimeStretch","0"}, {"Async","1"}, {"None","2"} };
 static const Choice C_eecr[]     = { {"50%","-3"}, {"60%","-2"}, {"75%","-1"}, {"100%","0"}, {"130%","1"}, {"180%","2"}, {"300%","3"} };
 static const Choice C_eecs[]     = { {"Off","0"}, {"Mild","1"}, {"Moderate","2"}, {"Maximum","3"} };
+static const Choice C_vusteal[]  = { {"Off","0"}, {"Level 1 (half)","1"}, {"Level 2 (full)","2"} };
 static const Choice C_rounding[] = { {"Nearest","0"}, {"Negative","1"}, {"Positive","2"}, {"Chop / Zero","3"} };
 static const Choice C_eeClamp[]  = { {"None","0"}, {"Normal","1"}, {"Extra + Preserve Sign","2"}, {"Full","3"} };
 static const Choice C_vuClamp[]  = { {"None","0"}, {"Normal","1"}, {"Extra","2"}, {"Extra + Preserve Sign","3"} };
@@ -427,10 +450,9 @@ static const Choice C_launcherTheme[] = { {"PS2","animated"}, {"Classic","classi
 static const Choice C_gridColumns[] = { {"3","3"}, {"4","4"}, {"5","5"}, {"6","6"}, {"7","7"}, {"8","8"} };
 static const Choice C_gridRows[] = { {"1","1"}, {"2","2"}, {"3","3"} };
 
-enum { SCR_GRAPHICS, SCR_ENHANCE, SCR_FRAMEGEN, SCR_AUDIO, SCR_EMU, SCR_ADVANCED, SCR_GAMEFIXES, SCR_FRAMERATE, SCR_NETWORK, SCR_CONTROLLER, SCR_COUNT };
+enum { SCR_GRAPHICS, SCR_ENHANCE, SCR_FRAMEGEN, SCR_AUDIO, SCR_EMU, SCR_ADVANCED, SCR_GAMEFIXES, SCR_FRAMERATE, SCR_NETWORK, SCR_CONTROLLER, SCR_OPTIMIZE, SCR_COUNT };
 
 static const Opt S_graphics[] = {
-  O_CHOICE("Renderer",         "EmuCore/GS/Renderer", C_backend, "14"),
   O_CHOICE("Resolution scale", "EmuCore/GS/upscale_multiplier", C_upscale, "1"),
   O_CHOICE("Aspect ratio",     "EmuCore/GS/AspectRatio", C_aspect, "4:3"),
   O_CHOICE("FMV aspect",       "EmuCore/GS/FMVAspectRatioSwitch", C_fmvasp, "Off"),
@@ -466,10 +488,79 @@ static const Opt S_enhance[] = {
   O_CHOICEG("Asynchronous texture loading", "EmuCore/GS/LoadTextureReplacementsAsync", C_bool, "true",
             "EmuCore/GS/LoadTextureReplacements", "false"),
   O_CHOICE("SW renderer FMV",  "EmuCore/GS/SoftwareRendererFMV", C_bool, "false"),
-  O_CHOICE("HW download mode", "EmuCore/GS/HWDownloadMode", C_hwdl, "0"),
+  /* Unsynchronized, not Accurate: see the SETTING_HELP entry, which records the
+   * Gran Turismo 3 logs this default was chosen from and why it is not a clean
+   * A/B result. */
+  O_CHOICE("HW download mode", "EmuCore/GS/HWDownloadMode", C_hwdl, "2"),
+  O_RANGE ("Skip draw from",        "EmuCore/GS/UserHacks_SkipDraw_Start", 0, 100, 1, "0"),
+  O_RANGE ("Skip draw to",          "EmuCore/GS/UserHacks_SkipDraw_End",   0, 100, 1, "0"),
+  /* Everything this port adds on top of the upstream menu lives behind here, so
+   * the rows that differ from stock NetherSX2 are in one place instead of being
+   * interleaved with upstream controls. */
+  O_SUB   ("Optimization...",    SCR_OPTIMIZE),
 };
+/* Rows this port adds on top of upstream NetherSX2, grouped so that a user can
+ * tell at a glance which knobs are ours and which came with the original menu.
+ * Moved out of S_enhance and S_emu verbatim, comments included: the measurements
+ * recorded in them are the reason these rows exist at all.
+ *
+ * FXAA is the one row here that is a visual toggle rather than a performance
+ * knob; it is included because it is one of the keys this port exposed, and the
+ * key spelling was itself a bug once -- the launcher wrote EmuCore/GS/FXAA while
+ * the core binds "fxaa", so the row was dead for eleven commits. */
+static const Opt S_optimize[] = {
+  /* GS hardware hacks -- the core's own "manual HW fixes" family. A GPU-bound
+   * scene has no CPU-side fix, and these are the knobs that move work off the
+   * GPU or stop the renderer waiting on it. Every key below was checked against
+   * the strings of the pinned libemucore_tegrax1.so before being exposed: this
+   * core sits between two upstream generations, so it has UserHacks_AutoFlush
+   * but not UserHacks_AutoFlushLevel, UserHacks_CPUSpriteRenderBW but not
+   * UserHacks_CPUSpriteRenderLevel, and neither UserHacks_DisableRenderFixes,
+   * UserHacks_DrawBuffering nor DisableVertexShaderExpand. Only keys the binary
+   * actually contains appear here, each with the type upstream binds it as, so a
+   * row cannot write a value the core's getter cannot parse. */
+  O_CHOICE("Spin CPU on readbacks", "EmuCore/GS/HWSpinCPUForReadbacks", C_bool, "false"),
+  O_CHOICE("Spin GPU on readbacks", "EmuCore/GS/HWSpinGPUForReadbacks", C_bool, "false"),
+  O_CHOICE("CPU sprite render",     "EmuCore/GS/UserHacks_CPUSpriteRenderBW", C_cpusprite, "0"),
+  O_CHOICE("Software CLUT render",  "EmuCore/GS/UserHacks_CPUCLUTRender", C_clutrender, "0"),
+  O_CHOICE("CPU framebuffer conv",  "EmuCore/GS/UserHacks_CPU_FB_Conversion", C_bool, "false"),
+  O_CHOICE("Disable safe features", "EmuCore/GS/UserHacks_Disable_Safe_Features", C_bool, "false"),
+  O_CHOICE("Disable depth support", "EmuCore/GS/UserHacks_DisableDepthSupport", C_bool, "false"),
+  O_CHOICE("Disable partial invalidation", "EmuCore/GS/UserHacks_DisablePartialInvalidation", C_bool, "false"),
+  O_CHOICE("Estimate texture region", "EmuCore/GS/UserHacks_EstimateTextureRegion", C_bool, "false"),
+  /* The two below exist because a GT3 hardware log measured where the heavy
+   * stretch actually goes: vkCmdCopyImage per frame rises from 1.5 while
+   * cruising to 80.6 in the slow window (barriers 167 -> 617 per frame), while
+   * time blocked in vkWaitForFences stays at 0.1 % of the window and
+   * vkCmdCopyImageToBuffer stays at 0. Nothing is waiting on the GPU; the GS
+   * thread is duplicating render targets, because the driver reports
+   * VK_ARM_rasterization_order_attachment_access as NOT supported, so a target
+   * that is also sampled has to be copied first. Both of these knobs let the
+   * renderer avoid that copy instead of moving work onto the busiest thread. */
+  O_CHOICE("Texture inside RT",   "EmuCore/GS/UserHacks_TextureInsideRt", C_texinrt, "0"),
+  O_CHOICE("GPU target CLUT",     "EmuCore/GS/UserHacks_GPUTargetCLUTMode", C_gpuclut, "0"),
+  /* The other side of the same problem: with the barrier capability reported
+   * missing the renderer copies, and at 2x internal resolution those copies are
+   * what the GPU is spending its time on. This knob overrides the report.
+   * Measured, not assumed -- see the help entry for the numbers. */
+  O_CHOICE("Override texture barriers", "EmuCore/GS/OverrideTextureBarriers", C_texbar, "-1"),
+  O_CHOICE("FXAA",             "EmuCore/GS/fxaa", C_bool, "false"),
+  /* Both of these came out of Emulation / System, where they sat next to the
+   * upstream EE/VU speed hacks. They are here because they are ours, not the
+   * core's: thread pinning is a wrapper-side CPU affinity policy, and VU cycle
+   * steal is a length-preserving binary patch this port applies to the core. */
+  O_CHOICE("Thread pinning",   "Wrapper/ThreadPinning", C_pin, "role"),
+  O_CHOICE("VU cycle steal",   "EmuCore/Speedhacks/vuCycleSteal", C_vusteal, "0"),
+};
+
 static const Opt S_framegen[] = {
-  O_CHOICE("LSFG 2x (Vulkan / Deko3D)", "Wrapper/LSFGEnabled", C_bool, "false"),
+  O_CHOICE("Frame generation", "Wrapper/LSFGEnabled", C_bool, "false"),
+  /* Both gated on LSFGEnabled like their siblings rather than on LSFGMode:
+   * optEnabled() reads a gate key with iniGet(key, ""), so an absent
+   * Wrapper/LSFGMode would compare against "auto" as "" and show the target
+   * row in the default mode anyway. Same shape as Flow resolution below. */
+  O_CHOICEG("Mode", "Wrapper/LSFGMode", C_lsfgMode, "auto", "Wrapper/LSFGEnabled", "false"),
+  O_CHOICEG("Target output rate", "Wrapper/LSFGTargetFPS", C_lsfgTarget, "60", "Wrapper/LSFGEnabled", "false"),
   O_CHOICEG("Flow resolution", "Wrapper/LSFGFlowScale", C_lsfgFlow, "0.25", "Wrapper/LSFGEnabled", "false"),
   O_CHOICEG("Performance mode", "Wrapper/LSFGPerformance", C_bool, "true", "Wrapper/LSFGEnabled", "false"),
   O_STATUS("Lossless.dll"),
@@ -483,7 +574,6 @@ static const Opt S_audio[] = {
 };
 static const Opt S_emu[] = {
   O_STATUSK("Allowed CPU cores", "cpu-cores"),
-  O_CHOICE("Core version",     "Wrapper/CoreBuild", C_build, "4248"),
   O_CHOICE("Fastmem",          "Wrapper/FastmemMode", C_fastmem, "hybrid"),
   O_CHOICE("System language",  "Wrapper/SystemLanguage", C_syslang, "auto"),
   O_CHOICE("EE cycle rate",    "EmuCore/Speedhacks/EECycleRate", C_eecr, "0"),
@@ -575,6 +665,7 @@ static const Opt S_framerate[] = {
   O_SCALED_RANGEG("Slow motion",  "Framerate/SlomoScalar",   10, 300, 1, "0.5", 100, "%", "EmuCore/GS/FrameLimitEnable", "false"),
   O_SCALED_RANGE("NTSC frame rate", "EmuCore/GS/FramerateNTSC", 15, 120, 1, "59.94", 1, " Hz"),
   O_SCALED_RANGE("PAL frame rate",  "EmuCore/GS/FrameratePAL",  12, 100, 1, "50", 1, " Hz"),
+  O_CHOICE("Sync frame limit to display refresh rate", "Wrapper/SyncFrameLimitToDisplay", C_bool, "false"),
 };
 static const Opt S_launcher[] = {
   O_CHOICE("Language",          "Wrapper/Language",       C_launcherLanguage, "system"),
@@ -601,6 +692,7 @@ static const Screen g_screens[SCR_COUNT] = {
   { "Frame Rate Control",  S_framerate,  (int)(sizeof(S_framerate)/sizeof(Opt)),  false },
   { "Network (experimental)", S_network, (int)(sizeof(S_network)/sizeof(Opt)),    false },
   { "Controller",          S_controller, (int)(sizeof(S_controller)/sizeof(Opt)), true  },
+  { "Optimization",        S_optimize,   (int)(sizeof(S_optimize)/sizeof(Opt)),   false },
 };
 
 struct SettingHelpEntry {
@@ -613,18 +705,20 @@ struct SettingHelpEntry {
 static const SettingHelpEntry SETTING_HELP[] = {
   {"cpu-cores", "Allowed CPU cores",
    "How many of the Switch's four CPU cores this process may use. Shortcuts created from the launcher run on all four and keep audio and input on core 3, away from the emulator; launching from the album applet leaves core 3 to the system."},
+  {"Wrapper/ThreadPinning", "CPU affinity",
+   "Pins emulator threads to cores by the role the core reports for each one: the EE thread alone on core 0, GS and MTVU each on their own core, and SPU2 together with audio and input on core 3. This needs a HOME Menu shortcut, because only that grants all four cores; launched from the album just three are available, so GS and MTVU share two and stay free to migrate instead of being pinned. Auto is the older behaviour, which hands out cores in thread creation order. Switch to it if a specific game runs worse with role pinning."},
   {"Wrapper/Language", "Launcher language",
    "Selects the language used by the SDL launcher. System follows the language configured on the Switch. Game names, paths, server messages and user-entered text are never translated."},
-  {"EmuCore/GS/Renderer", "Graphics backend",
-   "Chooses the graphics backend used by the emulator. Deko3D renders PS2 GS draws directly on the Switch GPU. Vulkan (NVK) and Deko3D support frame generation. OpenGL can use native NVC0 or Zink over NVK."},
   {"EmuCore/GS/upscale_multiplier", "Resolution / performance",
-   "Sets the internal resolution used for 3D rendering. Higher scales improve clarity but increase GPU load; sub-native scales reduce GPU work at the cost of image quality. Pre-rendered FMV resolution does not change."},
+   "Sets the internal resolution used for 3D rendering. Higher scales improve clarity but increase GPU load; sub-native scales reduce GPU work at the cost of image quality. Pre-rendered FMV resolution does not change. Every render target the hardware renderer has to copy is copied at this size, so that cost grows with the square of the multiplier. Measured on Gran Turismo 3 (Tegra X1): at 0.5x the 50 FPS PAL cap held in 42 of 50 racing windows even though the renderer issued up to 121.9 target copies and 694 barriers per frame, and the copy count stopped tracking the frame rate at all -- what those copies cost is bandwidth, not commands."},
   {"EmuCore/GS/AspectRatio", "Display geometry",
    "Chooses the shape of the final game image. 4:3 preserves the original PS2 display, 16:9 is intended for compatible games or widescreen patches, and Stretch fills the screen by distorting the image."},
   {"EmuCore/GS/FMVAspectRatioSwitch", "Video display",
    "Overrides the aspect ratio used for pre-rendered movie sequences independently of gameplay. Leave it Off unless a game's FMV is shown with the wrong shape."},
   {"EmuCore/GS/VsyncEnable", "Frame pacing / latency",
    "Synchronizes presentation with the Switch display to reduce tearing. It can add latency or reduce performance headroom; Adaptive synchronizes only when emulation can keep up."},
+  {"Wrapper/SyncFrameLimitToDisplay", "Frame pacing / latency",
+   "When SaltySD is available, samples display refresh about once per second, temporarily updates both PAL and NTSC frame-limiter targets, and forces one-vblank presentation. If the rate query fails while the service remains available, present timestamps are the fallback. Stored PAL/NTSC values are restored for saving and on exit. Off by default; without SaltySD this option is a no-op."},
   {"EmuCore/GS/SkipDuplicateFrames", "Performance / latency trade-off",
    "Avoids presenting unchanged frames in many 25/30 FPS games. This is not emulation frame skipping: the frame is still rendered. It can free GPU time and helps frame generation, but may worsen pacing or input latency."},
   {"EmuCore/GS/DisableThreadedPresentation", "Frame pacing / performance",
@@ -643,7 +737,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Loads compatible no-interlacing PNACH patches. These can reduce flicker and simplify deinterlacing, but game-specific patches may introduce visual issues."},
 
   {"EmuCore/GS/accurate_blending_unit", "Accuracy / performance",
-   "Controls how accurately unsupported PS2 GS blend modes are reproduced in shaders. Higher levels fix more effects but can carry a large GPU cost. Basic is the recommended starting point."},
+   "Controls how accurately unsupported PS2 GS blend modes are reproduced in shaders. Higher levels fix more effects but can carry a large GPU cost. Basic is the recommended starting point. Blending is per pixel, so its cost grows with Resolution scale and this is the first accuracy setting worth lowering above native. Measured at 2x on Gran Turismo 3 with Minimum: pipeline barriers fell from 422-605 per frame to about 70 and every racing window held the 50 fps PAL cap, though several settings changed in that run. The core warns that blending below Basic may break effects."},
   {"EmuCore/GS/deinterlace_mode", "Video processing",
    "Chooses how interlaced PS2 output is converted for the progressive Switch display. Auto follows the game; manual modes are useful only when a title shows combing, shaking, or an incorrect field order."},
   {"EmuCore/GS/dithering_ps2", "Image accuracy",
@@ -662,6 +756,8 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Applies internal anti-blur fixes to many games. The image is often clearer, although it is less faithful to the original PS2 output and can affect titles that rely on the blur."},
   {"EmuCore/GS/TVShader", "Post-processing",
    "Applies a display shader that imitates scanlines or CRT/television patterns. This changes only the final image and adds GPU work."},
+  {"EmuCore/GS/fxaa", "Post-processing",
+   "Fast approximate anti-aliasing, applied to the finished frame by the core's own present pipeline. Smooths jagged edges. It is a blur-based filter, so pair it with CAS sharpening below -- on its own it softens fine detail. This is the same effect the popular Glamarye ReShade preset provides, but implemented natively: no extra fullscreen pass and no loss of the driver's zero-copy present path, which is what keeps the frame rate where it is. Costs a little GPU time on every frame."},
   {"EmuCore/GS/CASMode", "Post-processing",
    "Applies Contrast Adaptive Sharpening to the final image. Sharpen Only adds clarity; Sharpen + Upscale also participates in scaling. Strong sharpening can emphasize aliasing or noise."},
   {"EmuCore/GS/CASSharpness", "Post-processing",
@@ -681,14 +777,42 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"EmuCore/GS/SoftwareRendererFMV", "Game-specific workaround",
    "Temporarily uses the software renderer for FMV sequences. It can fix videos that hardware rendering displays incorrectly, but costs substantial CPU time during those scenes."},
   {"EmuCore/GS/HWDownloadMode", "Accuracy / performance",
-   "Changes synchronization for data read back from the GPU. Accurate is safest. Less synchronized modes may improve demanding games but can break effects, videos, or other rendering that depends on GS downloads."},
+   "Changes synchronization for data read back from the GPU. Accurate is safest but makes every GS download a blocking round trip. Measured at 2x on Gran Turismo 3 with Accurate: 8 of 34 windows blocked 100-686 ms inside vkWaitForFences, up to 11% of a window, with 58-212 readback copies, and the frame rate still held the PAL cap in 33 of 34 windows. So at 2x Accurate costs headroom rather than frames. An earlier version of this text claimed the opposite, from a 30 fps run that the GPU counters later showed had zero readbacks and 7-14 ms of fence time; that claim was wrong. The default here is Unsynchronized rather than Accurate because it buys headroom in a heavier scene. Less synchronized modes can break effects or videos that depend on GS downloads."},
+  {"EmuCore/GS/HWSpinCPUForReadbacks", "Readback latency",
+   "Keeps the CPU doing throwaway work instead of sleeping while a frame waits for data coming back from the GPU. Can shorten those stalls at a large cost in power and heat. This port is not tuned for battery life, so the trade is deliberate; the per-thread CPU counters in the diagnostic build show the extra load."},
+  {"EmuCore/GS/HWSpinGPUForReadbacks", "Readback latency",
+   "Submits throwaway work to the GPU while waiting for a readback so the GPU does not idle down. It needs VK_EXT_calibrated_timestamps to pace itself: without it the core logs 'Spin GPU During Readbacks is enabled, but calibrated timestamps are unavailable. This might be really slow.' If that line appears in nethersx2-core.log, turn this off again and keep the CPU spin."},
+  {"EmuCore/GS/UserHacks_CPUSpriteRenderBW", "GPU to CPU offload",
+   "Renders sprite primitives on the CPU instead of the GPU when the target they draw into is no wider than the selected level. 0 is off; the levels are that maximum width, 1 = 64 px up to 10 = 640 px. Clean A/B on Gran Turismo 3 at 2x with this the only difference (level 2 over 34 racing windows, level 0 over 24): median 50.18 against 50.17 fps, GS thread 48.5% against 49.0%, EE 62.0% against 62.5%, target copies per frame 7.02 in both. Indistinguishable, because level 2 only moves sprites up to 128 px wide and both runs sit at the frame limiter. It can only pay off in a GPU-bound scene that still has CPU headroom, at a level wide enough to move real work. Sprites drawn on the CPU can come out wrong."},
+  {"EmuCore/GS/UserHacks_CPUCLUTRender", "GPU to CPU offload",
+   "Detects a game drawing its own colour palette and performs that lookup in software instead of on the GPU. Normal catches the common cases, Aggressive catches more at a higher CPU cost. A misdetected palette shows up as wrong colours."},
+  {"EmuCore/GS/UserHacks_CPU_FB_Conversion", "GPU to CPU offload",
+   "Converts 4-bit and 8-bit framebuffers on the CPU instead of with GPU compute. Trades GPU time for CPU time, and can break effects that read the converted framebuffer."},
+  {"EmuCore/GS/UserHacks_Disable_Safe_Features", "Aggressive",
+   "Turns off several features the GS renderer keeps for correctness. Usually the largest single speed lever in this group and the one most likely to break rendering: expect wrong shadows, missing effects or corrupted textures. Leave it off unless a scene is GPU-bound and nothing above recovered it."},
+  {"EmuCore/GS/UserHacks_DisableDepthSupport", "Aggressive",
+   "Removes depth-buffer support from the texture cache, so depth contents are never converted or read back. Saves GPU bandwidth where a scene draws many depth-tested layers over each other, which is what a night track full of blended lights does. Anything that samples depth as a texture will be wrong."},
+  {"EmuCore/GS/UserHacks_DisablePartialInvalidation", "Aggressive",
+   "Discards a whole texture-cache entry on any overlap instead of only the overlapping region. Fewer and cheaper cache operations, at the cost of re-uploading textures more often and of stale data surviving longer."},
+  {"EmuCore/GS/UserHacks_EstimateTextureRegion", "Texture cache",
+   "Guesses a smaller texture region when a game does not set one, which reduces upload size and cache pressure. It is meant for games that leave the region unset; a wrong guess appears as missing or shifted texture data."},
+  {"EmuCore/GS/UserHacks_TextureInsideRt", "Target copies",
+   "Lets the texture cache reuse the inner part of an earlier framebuffer as an input texture instead of copying that framebuffer into a new texture first. On this driver that copy is what a heavy scene pays for: a Gran Turismo 3 log counted 1.5 vkCmdCopyImage per frame while cruising and 80.6 per frame in the slow stretch, because VK_ARM_rasterization_order_attachment_access is not supported, so a render target that is also sampled has to be duplicated. Inside target is the mild form, Merge targets the aggressive one. A wrong guess shows up as smearing, or as a stale image where an effect should be."},
+  {"EmuCore/GS/UserHacks_GPUTargetCLUTMode", "Target copies",
+   "When a game reads its colour palette out of a render target, do that lookup on the GPU with special handling instead of pulling the target back through the texture cache. Same reason as Texture inside RT: fewer target copies. Exact match is strict about where the palette sits; Check inside target also looks for it inside a larger target, which catches more cases and mismatches more often, showing up as wrong colours."},
+  {"EmuCore/GS/OverrideTextureBarriers", "Target copies",
+   "Forces whether the renderer believes texture barriers exist instead of using what the driver reports. Here the core logs VK_ARM_rasterization_order_attachment_access as NOT supported, so a render target that is also sampled must be copied first. Measured on Gran Turismo 3 at 2x: before this knob, up to 99.8 copies and 605 barriers per frame, with the presenting thread parked in vkAcquireNextImageKHR for up to 86% of a window and the frame rate down to 41.75. With Force on: 7.0 copies and about 70 barriers per frame, acquire never above 8%, 57 of 58 racing windows at 49.80 fps or better. Other settings changed in the same run, so that is the configuration which removed the GPU wall, not this knob alone. Force on can break blending and effects."},
+  {"EmuCore/GS/UserHacks_SkipDraw_Start", "Draw skipping",
+   "Draw calls numbered from this value up to 'Skip draw to' are skipped outright in every frame, counted from the first draw of the frame. Used to drop a fixed post-processing pass that costs more than it is worth. 0 with 0 skips nothing."},
+  {"EmuCore/GS/UserHacks_SkipDraw_End", "Draw skipping",
+   "Upper bound of the skip range; see 'Skip draw from'. Every game numbers its draws differently and one scene numbers them differently from the next, so the useful range has to be found by experiment. Too wide a range removes real geometry instead of just the effect."},
 
   {"Wrapper/LSFGEnabled", "Frame generation",
-   "Makes LSFG 2x available for this launch. Frame generation starts Off in-game and must be enabled from the overlay. Native 50/60 FPS sources use protected passthrough. Requires Vulkan or Deko3D and a user-supplied Lossless.dll."},
+   "Makes LSFG 2x available for this launch. Frame generation starts Off in-game and must be enabled from the overlay. Native 50/60 FPS sources use protected passthrough. Requires a user-supplied Lossless.dll at /switch/nethersx2/lsfg/."},
   {"Wrapper/LSFGFlowScale", "Frame generation quality",
-   "Sets the resolution used for optical-flow analysis. Half can retain more motion detail but costs considerably more GPU time and memory; Quarter is recommended on Switch."},
+   "Sets the resolution used for optical-flow analysis. Eighth is cheapest and Quarter is recommended on Switch. Full resolution can retain the most motion detail but uses 4x as many flow pixels as Half and may significantly reduce performance; it is an optional A/B test, not a guaranteed fix for visual glitches. Small mip levels are clamped to at least one pixel."},
   {"Wrapper/LSFGPerformance", "Frame generation performance",
-   "Uses LSFG's lighter performance-oriented path. Keep it enabled on Switch unless testing image quality with ample GPU headroom."},
+   "Uses LSFG's lighter performance-oriented path. On Vulkan, Full flow resolution always uses this path to limit FPS loss while retaining full-resolution motion analysis. Other flow scales honor this setting; keep it enabled on Switch."},
 
   {"SPU2/Mixing/FinalVolume", "Audio output",
    "Sets the final emulator volume sent to the Switch audio output. It does not change the game's internal volume setting."},
@@ -701,8 +825,6 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"SPU2/Output/OutputLatency", "Audio latency / stability",
    "Sets additional buffering in the Switch output path. Reduce it for lower audio delay, or raise it if sound underruns and crackles persist."},
 
-  {"Wrapper/CoreBuild", "Compatibility core",
-   "Selects which bundled NetherSX2 Android core is loaded. Patched 4248 is the normal choice; Classic 3668 is retained for games or behavior that are more compatible with the older core."},
   {"Wrapper/FastmemMode", "CPU performance",
    "Uses fast mapped access for emulated PS2 memory while retaining NetherSX2_nx's self-modifying-code invalidation. It is a major CPU optimization. Disabling it keeps the safe slower memory path for troubleshooting."},
   {"Wrapper/SystemLanguage", "PS2 firmware",
@@ -711,12 +833,18 @@ static const SettingHelpEntry SETTING_HELP[] = {
    "Underclocks or overclocks the emulated Emotion Engine. Lower values can reduce host CPU load but may lower a game's internal frame rate or break timing. Higher values greatly increase CPU requirements."},
   {"EmuCore/Speedhacks/EECycleSkip", "CPU timing hack",
    "Makes the emulated Emotion Engine skip work cycles. It helps a small set of demanding games, but usually harms performance, pacing, or compatibility. Keep it Off unless a game specifically benefits."},
+  {"EmuCore/Speedhacks/vuCycleSteal", "VU timing hack",
+   "Credits the cycles VU1 burned to the Emotion Engine clock, so a frame advances before the VU has really caught up. Level 1 credits half the VU cycles, Level 2 credits all of them; either way the credit is clamped to 3000 EE cycles per VU kick. Needs MTVU (multi-VU) enabled, because it patches the threaded VU path only, and it takes over the job of EE cycle skip, so leave that Off. The patch is applied when the core loads, so changing it needs a game restart. MEASURED on Gran Turismo 3 (PAL), racing phase aligned from the race-start hitch: Off gave 42.95 and 42.99 fps on two separate builds, i.e. repeatable to 0.1%; Level 1 gave 43.34 (+0.9%) and Level 2 gave 43.51 (+1.3%). The gain is real but small and clearly sub-proportional -- Level 2 credits twice what Level 1 does and buys only 0.4% more -- because the credit is clamped to 3000 EE cycles per VU kick against roughly 1.2 million cycles in a PAL frame. That is about half a frame per second, paid for by the EE and VU1 deliberately disagreeing about elapsed time, which can break pacing, animation or rendering. Off is the honest default; Level 2 is there if you want the last percent and accept the risk. Only the 4248 core is supported."},
+  {"Wrapper/LSFGMode", "Generation schedule",
+   "Auto doubles every frame, but only while the game runs below about 33 FPS, and passes the video through untouched above that, because twice 50 FPS is 100 and the panel is 60 Hz. Fractional instead interpolates on only some frames so the output lands on the target rate: a game at 40 FPS aiming for 60 gets one generated frame every two, a game at 47 aiming for 50 gets about one every sixteen. It therefore works at any source rate up to the target, at the cost of one frame of latency plus the GPU work of each generated frame. Output can never exceed twice the source rate, since one interpolation per source frame is all the bridge produces. The source rate is measured before any generation and then frozen, because once the display saturates its back-pressure reads as a slower source, which would raise the ratio and generate more -- positive feedback."},
+  {"Wrapper/LSFGTargetFPS", "Output rate",
+   "The rate Fractional mode aims for. 50 Hz matches PAL games, 60 Hz matches the panel. Ignored in Auto mode. A game already at or above the target generates nothing and simply passes through."},
   {"Wrapper/FastBoot", "Boot behavior",
    "Skips the PS2 BIOS boot animation and starts the selected game directly. Disable it when a title or BIOS function requires a full boot."},
   {"EmuCore/Speedhacks/vuThread", "CPU threading",
-   "Runs VU1 work on another CPU thread. It is normally a useful Switch speedup, but a small number of games are incompatible or may hang."},
+   "Runs VU1 work on another CPU thread. It is normally a useful Switch speedup, but a small number of games are incompatible or may hang. MEASURED on Gran Turismo 3 (PAL): switching this Off and turning Instant VU1 On instead costs 24.5% during racing (32.44 fps against 42.95, both taken over the same seven windows from the race-start hitch) and slows the whole boot as well (VM subsystems 5640 ms against 1250 ms), because VU1 then runs inline on the EE thread and the two stop overlapping. Keep it On unless a specific game breaks."},
   {"EmuCore/Speedhacks/vu1Instant", "CPU performance",
-   "Uses the optimized Instant VU1 synchronization path when compatible. It usually improves performance, but should be disabled if a game develops VU-related graphics or timing errors."},
+   "Uses the optimized Instant VU1 synchronization path when compatible. It only takes effect when MTVU (multi-VU) is Off, since with MTVU On the VU1 work already runs on its own thread. It usually improves performance, but should be disabled if a game develops VU-related graphics or timing errors. On Gran Turismo 3 the combination it belongs to -- MTVU Off plus this On -- measured 24.5% slower than leaving MTVU On (32.44 against 42.95 fps in the racing phase), so the usual advice does not hold there."},
   {"EmuCore/Speedhacks/vuFlagHack", "CPU performance",
    "Optimizes VU flag calculations for a useful speedup with high compatibility. Disable it only when diagnosing VU graphics or calculation errors in a specific game."},
   {"EmuCore/Patches/XGKickSkip", "Performance patch (3668 only)",
@@ -880,6 +1008,8 @@ static SettingHelpInfo settingHelpFor(const Opt &option) {
       return {"Settings group","Contains advanced GS accuracy controls, visual enhancements, and game-specific rendering workarounds. Higher accuracy often requires more GPU performance."};
     if(option.sub==SCR_FRAMERATE)
       return {"Settings group","Contains the frame limiter, normal/turbo/slow-motion targets, and the base NTSC/PAL video rates. Changing base video timing can affect game logic."};
+    if(option.sub==SCR_OPTIMIZE)
+      return {"Settings group","Everything this port adds on top of the upstream NetherSX2 menu, so the rows that differ from stock are in one place. These trade correctness for speed; each help card records the hardware measurement behind it."};
   }
   if(option.type==OT_STATUS)
     return {"Required component","Shows whether Lossless.dll is installed in NetherSX2_nx's fixed frame-generation folder. LSFG options cannot be enabled while it is missing."};
@@ -946,6 +1076,7 @@ static bool g_showRegionFlags = true;
 static bool g_showCustomSettingsBadges = true;
 static int g_gridColumns = 6;
 static int g_gridRows = 2;
+static int g_librarySortMode = 0;
 static SDL_Texture *g_glowTexture = nullptr;
 static SDL_Texture *g_roundTexture = nullptr;
 // Footer hit rects live here (not next to drawFooterHints) so clearUiBackground()
@@ -1191,6 +1322,7 @@ static void applyLauncherAppearance() {
       strcmp(storeGet(g_global, "Wrapper/ShowCustomSettingsBadges", "true"), "false") != 0;
   g_gridColumns = std::max(3, std::min(8, atoi(storeGet(g_global, "Wrapper/GridColumns", "6"))));
   g_gridRows = std::max(1, std::min(3, atoi(storeGet(g_global, "Wrapper/GridRows", "2"))));
+  g_librarySortMode = std::clamp(atoi(storeGet(g_global, "Wrapper/LibrarySort", "0")),0,3);
 
   COL_BG={8,12,24,255}; COL_TXT={235,239,247,255}; COL_DIM={151,163,184,255};
   COL_HI={100,211,255,255}; COL_VAL={255,215,120,255}; COL_SEL={116,200,255,255};
@@ -1658,7 +1790,9 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
           !strcmp(button,"B")?BTN_CANCEL:
           !strcmp(button,"X")?BTN_X:
           !strcmp(button,"Y")?BTN_Y:
-          !strcmp(button,"+")?SDL_CONTROLLER_BUTTON_START:-1;
+          !strcmp(button,"+")?SDL_CONTROLLER_BUTTON_START:
+          !strcmp(button,"-")?SDL_CONTROLLER_BUTTON_BACK:
+          !strcmp(button,"L3")?SDL_CONTROLLER_BUTTON_LEFTSTICK:-1;
         g_footN++;
       }
       if(i+1<layout.rowEnd[row]) x+=layout.gapAfter[i];
@@ -1666,8 +1800,8 @@ static void drawFooterHints(const FootItem *it,int n,int cy){
   }
 }
 // Shared by renderGrid (to draw) and gridLayout (to reserve the right height).
-static std::array<FootItem,3> libraryFooter(){
-  return {{{"A","Launch"},{"Y","Game Menu"},{"B","Quit"}}};
+static std::array<FootItem,6> libraryFooter(){
+  return {{{"A","Launch"},{"L3","Favorite"},{"Y","Game Menu"},{"X","Search"},{"+","Sort"},{"B","Quit"}}};
 }
 
 static void drawSettingsFooter(const char *text,int cy=-1){
@@ -2017,14 +2151,21 @@ static std::thread g_libraryScanThread;
 static std::vector<std::string> g_pendingScanSources;
 static std::vector<size_t> g_visibleGames;
 static std::unordered_set<std::string> g_favorites;
-enum class LibraryView { Recent, All, Favorites };
+struct GameCollection {
+  std::string name;
+  std::unordered_set<std::string> members;
+};
+static std::vector<GameCollection> g_collections;
+static std::string g_activeCollection;
+enum class LibraryView { Recent, All, Favorites, Collections };
 static LibraryView g_libraryView=LibraryView::Recent;
+static std::string g_librarySearch;
 static bool g_libraryHeaderFocused=false;
 static int g_libraryHeaderSelection=0;
-static std::array<float,3> g_libraryTabOpen{1,0,0};
+static std::array<float,4> g_libraryTabOpen{1,0,0,0};
 static Uint32 g_libraryAnimationTick=0;
 static float g_recentPosition=-1;
-static std::array<std::string,3> g_librarySelections;
+static std::array<std::string,4> g_librarySelections;
 
 static std::string gameCRCFile(const Game &game) {
   return std::string(GAMECRC_DIR) + "/" + game.key + ".ini";
@@ -2071,11 +2212,25 @@ static const char *LIBRARY_INI = "sdmc:/switch/nethersx2/library.ini";
 
 static void loadLibraryOrganization(){
   g_favorites.clear();
-  const int count=std::clamp(atoi(storeGet(g_global,"Library/FavoriteCount","0")),0,65536);
-  for(int index=0;index<count;index++){
+  const int favoriteCount=std::clamp(atoi(storeGet(g_global,"Library/FavoriteCount","0")),0,65536);
+  for(int index=0;index<favoriteCount;index++){
     const char *id=storeGet(g_global,("Library/Favorite"+std::to_string(index)).c_str(),"");
     if(*id) g_favorites.insert(id);
   }
+  g_collections.clear();
+  const int collectionCount=std::clamp(atoi(storeGet(g_global,"Library/CollectionCount","0")),0,128);
+  for(int index=0;index<collectionCount;index++){
+    const std::string prefix="Library/Collection"+std::to_string(index);
+    GameCollection collection;
+    collection.name=storeGet(g_global,(prefix+"Name").c_str(),"");
+    const int memberCount=std::clamp(atoi(storeGet(g_global,(prefix+"MemberCount").c_str(),"0")),0,65536);
+    for(int member=0;member<memberCount;member++){
+      const char *id=storeGet(g_global,(prefix+"Member"+std::to_string(member)).c_str(),"");
+      if(*id) collection.members.insert(id);
+    }
+    if(!collection.name.empty()) g_collections.push_back(std::move(collection));
+  }
+  g_activeCollection.clear();
   g_libraryView=LibraryView::Recent;
 }
 
@@ -2085,15 +2240,41 @@ static void saveLibraryOrganization(){
   size_t index=0;
   for(const auto &id:g_favorites)
     storeSet(g_global,("Library/Favorite"+std::to_string(index++)).c_str(),id.c_str());
+  storeRemovePrefix(g_global,"Library/Collection");
+  storeSet(g_global,"Library/CollectionCount",std::to_string(g_collections.size()).c_str());
+  for(size_t index=0;index<g_collections.size();index++){
+    const std::string prefix="Library/Collection"+std::to_string(index);
+    storeSet(g_global,(prefix+"Name").c_str(),g_collections[index].name.c_str());
+    storeSet(g_global,(prefix+"MemberCount").c_str(),
+             std::to_string(g_collections[index].members.size()).c_str());
+    size_t member=0;
+    for(const auto &id:g_collections[index].members)
+      storeSet(g_global,(prefix+"Member"+std::to_string(member++)).c_str(),id.c_str());
+  }
   storeSave(g_global,LAUNCHER_INI);
 }
 
 static void rebuildVisibleGames(){
   g_visibleGames.clear();
+  const std::string query=foldedKey(trim(g_librarySearch));
+  const GameCollection *collection=nullptr;
+  if(g_libraryView==LibraryView::Collections&&!g_activeCollection.empty()&&
+     g_activeCollection!="favorites"){
+    const auto found=std::find_if(g_collections.begin(),g_collections.end(),
+        [&](const GameCollection &candidate){ return candidate.name==g_activeCollection; });
+    if(found!=g_collections.end()) collection=&*found;
+  }
   for(size_t index=0;index<g_games.size();index++){
     const Game &game=g_games[index];
     if(g_libraryView==LibraryView::Recent&&(game.biosBoot||game.played<=0)) continue;
-    if(g_libraryView==LibraryView::Favorites&&!g_favorites.count(game.key)) continue;
+    if((g_libraryView==LibraryView::Favorites||
+        (g_libraryView==LibraryView::Collections&&g_activeCollection=="favorites"))&&
+       !g_favorites.count(game.key)) continue;
+    if(collection&&!collection->members.count(game.key)) continue;
+    if(!query.empty()){
+      const std::string searchable=foldedKey(game.title+" "+game.file);
+      if(searchable.find(query)==std::string::npos) continue;
+    }
     g_visibleGames.push_back(index);
   }
   if(g_libraryView==LibraryView::Recent)
@@ -2117,7 +2298,7 @@ static int visibleIndexForKey(const std::string &key)
   return 0;
 }
 
-static int libraryTabCount(){ return 3; }
+static int libraryTabCount(){ return 4; }
 
 static int libraryTabIndex(){ return (int)g_libraryView; }
 
@@ -2150,10 +2331,23 @@ static int detectRegion(const std::string &file) {
   return 0;
 }
 static void sortLibraryGames() {
-  auto cmpTitle = [](const Game &a, const Game &b){ return strcasecmp(a.title.c_str(), b.title.c_str()) < 0; };
-  std::sort(g_games.begin(), g_games.end(), [&](const Game &a, const Game &b){
-    if (a.biosBoot != b.biosBoot) return a.biosBoot;
-    return cmpTitle(a, b);
+  const auto cmpTitle=[](const Game &a,const Game &b){
+    const int compared=strcasecmp(a.title.c_str(),b.title.c_str());
+    return compared?compared<0: a.key<b.key;
+  };
+  std::sort(g_games.begin(),g_games.end(),[&](const Game &a,const Game &b){
+    if(a.biosBoot!=b.biosBoot) return a.biosBoot;
+    switch(g_librarySortMode){
+      case 1: return cmpTitle(b,a);
+      case 2:
+        if(a.played!=b.played) return a.played>b.played;
+        return cmpTitle(a,b);
+      case 3: {
+        const int compared=strcasecmp(a.file.c_str(),b.file.c_str());
+        return compared?compared<0:a.key<b.key;
+      }
+      default: return cmpTitle(a,b);
+    }
   });
   rebuildVisibleGames();
 }
@@ -4241,14 +4435,15 @@ static void runFileManager() {
 }
 
 static const char *optDefault(const Opt &o) {
+  // Vulkan is the only backend, and on it threaded presentation is off by
+  // default. Reading EmuCore/GS/Renderer here would let a stale value stored by
+  // an older multi-renderer launcher flip the default for a backend that no
+  // longer exists.
   if(o.key && !strcmp(o.key,"EmuCore/GS/DisableThreadedPresentation"))
-    return !strcmp(iniGet("EmuCore/GS/Renderer","14"),"14") ||
-           !strcmp(iniGet("EmuCore/GS/Renderer","14"),"15") ? "true" : "false";
+    return "true";
   return o.def;
 }
 static int choiceIdx(const Opt &o) {
-  if(o.key && !strcmp(o.key,"EmuCore/GS/DisableThreadedPresentation") &&
-     !strcmp(iniGet("EmuCore/GS/Renderer","14"),"15")) return 1;
   const char *cur = iniGet(o.key,optDefault(o));
   for (int i=0;i<o.nch;i++) if (!strcmp(o.ch[i].val, cur)) return i;
   return -1;
@@ -4257,8 +4452,6 @@ static bool optEnabled(const Opt &o) {
   if(o.type==OT_STATUS) return true;
   if(o.key && !strcmp(o.key,"EmuCore/Patches/XGKickSkip") &&
      strcmp(iniGet("Wrapper/CoreBuild","4248"),"3668")) return false;
-  if(o.key && !strcmp(o.key,"EmuCore/GS/DisableThreadedPresentation") &&
-     !strcmp(iniGet("EmuCore/GS/Renderer","14"),"15")) return false;
   if(o.key && !strncmp(o.key,"Wrapper/LSFG",12) && !lsfgDllInstalled())
     return false;
   if(o.key && !strcmp(o.key,"EmuCore/GS/SkipDuplicateFrames") &&
@@ -4567,7 +4760,10 @@ static void showHelpCard(const char *section,const char *title,const char *kind,
 
     clearUiBackground();
     const int panelWidth=std::min(SW-120,1000);
-    const int panelHeight=std::min(SH-96,500);
+    /* Taller than the old fixed 500: the line budget below is derived from this,
+   * and 500 px only ever fitted 7 lines. At 720p and at 1080p this both leave
+   * 48 px of margin top and bottom. */
+  const int panelHeight=std::min(SH-96,624);
     const int panelX=(SW-panelWidth)/2,panelY=(SH-panelHeight)/2;
     glassPanel(panelX,panelY,panelWidth,panelHeight);
     drawText(g_font_sm,panelX+40,panelY+24,translatedSection.c_str(),COL_DIM);
@@ -4585,12 +4781,20 @@ static void showHelpCard(const char *section,const char *title,const char *kind,
       bodyY=panelY+198;
     }
     fillRect(panelX+40,bodyY-18,panelWidth-80,2,(SDL_Color){70,78,92,210});
-    drawWrapped(g_font,panelX+40,bodyY,panelWidth-80,32,7,
+    // drawWrapped stops at maxLines with no ellipsis and no scrolling, so the
+    // hard-coded 7 silently truncated every help text longer than roughly 650
+    // characters at this panel width -- the tail simply never appeared, and the
+    // longest entries in the table are past 1200. Derived from the panel instead,
+    // with 12 px kept clear of the footer hint, so the budget follows the space
+    // that is actually there at 720p and at 1080p alike (12 lines in both).
+    const int footerY=panelY+panelHeight-30;
+    const int bodyLines=std::max(1,(footerY-12-bodyY)/32);
+    drawWrapped(g_font,panelX+40,bodyY,panelWidth-80,32,bodyLines,
                 translatedDescription.c_str(),COL_TXT);
     // A, B and X all close; naming one is enough. The bare A / B glyphs this
     // used to draw read as broken hints with no caption beside them.
     FootItem footer[]={{"A","Close"},{"Touch","anywhere to close"}};
-    drawFooterHints(footer,2,panelY+panelHeight-30);
+    drawFooterHints(footer,2,footerY);
     SDL_RenderPresent(g_ren);
     waitForNextFrame();
   }
@@ -4611,11 +4815,11 @@ static void showOptionHelp(const char *section,const Opt &option,
 static const char *settingsScreenDescription(int screen) {
   switch(screen){
     case SCR_GRAPHICS:
-      return "Selects the graphics backend, internal resolution, display shape, presentation behavior, texture filtering, on-screen display, and common visual patches.";
+      return "Selects internal resolution, display shape, presentation behavior, texture filtering, on-screen display, and common visual patches.";
     case SCR_ENHANCE:
       return "Contains advanced GS accuracy controls, visual enhancements, custom-texture support, and game-specific rendering workarounds. Higher accuracy often requires more GPU time.";
     case SCR_FRAMEGEN:
-      return "Configures Vulkan and Deko3D LSFG 2x support for a launch. It interpolates 25/30 FPS sources to the 60 Hz display; native 50/60 FPS sources use protected passthrough.";
+      return "Configures LSFG 2x support for a launch. It interpolates 25/30 FPS sources to the 60 Hz display; native 50/60 FPS sources use protected passthrough.";
     case SCR_AUDIO:
       return "Controls final volume, SPU2 interpolation, synchronization, and buffering. Smaller buffers reduce audio delay but are less tolerant of uneven performance.";
     case SCR_EMU:
@@ -4630,6 +4834,8 @@ static const char *settingsScreenDescription(int screen) {
       return "Configures the experimental PS2 network-adapter path and an optional custom DNS server for compatible games or replacement services.";
     case SCR_CONTROLLER:
       return "Configures controller ports, vibration, PS2-to-Switch button and stick mappings, analog deadzone, and the multi-button turbo-speed hotkey.";
+    case SCR_OPTIMIZE:
+      return "Every row this port adds on top of upstream NetherSX2, in one place: the GS hardware hacks, the readback and texture-barrier knobs, FXAA, thread pinning and VU cycle steal. These trade correctness for speed, and each one records the hardware measurement it came from in its help card.";
     default:
       return "Opens this group of emulator settings.";
   }
@@ -4733,6 +4939,129 @@ static int dropdown(const char *title, const char *const *labels, int n, int cur
     waitForNextFrame();
   }
 }
+static int collectionChoice(const char *title,const std::vector<std::string> &choices,int current=0){
+  if(choices.empty()) return -1;
+  std::vector<const char*> labels;
+  labels.reserve(choices.size());
+  for(const auto &choice:choices) labels.push_back(choice.c_str());
+  return dropdown(title,labels.data(),(int)labels.size(),current,true,true);
+}
+
+static int findCollection(const std::string &name){
+  for(size_t index=0;index<g_collections.size();index++)
+    if(g_collections[index].name==name) return (int)index;
+  return -1;
+}
+
+static bool createCollection(Game *assignTo=nullptr){
+  if(g_collections.size()>=128){
+    modalMessage(uiText("Collection limit reached").c_str(),{uiText("Delete a collection before creating another.")});
+    return false;
+  }
+  char name[97]{};
+  if(!promptTextMode(uiText("New collection").c_str(),"",name,sizeof(name),false,false,
+                     uiText("Choose a name for this game collection").c_str(),
+                     uiText("Use the Switch keyboard to enter a name").c_str())) return false;
+  const std::string clean=trim(name),key=foldedKey(clean);
+  if(clean.empty()) return false;
+  if(key=="favorites"||key=="all games"){
+    modalMessage(uiText("Reserved collection name").c_str(),{uiText("Choose a name other than Favorites or All games.")});
+    return false;
+  }
+  if(std::any_of(g_collections.begin(),g_collections.end(),[&](const GameCollection &item){
+       return foldedKey(item.name)==key;
+     })){
+    modalMessage(uiText("Collection already exists").c_str(),{uiText("Choose a different name.")});
+    return false;
+  }
+  GameCollection collection;
+  collection.name=clean;
+  if(assignTo) collection.members.insert(assignTo->key);
+  g_collections.push_back(std::move(collection));
+  saveLibraryOrganization();
+  rebuildVisibleGames();
+  toast(uiText("Collection created").c_str());
+  return true;
+}
+
+static void manageCollections(){
+  const int action=collectionChoice("Manage collections",{"Create collection","Rename collection","Delete collection"});
+  if(action==0) createCollection();
+  else if(action==1||action==2){
+    if(g_collections.empty()){
+      modalMessage(uiText("No collections yet").c_str(),{uiText("Create a collection first.")});
+      return;
+    }
+    std::vector<std::string> names;
+    for(const auto &collection:g_collections) names.push_back(collection.name);
+    const int chosen=collectionChoice(action==1?"Rename collection":"Delete collection",names);
+    if(chosen<0) return;
+    if(action==1){
+      char name[97]{};
+      const std::string oldName=g_collections[chosen].name;
+      if(!promptTextMode(uiText("Rename collection").c_str(),oldName.c_str(),name,sizeof(name),false,false,
+                         uiText("Choose a new name for this collection").c_str(),nullptr)) return;
+      const std::string clean=trim(name),key=foldedKey(clean);
+      if(clean.empty()) return;
+      if(key=="favorites"||key=="all games"){
+        modalMessage(uiText("Reserved collection name").c_str(),{uiText("Choose a name other than Favorites or All games.")});
+        return;
+      }
+      for(size_t index=0;index<g_collections.size();index++) if((int)index!=chosen&&foldedKey(g_collections[index].name)==key){
+        modalMessage(uiText("Collection already exists").c_str(),{uiText("Choose a different name.")});
+        return;
+      }
+      g_collections[chosen].name=clean;
+      if(g_activeCollection==oldName) g_activeCollection=clean;
+      saveLibraryOrganization(); rebuildVisibleGames();
+    } else if(confirmBox(uiText("Delete collection?").c_str(),{g_collections[chosen].name,
+                   uiText("Games in the collection will remain in your library.")})){
+      const std::string removed=g_collections[chosen].name;
+      g_collections.erase(g_collections.begin()+chosen);
+      if(g_activeCollection==removed) g_activeCollection.clear();
+      saveLibraryOrganization(); rebuildVisibleGames();
+    }
+  }
+}
+
+static void editGameCollections(Game &game){
+  std::vector<std::string> choices{"Create collection"};
+  for(const auto &collection:g_collections)
+    choices.push_back(std::string(collection.members.count(game.key)?"[x]  ":"[ ]  ")+collection.name);
+  const int selected=collectionChoice("Game collections",choices);
+  if(selected<0) return;
+  if(selected==0){ createCollection(&game); return; }
+  GameCollection &collection=g_collections[selected-1];
+  if(!collection.members.erase(game.key)) collection.members.insert(game.key);
+  saveLibraryOrganization(); rebuildVisibleGames();
+  const std::string message=uiText(collection.members.count(game.key)?"Added to collection":"Removed from collection");
+  toast(message.c_str());
+}
+
+static bool chooseLibraryCollection(int &selection){
+  std::vector<std::string> choices{"All games","Favorites"};
+  for(const auto &collection:g_collections) choices.push_back(collection.name);
+  choices.push_back("Manage collections");
+  int current=0;
+  if(g_activeCollection=="favorites") current=1;
+  else if(!g_activeCollection.empty()){
+    const int found=findCollection(g_activeCollection);
+    if(found>=0) current=found+2;
+  }
+  const int chosen=collectionChoice("Browse collections",choices,current);
+  if(chosen<0) return false;
+  if(chosen==choices.size()-1){ manageCollections(); return false; }
+  g_activeCollection=chosen==0?std::string{}:chosen==1?"favorites":g_collections[chosen-2].name;
+  g_libraryView=LibraryView::Collections;
+  rebuildVisibleGames();
+  selection=visibleIndexForKey(g_librarySelections[(int)LibraryView::Collections]);
+  if(!visibleGame(selection)) selection=0;
+  g_librarySelections[(int)LibraryView::Collections]=visibleGame(selection)?visibleGame(selection)->key:"";
+  g_recentPosition=-1;
+  beginScreenFx();
+  return true;
+}
+
 static void optChoosePopup(const Opt &o) {
   if(o.type!=OT_CHOICE || o.nch<=0) return;
   std::vector<std::string> translated;
@@ -5130,19 +5459,26 @@ static void runCheatSettings(Game &game,uint32_t crc) {
   const std::string path=crc?cheatFileForCRC(crc):std::string();
   NxCheatList cheats{};
   bool loaded=crc&&nx_cheat_load(path.c_str(),&cheats);
+  const bool hasFpsMod=crc&&nx_fps_mod_available(crc);
+  bool fpsModInstalled=hasFpsMod&&nx_fps_mod_installed(crc,path.c_str());
   int sel=0,top=0;
   const int rowH=settingsRowH()+8,y0=settingsListY();
   std::string notice;
   beginScreenFx();
   for(;;){
     const int codeCount=loaded?(int)cheats.count:0;
-    const int n=codeCount+1;
+    const int fpsActionIndex=codeCount;
+    const int backIndex=codeCount+(hasFpsMod?1:0);
+    const int n=backIndex+1;
     // The status panel sits between the list and the footer, so it has to be
     // measured before the list decides how many rows fit: a full list would
     // otherwise draw its last rows underneath an opaque panel.
     std::vector<std::string> notes; SDL_Color noteColor=COL_HI;
     if(!crc){
       notes.emplace_back("Launch this game once so NetherSX2 can identify its CRC.");
+    } else if(!notice.empty()){
+      notes.push_back(notice);
+      if(notice.find("Could not")==0) noteColor=(SDL_Color){235,120,120,255};
     } else if(!loaded){
       notes.emplace_back("The PNACH file could not be read.");
     } else if(!cheats.file_exists){
@@ -5151,9 +5487,13 @@ static void runCheatSettings(Game &game,uint32_t crc) {
       notes.emplace_back(filename);
     } else if(!cheats.count){
       notes.emplace_back("No PNACH sections or named code blocks were found.");
-    } else if(!notice.empty()){
-      notes.push_back(notice);
-      if(notice.find("Could not")==0) noteColor=(SDL_Color){235,120,120,255};
+    }
+    if(crc&&hasFpsMod){
+      notes.emplace_back(fpsModInstalled
+          ? "Verified 30 FPS mod is installed below; toggle its row to change state."
+          : std::string("Available: ")+nx_fps_mod_label(crc));
+    } else if(crc){
+      notes.emplace_back("No verified FPS mod for this game CRC. FPS patches are game-specific.");
     }
     const int lineHeight=fontHeight(g_font)+8;
     const int noticeH=notes.empty()?0:(int)notes.size()*lineHeight+36;
@@ -5179,7 +5519,26 @@ static void runCheatSettings(Game &game,uint32_t crc) {
       if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_UP) sel=(sel+n-1)%n;
       else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel=(sel+1)%n;
       else if(event.cbutton.button==BTN_CANCEL) return;
-      else if(event.cbutton.button==BTN_CONFIRM&&sel==codeCount) return;
+      else if(event.cbutton.button==BTN_CONFIRM&&hasFpsMod&&sel==fpsActionIndex){
+        const NxFpsModInstallResult result=nx_fps_mod_install(crc,path.c_str());
+        if(result==NX_FPS_MOD_INSTALLED){
+          loaded=nx_cheat_load(path.c_str(),&cheats);
+          fpsModInstalled=nx_fps_mod_installed(crc,path.c_str());
+          notice="FPS mod added as Off. Select its code row to enable it.";
+        } else if(result==NX_FPS_MOD_ALREADY_INSTALLED){
+          fpsModInstalled=true;
+          notice="FPS mod already installed; enable or disable it in the list above.";
+        } else if(result==NX_FPS_MOD_UNSUPPORTED_GAME){
+          notice="Could not find a verified FPS mod for this game.";
+        } else if(result==NX_FPS_MOD_NETWORK_ERROR){
+          notice="Could not download the FPS mod. Check the internet connection.";
+        } else if(result==NX_FPS_MOD_INVALID_SOURCE){
+          notice="Could not verify the FPS mod from its source.";
+        } else {
+          notice="Could not write the FPS mod to the cheats folder.";
+        }
+      }
+      else if(event.cbutton.button==BTN_CONFIRM&&sel==backIndex) return;
       else if(sel<codeCount&&(event.cbutton.button==BTN_CONFIRM||
               event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_LEFT||
               event.cbutton.button==SDL_CONTROLLER_BUTTON_DPAD_RIGHT)){
@@ -5208,7 +5567,12 @@ static void runCheatSettings(Game &game,uint32_t crc) {
     for(int row=0;row<vis&&top+row<n;row++){
       const int index=top+row,slot=y0+row*rowH;
       const bool current=index==sel;
-      if(index==codeCount){
+      if(hasFpsMod&&index==fpsActionIndex){
+        drawSettingsRowText(tr("Download 30 FPS mod"),
+                            fpsModInstalled?tr("Installed"):tr("PCSX2 database"),
+                            slot,colW,labelX,valX,current,
+                            current?COL_VAL:COL_TXT,current?COL_VAL:COL_DIM,false,rowH);
+      } else if(index==backIndex){
         drawSettingsRowText(tr("Back"),"",slot,colW,labelX,valX,current,
                             current?COL_VAL:COL_TXT,current?COL_VAL:COL_DIM,false,rowH);
       } else {
@@ -5234,7 +5598,9 @@ static void runCheatSettings(Game &game,uint32_t crc) {
     }
     // The row past the last cheat is the Back row: nothing there toggles.
     FootItem footer[4];int hintCount=0;
-    if(sel<codeCount){
+    if(hasFpsMod&&sel==fpsActionIndex){
+      footer[hintCount++]={"A",fpsModInstalled?"Check":"Download"};
+    } else if(sel<codeCount){
       footer[hintCount++]={"A","Toggle"};
       footer[hintCount++]={"Left","Off"};
       footer[hintCount++]={"Right","On"};
@@ -6542,10 +6908,11 @@ static void drawWrappedCentered(TTF_Font *font,int centerX,int y,int maxWidth,in
 }
 
 static const char *GAME_MENU_ITEMS[]={"Launch","Game settings","Rename game","Cover settings",
-  "Create HOME shortcut","Favorite","Clear game settings","Delete game"};
-static constexpr int GAME_MENU_COUNT=8;
+  "Create HOME shortcut","Favorite","Collections","GPU performance profile",
+  "Clear game settings","Delete game"};
+static constexpr int GAME_MENU_COUNT=10;
 // Everything from this index down is destructive and sits in its own group.
-static constexpr int GAME_MENU_MANAGE_FIRST=6;
+static constexpr int GAME_MENU_MANAGE_FIRST=8;
 struct GameMenuLayout {
   GameDetailLayout detail;
   int start,rowHeight;
@@ -6572,9 +6939,12 @@ static void drawGameMenu(Game &game,int selection){
   drawRowHighlight(menu.x,(int)g_hy,menu.w,layout.rowHeight-4);
   for(int index=0;index<GAME_MENU_COUNT;index++){
     const bool current=index==selection;
-    const bool submenu=index==1||index==3||index==4;
+    const bool submenu=index==1||index==3||index==4||index==6;
     const SDL_Color color=index==GAME_MENU_COUNT-1?(SDL_Color){238,135,135,255}:(current?COL_VAL:COL_TXT);
-    drawSettingsRowText(tr(GAME_MENU_ITEMS[index]),index==5?(g_favorites.count(game.key)?tr("Yes"):tr("No")):(submenu?">":""),layout.rowY(index),menu.w,
+    const char *value = index==5 ? (g_favorites.count(game.key)?tr("Yes"):tr("No")) :
+                        index==7 ? (!strcmp(storeGet(g_game,"Wrapper/GPUPerformanceProfile","off"),"gpu")?tr("On"):tr("Off")) :
+                        (submenu?">":"");
+    drawSettingsRowText(tr(GAME_MENU_ITEMS[index]),value,layout.rowY(index),menu.w,
                         menu.x+24,menu.x+menu.w-24,current,color,current?COL_VAL:COL_DIM,false,
                         layout.rowHeight);
   }
@@ -6649,13 +7019,41 @@ static int perGameMenu(Game &g, SDL_GameController *pad) {
             if(!g_favorites.erase(g.key)) g_favorites.insert(g.key);
             saveLibraryOrganization(); rebuildVisibleGames(); beginScreenFx();
           }
-          else if(sel==6){
+          else if(sel==6){ editGameCollections(g); beginScreenFx(); }
+          else if(sel==7){
+            const char *profileKey="Wrapper/GPUPerformanceProfile";
+            const bool wasEnabled=!strcmp(storeGet(g_game,profileKey,"off"),"gpu");
+            const bool enable=!wasEnabled;
+            if(enable&&!confirmBox(uiText("Enable experimental GPU performance profile?").c_str(),
+                {g.title,"",uiText("This per-game profile lowers blending accuracy, forces texture barriers, and uses unsynchronized GPU downloads."),
+                 uiText("It may cause visual glitches. It does not change clocks, resolution, frame pacing, or frame-generation motion quality.")}))
+              break;
+            if(enable) storeSet(g_game,profileKey,"gpu");
+            else storeRemove(g_game,profileKey);
+            mkdir(GAMECFG_DIR,0777);
+            bool saved=true;
+            if(g_game.kv.empty()){
+              if(remove(gp.c_str())!=0&&errno!=ENOENT) saved=false;
+            } else saved=storeSave(g_game,gp.c_str());
+            if(saved){
+              if(pathGp!=gp) remove(pathGp.c_str());
+              if(g.legacyUnique&&legacyGp!=gp) remove(legacyGp.c_str());
+              g.hasCfg=!g_game.kv.empty();
+              toastStatic(enable?"GPU performance profile enabled":"GPU performance profile disabled");
+            } else {
+              if(wasEnabled) storeSet(g_game,profileKey,"gpu");
+              else storeRemove(g_game,profileKey);
+              modalMessageStatic("Game settings",{"Could not save the per-game settings."});
+            }
+            beginScreenFx();
+          }
+          else if(sel==8){
             g_game.kv.clear(); remove(gp.c_str());
             if(!g.pathKey.empty()) remove(pathGp.c_str());
             if(g.legacyUnique&&!g.legacyKey.empty()) remove(legacyGp.c_str());
             g.hasCfg=false; toastStatic("Game settings cleared"); beginScreenFx();
           }
-          else if(sel==7){
+          else if(sel==9){
             if(confirmBox(uiText("Delete game?").c_str(), { g.title, "", uiText("This permanently deletes the game file from"),
                                             uiText("its storage device. This cannot be undone.") })){
               if(remove(g.path.c_str())!=0){
@@ -6666,7 +7064,9 @@ static int perGameMenu(Game &g, SDL_GameController *pad) {
               remove(coverPath(g).c_str());
               remove(backgroundPath(g).c_str());
               storeRemovePrefix(g_global,("Artwork/"+g.key+"/").c_str());
-              g_favorites.erase(g.key);saveLibraryOrganization();
+              g_favorites.erase(g.key);
+              for(auto &collection:g_collections) collection.members.erase(g.key);
+              saveLibraryOrganization();
               remove(gp.c_str());
               remove(gameCRCFile(g).c_str());
               if(!g.pathKey.empty()){
@@ -6862,9 +7262,28 @@ static bool ensureEmu(const char *src,const char *dst) {
 }
 
 static void migrateLegacyEmuHosts() {
-  static const char *renderers[]={"vk","gl"};
+  // Only "vk" is still bundled. Copies of the gl/dk emulators left behind by an
+  // older multi-renderer bundle can never be refreshed from romfs again and this
+  // launcher will never launch them, so they are removed rather than migrated --
+  // that reclaims roughly 12 MB per file. If a multi-renderer bundle returns,
+  // they are extracted on demand again.
+  static const char *renderers[]={"vk","gl","dk"};
   for(const char *renderer:renderers){
     const std::string filename=std::string("NetherSX2_nx_")+renderer+".nro";
+    const bool bundled=!strcmp(renderer,"vk");
+
+    if(!bundled){
+      bool removed=false;
+      for(const char *dir:{DATA_DIR,EMU_HOST_DIR}){
+        const std::string stale=std::string(dir)+"/"+filename;
+        if(remove(stale.c_str())==0) removed=true;
+        remove((stale+".tmp").c_str());
+        remove((stale+".old").c_str());
+      }
+      if(removed) fsdevCommitDevice("sdmc");
+      continue;
+    }
+
     const std::string legacy=std::string(DATA_DIR)+"/"+filename;
     struct stat st{};
     if(stat(legacy.c_str(),&st)!=0||!S_ISREG(st.st_mode)) continue;
@@ -6882,11 +7301,11 @@ static void migrateLegacyEmuHosts() {
 }
 
 static std::string libraryTabLabel(int tab){
-  static const char *labels[]={"Recent","All games","Favorites"};
+  static const char *labels[]={"Recent","All games","Favorites","Collections"};
   return tab>=0&&tab<libraryTabCount()?uiText(labels[tab]):std::string{};
 }
 
-enum class LibraryIcon { Recent, Games, Favorite, Settings };
+enum class LibraryIcon { Recent, Games, Favorite, Collections, Settings };
 
 static void drawLibraryIcon(LibraryIcon icon,int cx,int cy,int size,SDL_Color color){
   if(icon==LibraryIcon::Settings){
@@ -6900,6 +7319,10 @@ static void drawLibraryIcon(LibraryIcon icon,int cx,int cy,int size,SDL_Color co
     const int cell=std::max(3,size/4),gap=std::max(2,size/7);
     for(int row=0;row<2;row++) for(int column=0;column<3;column++)
       roundedRect(cx-(3*cell+2*gap)/2+column*(cell+gap),cy-(2*cell+gap)/2+row*(cell+gap),cell,cell,1,color);
+  } else if(icon==LibraryIcon::Collections){
+    const int card=std::max(3,size/2);
+    roundedRect(cx-card/2-3,cy-card/2-3,card,card,2,color);
+    roundedRect(cx-card/2+3,cy-card/2+3,card,card,2,color);
   } else {
     const int points=icon==LibraryIcon::Favorite?10:48;
     const auto point=[&](int index,float radius){
@@ -6930,7 +7353,7 @@ static void drawLibraryIcon(LibraryIcon icon,int cx,int cy,int size,SDL_Color co
 }
 
 struct LibraryHeaderLayout {
-  std::array<SDL_Rect,3> tabs;
+  std::array<SDL_Rect,4> tabs;
   SDL_Rect settings;
 };
 
@@ -7001,7 +7424,9 @@ static void drawLibraryHeader(){
     const bool focused=g_libraryHeaderFocused&&g_libraryHeaderSelection==tab;
     const SDL_Color color=tab==libraryTabIndex()||focused?COL_TXT:COL_DIM;
     if(focused) roundedPanel(rect.x,rect.y,rect.w,rect.h,{255,255,255,8},COL_SEL,14,2);
-    drawLibraryIcon(tab==0?LibraryIcon::Recent:tab==1?LibraryIcon::Games:LibraryIcon::Favorite,rect.x+26,46,28,color);
+    const LibraryIcon icon=tab==0?LibraryIcon::Recent:tab==1?LibraryIcon::Games:
+        tab==2?LibraryIcon::Favorite:LibraryIcon::Collections;
+    drawLibraryIcon(icon,rect.x+26,46,28,color);
     if(rect.w>52){
       const SDL_Rect clip{rect.x+52,rect.y,rect.w-52,rect.h};
       SDL_RenderSetClipRect(g_ren,&clip);
@@ -7012,6 +7437,21 @@ static void drawLibraryHeader(){
   const bool focused=g_libraryHeaderFocused&&g_libraryHeaderSelection==libraryTabCount();
   if(focused) roundedPanel(layout.settings.x,layout.settings.y,layout.settings.w,layout.settings.h,{255,255,255,8},COL_SEL,14,2);
   drawLibraryIcon(LibraryIcon::Settings,layout.settings.x+27,46,28,focused?COL_TXT:COL_DIM);
+  std::string scope;
+  if(g_libraryView==LibraryView::Collections){
+    scope=uiText("Collections");
+    if(g_activeCollection=="favorites") scope+=" / "+uiText("Favorites");
+    else if(!g_activeCollection.empty()) scope+=" / "+g_activeCollection;
+    else scope+=" / "+uiText("All games");
+  }
+  if(!g_librarySearch.empty()){
+    std::string query=g_librarySearch;
+    if(query.size()>28) query=query.substr(0,25)+"...";
+    if(!scope.empty()) scope+="  |  ";
+    scope+=std::string(tr("Search"))+": "+query+" ("+std::to_string(g_visibleGames.size())+")";
+  }
+  if(!scope.empty()) drawTextR(g_font_sm,SW-100,82,
+      fittedText(g_font_sm,scope,SW-240).c_str(),COL_VAL);
 }
 
 struct RecentLayout { int x,y,focusedWidth,width,titleY; };
@@ -7130,11 +7570,17 @@ static SDL_Rect libraryEmptyActionRect(){ return {SW/2-148,SH/2+82,296,48}; }
 
 static void drawLibraryEmpty(){
   const bool scanning=g_libraryScan!=nullptr&&g_games.empty();
-  const char *title=scanning?"Loading game library...":g_libraryView==LibraryView::Recent?"Nothing played yet":
-      g_libraryView==LibraryView::Favorites?"No favorites yet":"No games found";
+  const bool noMatches=!scanning&&!g_librarySearch.empty();
+  const char *title=scanning?"Loading game library...":noMatches?"No matches":
+      g_libraryView==LibraryView::Recent?"Nothing played yet":
+      g_libraryView==LibraryView::Favorites?"No favorites yet":
+      g_libraryView==LibraryView::Collections&& !g_activeCollection.empty()&&g_activeCollection!="favorites"?"This collection is empty":
+      g_libraryView==LibraryView::Collections&&g_activeCollection=="favorites"?"No favorites yet":"No games found";
   const char *description=scanning?"The first page will appear as soon as it is ready.":
+      noMatches?"Press X to change or clear the filter.":
       g_libraryView==LibraryView::Recent?"Games you launch appear here, most recent first.":
       g_libraryView==LibraryView::Favorites?"Mark games as favorites from their game menu.":
+      g_libraryView==LibraryView::Collections?"Press A or - to browse collections.":
       "Add game folders in Settings to populate your library.";
   drawTextC(g_font_big,SW/2,SH/2-80,tr(title),COL_TXT);
   drawWrappedCentered(g_font_sm,SW/2,SH/2-22,SW-240,30,2,tr(description),COL_DIM);
@@ -7190,15 +7636,26 @@ static void renderGrid(int selection,int top){
   } else drawLibraryEmpty();
   drawUpdateNotification();
   if(g_libraryHeaderFocused){
-    FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":"Open"},{"B","Back"}};
-    drawFooterHints(hints,2,SH-50);
+    const bool browseFocused=g_libraryView==LibraryView::Collections&&
+        g_libraryHeaderSelection==(int)LibraryView::Collections;
+    FootItem hints[]={{"A",g_libraryHeaderSelection==libraryTabCount()?"Settings":browseFocused?"Browse":"Open"},
+                      {"X","Search"},{"+","Sort"},{"B","Back"}};
+    drawFooterHints(hints,4,SH-50);
   } else {
-    if(count){
+    if(count&&g_libraryView==LibraryView::Collections){
+      FootItem hints[]={{"A","Launch"},{"L3","Favorite"},{"Y","Game Menu"},
+                        {"X","Search"},{"+","Sort"},{"-","Browse"},{"B","Quit"}};
+      drawFooterHints(hints,7,SH-50);
+    } else if(count){
       const auto hints=libraryFooter();
       drawFooterHints(hints.data(),(int)hints.size(),SH-50);
+    } else if(g_libraryView==LibraryView::Collections){
+      FootItem hints[]={{"A","Browse"},{"X","Search"},{"+","Sort"},{"-","Browse"},{"B","Quit"}};
+      drawFooterHints(hints,5,SH-50);
     } else {
-      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":"All games"},{"B","Quit"}};
-      drawFooterHints(hints,2,SH-50);
+      FootItem hints[]={{"A",g_libraryView==LibraryView::All?"Settings":"All games"},
+                        {"X","Search"},{"+","Sort"},{"B","Quit"}};
+      drawFooterHints(hints,4,SH-50);
     }
   }
   drawFadeIn(); SDL_RenderPresent(g_ren);
@@ -7450,8 +7907,20 @@ int main(int argc, char **argv){
 
   g_griddbReady=griddb_global_init();
   if(!g_griddbReady&&R_SUCCEEDED(socketInitializeDefault())) g_storageSocketReady=true;
-  const char *directories[]={"sdmc:/switch",DATA_DIR,EMU_HOST_DIR,COVERS_DIR,CORES_DIR,GAMECFG_DIR,GAMECRC_DIR,CHEATS_DIR,TEXTURES_DIR,DEF_GAMEDIR,BIOS_DIR,RESOURCES_DIR,LSFG_DIR};
+  // DEF_GAMEDIR is deliberately NOT in this list. It is the only path here that
+  // is user content outside /switch/nethersx2, and ensureDirectory() is a single
+  // non-recursive mkdir whose failure returns startupFailure() -- so pointing the
+  // default at sdmc:/roms/ps2 would stop the launcher booting at all on a Switch
+  // that has no /roms, for a directory that is only a default the user can change.
+  const char *directories[]={"sdmc:/switch",DATA_DIR,EMU_HOST_DIR,COVERS_DIR,CORES_DIR,GAMECFG_DIR,GAMECRC_DIR,CHEATS_DIR,TEXTURES_DIR,BIOS_DIR,RESOURCES_DIR,LSFG_DIR};
   for(const char *directory:directories) if(!ensureDirectory(directory)) return startupFailure("Could not create the NetherSX2 data directories.");
+  // Best effort instead, parent first because mkdir here does not create it.
+  {
+    const std::string gamedir=DEF_GAMEDIR;
+    const size_t slash=gamedir.find_last_of('/');
+    if(slash!=std::string::npos&&slash>0) (void)ensureDirectory(gamedir.substr(0,slash).c_str());
+    (void)ensureDirectory(gamedir.c_str());
+  }
   migrateLegacyEmuHosts();
   if(!updateRecoveryOk)
     modalMessage(uiText("Update recovery failed").c_str(),{updateRecoveryError,uiText("The installed launcher was left unchanged.")});
@@ -7623,17 +8092,53 @@ int main(int argc, char **argv){
     beginScreenFx();
   };
   auto activateLibraryEmpty=[&](){
-    if(g_libraryView==LibraryView::All) openLibrarySettings();
+    if(g_libraryView==LibraryView::Collections) chooseLibraryCollection(sel);
+    else if(g_libraryView==LibraryView::All) openLibrarySettings();
     else changeLibraryTab(1);
+    top=0;
     g_libraryHeaderFocused=false;
     g_recentPosition=-1;
     beginScreenFx();
   };
   auto activateLibraryHeader=[&](int item){
     if(item<libraryTabCount()){
-      changeLibraryTab(item);
+      if(g_libraryView==LibraryView::Collections&&item==(int)LibraryView::Collections){
+        chooseLibraryCollection(sel);
+        top=0;
+      } else changeLibraryTab(item);
       g_libraryHeaderFocused=false;
     } else openLibrarySettings();
+  };
+  auto searchLibrary=[&](){
+    char query[192];
+    snprintf(query,sizeof(query),"%s",g_librarySearch.c_str());
+    if(!promptTextMode(tr("Search games"),g_librarySearch.c_str(),query,sizeof(query),
+                       false,true,tr("Search game titles and filenames"),
+                       tr("Leave blank to clear the filter"))) return;
+    g_librarySearch=trim(query);
+    rebuildVisibleGames();
+    sel=visibleIndexForKey(g_librarySelections[libraryTabIndex()]);
+    if(!visibleGame(sel)) sel=0;
+    top=0;
+    g_librarySelections[libraryTabIndex()]=visibleGame(sel)?visibleGame(sel)->key:"";
+    keepLibrarySelection=true;
+    g_libraryHeaderFocused=false;
+    g_recentPosition=-1;
+    beginScreenFx();
+  };
+  auto changeLibrarySort=[&](){
+    static const char *const labels[]={"Title A-Z","Title Z-A","Recently played","Filename A-Z"};
+    const std::string selected=visibleGame(sel)?visibleGame(sel)->key:std::string{};
+    const int mode=dropdown("Sort games",labels,4,g_librarySortMode,true,true);
+    if(mode<0) return;
+    g_librarySortMode=mode;
+    storeSet(g_global,"Wrapper/LibrarySort",std::to_string(mode).c_str());
+    storeSave(g_global,LAUNCHER_INI);
+    sortLibraryGames();
+    sel=visibleIndexForKey(selected);
+    top=0;
+    keepLibrarySelection=true;
+    beginScreenFx();
   };
   auto pageLibrary=[&](int direction){
     const GLay layout=gridLayout();
@@ -7830,6 +8335,37 @@ int main(int argc, char **argv){
           else if(count) selectGame(*visibleGame(sel));
           else activateLibraryEmpty();
           break;
+        case BTN_X:
+          searchLibrary();
+          break;
+        case SDL_CONTROLLER_BUTTON_START:
+          changeLibrarySort();
+          break;
+        case SDL_CONTROLLER_BUTTON_BACK:
+          if(!g_libraryHeaderFocused&&g_libraryView==LibraryView::Collections){
+            chooseLibraryCollection(sel);
+            top=0;
+            keepLibrarySelection=true;
+          }
+          break;
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+          if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
+            const std::string key=game->key;
+            const bool add=g_favorites.erase(key)==0;
+            if(add) g_favorites.insert(key);
+            saveLibraryOrganization();
+            rebuildVisibleGames();
+            const auto found=std::find_if(g_visibleGames.begin(),g_visibleGames.end(),[&](size_t index){
+              return g_games[index].key==key;
+            });
+            if(found!=g_visibleGames.end()) sel=(int)(found-g_visibleGames.begin());
+            else sel=g_visibleGames.empty()?0:std::min(sel,(int)g_visibleGames.size()-1);
+            const std::string message=uiText(add?"Added to favorites":"Removed from favorites");
+            toast(message.c_str());
+            keepLibrarySelection=true;
+            beginScreenFx();
+          }
+          break;
         case BTN_Y:
           if(!g_libraryHeaderFocused) if(Game *game=visibleGame(sel)){
             const std::string selectedKey=game->key;
@@ -7877,11 +8413,13 @@ int main(int argc, char **argv){
   if(launch&&envHasNextLoad()){
     Store effective=g_global;
     std::string gameCRCPath;
+    bool useGpuPerformanceProfile=false;
     if(!launchKey.empty()){
       std::string profile=std::string(GAMECFG_DIR)+"/"+launchKey+".ini";
       if(!regularFileExists(profile)&&!launchPathKey.empty()) profile=std::string(GAMECFG_DIR)+"/"+launchPathKey+".ini";
       if(!regularFileExists(profile)&&launchLegacyUnique&&!launchLegacyKey.empty()) profile=std::string(GAMECFG_DIR)+"/"+launchLegacyKey+".ini";
       Store overrides; storeLoad(overrides,profile.c_str());
+      useGpuPerformanceProfile=!strcmp(storeGet(overrides,"Wrapper/GPUPerformanceProfile","off"),"gpu");
       for(const auto &entry:overrides.kv) storeSet(effective,entry.k.c_str(),entry.v.c_str());
       gameCRCPath=toEmu(std::string(GAMECRC_DIR)+"/"+launchKey+".ini");
     }
@@ -7889,12 +8427,33 @@ int main(int argc, char **argv){
     removeLegacySmcSettings(effective);
     removeLegacyCheatGate(effective);
     applyGlobalRetroAchievementsSettings(effective);
-    std::string build=storeGet(effective,"Wrapper/CoreBuild","4248");
-    if(build!="4248"&&build!="3668") build="4248";
-    const std::string backend=storeGet(effective,"EmuCore/GS/Renderer","14");
-    const std::string renderer=backend=="15"?"dk":backend=="14"?"vk":"gl";
-    storeSet(effective,"Wrapper/GLDriver",backend=="13"?"zink":"nvc0");
-    storeSet(effective,"EmuCore/GS/Renderer",renderer=="vk"?"14":"12");
+    if(useGpuPerformanceProfile){
+      // Explicit per-game experiment only. These values are applied after the
+      // game's saved preferences so disabling the profile restores them exactly.
+      // They target the measured NVK render-target/blending wall; neither clocks,
+      // resolution, presentation/WSI, nor LSFG flow settings are changed.
+      storeSet(effective,"EmuCore/GS/accurate_blending_unit","0");
+      storeSet(effective,"EmuCore/GS/OverrideTextureBarriers","1");
+      storeSet(effective,"EmuCore/GS/HWDownloadMode","2");
+    }
+    // This launcher-only marker must never be forwarded to the emulator core.
+    storeRemove(effective,"Wrapper/GPUPerformanceProfile");
+    // Single-core bundle: only emucore_4248.so is in the romfs, so the stored
+    // preference is coerced rather than honoured -- an nethersx2.ini left over
+    // from a two-core build can still say 3668, and resolving that would ask
+    // for romfs:/cores/emucore_3668.so, which is no longer bundled. Written
+    // back so the core and the launcher agree on what is loaded. Same shape as
+    // the renderer coercion right below.
+    std::string build="4248";
+    storeSet(effective,"Wrapper/CoreBuild","4248");
+    // Vulkan-only build: the bundle ships just NetherSX2_nx_vk.nro. Any renderer
+    // an older launcher stored (12 NVC0, 13 Zink, 15 Deko3D) is coerced to
+    // Vulkan, otherwise the launch below would resolve to an .nro that is not in
+    // the romfs any more. EmuCore/GS/Renderer is written back so the core sees a
+    // consistent preference instead of a stale one.
+    const std::string renderer="vk";
+    storeSet(effective,"Wrapper/GLDriver","nvc0");
+    storeSet(effective,"EmuCore/GS/Renderer","14");
     const bool disableThreadedPresentation=renderer=="dk"||!strcmp(
         storeGet(effective,"EmuCore/GS/DisableThreadedPresentation","false"),"true");
     if(build=="3668"){
@@ -7951,6 +8510,8 @@ int main(int argc, char **argv){
     if(!gameCRCPath.empty()) storeSet(effective,"Wrapper/GameCRCPath",gameCRCPath.c_str());
     const bool lsfgRequested=!strcmp(storeGet(effective,"Wrapper/LSFGEnabled","false"),"true");
     const char *lsfgWarning=nullptr;
+    // renderer is always "vk" here, so this guard can no longer trip; it stays
+    // as the explicit statement that LSFG needs the Vulkan or Deko3D backend.
     if(lsfgRequested&&renderer!="vk"&&renderer!="dk"){
       storeSet(effective,"Wrapper/LSFGEnabled","false");
     } else if(lsfgRequested&&!lsfgDllInstalled()){

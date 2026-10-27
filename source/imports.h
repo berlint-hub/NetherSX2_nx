@@ -16,4 +16,10 @@ extern size_t dynlib_numfunctions;
 
 void update_imports(void);
 
+// The core's saveStateSlot is asynchronous. Observe its terminal status message
+// so the wrapper restores settings only after serialization completes.
+void imports_savestate_watch_begin(void);
+int imports_savestate_watch_result(void); // 0 pending, 1 saved, -1 failed
+void imports_savestate_watch_end(void);
+
 #endif

@@ -14,6 +14,16 @@ TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE	:=	NetherSX2
 APP_AUTHOR	:=	naga
 APP_VERSION	:=	1.4.0
+# Identity of THIS build. APP_VERSION is the same string in every build, so a
+# hardware log cannot be attributed to a commit without it -- TEST3's analysis of
+# the GT3 log lists build confirmation among the things it could not determine
+# (docs/logs/gt3-nvk-diag-notes.md S5). Derived here so local builds are labelled
+# too; CI overrides it to add the workflow run number.
+GIT_SHA		:=	$(shell git rev-parse --short HEAD 2>/dev/null)
+GIT_ID		:=	$(if $(GIT_SHA),$(GIT_SHA),nogit)
+# -dirty only means something inside a repo, so it is gated on the sha resolving.
+GIT_DIRTY	:=	$(if $(GIT_SHA),$(shell git diff-index --quiet HEAD -- 2>/dev/null || echo -dirty),)
+NETHERSX2_BUILD_ID ?= $(GIT_ID)$(GIT_DIRTY)
 BUILD		?=	build-$(RENDERER)
 SOURCES		:=	source source/hooks source/switch
 DATA		:=	data
@@ -30,13 +40,37 @@ LTOFLAGS := -flto=auto -fuse-linker-plugin
 # __SWITCH__ for libnx; NETHERSX2 gates the port-specific shim branches.
 DEFINES	:=	-D__SWITCH__ -DNETHERSX2 -DCURL_STATICLIB \
 			-DNETHERSX2_VERSION='"$(APP_VERSION)"'
+# Appended on its own line rather than continued onto the one above: that line
+# has no trailing backslash, and adding one would silently swallow whatever
+# follows it. Must stay above CFLAGS, which is := and expands this immediately.
+DEFINES += -DNETHERSX2_BUILD_ID='"$(NETHERSX2_BUILD_ID)"'
 
 ifneq ($(strip $(NETHERSX2_VK_DIAGNOSTIC)),)
 DEFINES += -DNETHERSX2_VK_DIAGNOSTIC
 endif
 
-RENDERER ?= GL
+# Vulkan-only product: NVK is the shipped backend, so it is also the default.
+RENDERER ?= VK
 MESA_SDK_ROOT ?=
+# pkg-config for the nxvk portlib package. Defaults to the devkitA64 cross
+# wrapper -- the same one launcher/Makefile already uses for SDL2 -- but CI can
+# override it when the package is only reachable another way.
+NXVK_PKG_CONFIG ?= $(PREFIX)pkg-config
+# sha256 of the nxvk-vulkan-tegra-x1.tar.gz this tree was validated against.
+# TEST3 holds the blob and CI clones a pinned ref at build time, so without a
+# pin the driver can be swapped under a build silently -- which is exactly what
+# happened, twice: the tarball moved arena/92b2b9eb-nxvk -> arena/068e6f2f-nxvk
+# and then back to arena/92b2b9eb-nxvk at a newer commit, each time changing
+# build run and toolchain image too. The cores are pinned the same way against
+# source/deko3d/dk_profiles.h, and CI fails loudly on both. This is the current
+# reproducible test candidate; hardware validation is still required before a
+# release recommendation. Override with NXVK_EXPECTED_SHA256= to test another.
+# Current tarball: TEST3 branch arena/8b264db8-test3 at
+# 0f5878e08cd37dd25b23ba5e090ae5c292560eca (NXVK source d6dcd9fb, run
+# 40103062558). SHA256 is computed from the tarball itself, not the enclosing
+# Actions artifact ZIP; refresh both this pin and TEST3_COMMIT in CI together.
+# Hardware validation is still required.
+NXVK_EXPECTED_SHA256 ?= c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74
 ifneq ($(strip $(MESA_SDK_ROOT)),)
 ifneq ($(RENDERER),DK)
 DEFINES += -DUSE_UNIFIED_MESA
@@ -62,18 +96,34 @@ INCLUDES	+=	source/lsfg \
 			third_party/lsfg-vk/lsfg-vk-common/include \
 			third_party/lsfg-vk/lsfg-vk-backend/include \
 			third_party/lsfg-vk/lsfg-vk-backend/src
+# Detect the nxvk portlib package here, not down by LIBS: CFLAGS below is
+# assigned with := and expands $(DEFINES) immediately, so the shim macro has to
+# be in DEFINES before that line.
+NXVK_PKG	:=	$(shell $(NXVK_PKG_CONFIG) --exists nxvk 2>/dev/null && echo 1)
+ifeq ($(NXVK_PKG),1)
+# libnvk.a defines only vk_icdGetInstanceProcAddr -- see source/hooks/vk.c.
+DEFINES		+=	-DNETHERSX2_NVK_ICD_ONLY
+endif
 else
 DEFINES	+=	-DGS_RENDERER=12
 endif
 endif
 
-CFLAGS	:=	-g -Wall -O3 -ffunction-sections -fno-omit-frame-pointer $(LTOFLAGS) \
+# -fdata-sections pairs with the --gc-sections that nxvk.pc puts on the VK link
+# line; it is harmless for DK/GL, which do not enable gc-sections themselves.
+CFLAGS	:=	-g -Wall -O3 -ffunction-sections -fdata-sections -fno-omit-frame-pointer $(LTOFLAGS) \
 			$(ARCH) $(DEFINES)
 CFLAGS	+=	$(INCLUDE)
 CXXFLAGS	:= $(CFLAGS) -std=gnu++20
 
 ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) $(LTOFLAGS) -Wl,-Map,$(notdir $*.map)
+# --wrap=pthread_create: libnvk.a a libnvk_support.a jsou linkovane primo do
+# teto binarky a tvori si vlastni worker vlakna (kompilace shaderu, disk cache).
+# Ta dedi vychozi afinitu procesu = vsechna pridelená jadra, takze mohou pristat
+# na EE a rusit ho. Pres wrap je pthr.c presouva na background jadro. Vsechna
+# nase vlastni volani pthread_create pouzivaji pthr_create_self() -> __real_,
+# takze wrap se tyka jen ciziho kodu. Overeno, ze --wrap prezije -flto.
+LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) $(LTOFLAGS) -Wl,--wrap=pthread_create -Wl,-Map,$(notdir $*.map)
 
 STORAGE_LIBS := $(TOPDIR)/launcher/dependencies/build/_deps/libsmb2-build/lib/libsmb2.a \
 				$(TOPDIR)/launcher/dependencies/build/_deps/libusbhsfs-build/liblibusbhsfs.a \
@@ -99,11 +149,27 @@ LIBS	:= -Wl,--start-group -lvulkan -lEGL -lGLESv2 -lglapi \
 		-Wl,--end-group $(STORAGE_LIBS) -lcurl -lelf -lexpat -lz -lzstd \
 		-lnx -lstdc++ -lm
 else
-# Mesa NVK: 23 vendored static archives (vulkan/lib) linked in one --start-group
-# (circular NVK<->runtime<->nir<->compiler deps). -l:libX.a links by exact file
-# name (avoids the -lvulkan GROUP-script + the double-prefixed liblibnil...a).
+# Mesa NVK, two supported layouts (detected into $(NXVK_PKG) above):
+#
+# portlib package, preferred -- the artifact built by berlint-hub/nxvk's
+# switch-vulkan.yml: libnvk.a + libnvk_support.a + pkgconfig/nxvk.pc, extracted
+# into $(PORTLIBS). nxvk.pc carries the entire link line, including
+# --whole-archive, -u,vk_icdGetInstanceProcAddr and --gc-sections, so none of it
+# is spelled out here. vulkan/ and vk_video/ headers arrive through
+# -I$(PORTLIBS)/include, which LIBDIRS below generates.
+#
+# vendored tree, fallback -- 23 static archives (vulkan/lib) linked in one
+# --start-group (circular NVK<->runtime<->nir<->compiler deps). -l:libX.a links
+# by exact file name (avoids the -lvulkan GROUP-script + the double-prefixed
+# liblibnil...a). That libvulkan_lite_* does export the plain
+# vkGetInstanceProcAddr, which is why the ICD-only shim stays off for it.
 # -lz/-lzstd resolve crc32/ZSTD_*; the DRM/nouveau_ws path is dead-stripped so no
 # -ldrm_nouveau. -lstdc++/libgcc unwinder are needed by NAK's bundled Rust.
+ifeq ($(NXVK_PKG),1)
+LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+LIBS	:= $(STORAGE_LIBS) `$(NXVK_PKG_CONFIG) --libs nxvk` \
+		-lcurl -lz -lzstd -lnx -lstdc++ -lm
+else
 LIBDIRS	:= $(TOPDIR)/vulkan $(PORTLIBS) $(LIBNX)
 LIBS	:= -Wl,--start-group \
 		-l:libnvk.a -l:libvulkan_lite_runtime.a -l:libvulkan_runtime.a \
@@ -115,6 +181,7 @@ LIBS	:= -Wl,--start-group \
 		-l:libnir.a -l:libcompiler.a -l:libcompiler_c_helpers.a \
 		-l:libmesa_util.a -l:libmesa_util_simd.a -l:libblake3.a -l:libmesa_util_c11.a \
 		-Wl,--end-group $(STORAGE_LIBS) -lcurl -lz -lzstd -lnx -lstdc++ -lm
+endif
 endif
 else
 ifneq ($(strip $(MESA_SDK_ROOT)),)

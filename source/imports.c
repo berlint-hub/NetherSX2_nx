@@ -36,6 +36,7 @@
 #include "so_util.h"
 #include "util.h"
 #include "libc_shim.h"
+#include "corelog.h"
 #include "pthr.h"
 #include "hooks.h"
 #include "aaudio.h"
@@ -43,8 +44,6 @@
 #include "network.h"
 #include "hooks/vk.h"   // Vulkan (NVK) bridge decls -- empty unless -DUSE_VULKAN
 
-// crt/newlib-provided symbols forwarded by address
-extern uintptr_t __stack_chk_fail;
 int *__errno(void);
 
 // BSD/bionic legacy `_ctype_`: the imported OBJECT is itself a pointer to a
@@ -63,18 +62,93 @@ FILE *stderr_ptr = (FILE *)&fake_sF[2][0];
 // small local shims (the long tail; the heavy lifting is in libc_shim/pthr/egl)
 // ---------------------------------------------------------------------------
 
+// Bionic's logcat is the core's only console, and Horizon has nowhere to print
+// it. Everything PCSX2 reports -- Console.Error, Log::Write, the GS init failure
+// reasons -- arrives here, so it goes to DATA_ROOT/nethersx2-core.log instead of
+// into a void. See corelog.c for the buffering and flush policy.
+static volatile int savestate_watch_active;
+static volatile int savestate_watch_result;
+
+void imports_savestate_watch_begin(void) {
+  __atomic_store_n(&savestate_watch_result, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&savestate_watch_active, 1, __ATOMIC_RELEASE);
+}
+
+int imports_savestate_watch_result(void) {
+  return __atomic_load_n(&savestate_watch_result, __ATOMIC_ACQUIRE);
+}
+
+void imports_savestate_watch_end(void) {
+  __atomic_store_n(&savestate_watch_active, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&savestate_watch_result, 0, __ATOMIC_RELAXED);
+}
+
+static void observe_savestate_status(const char *tag, const char *text) {
+  (void)tag; // the unique terminal message can use either Android or PCSX2 tags
+  if (!text || !__atomic_load_n(&savestate_watch_active, __ATOMIC_ACQUIRE))
+    return;
+
+  // saveStateSlot() queues serialization onto the VM thread. Its progress OSD
+  // appears as "Saving state to slot ...", while this completion OSD is emitted
+  // only after the state has actually been written. waitForSaveStateFlush() by
+  // itself is not a VM-queue barrier: the runtime trace showed it return before
+  // even "Saving SPU2". Use the core's terminal status as the synchronization
+  // point, then call the flush barrier for the writer it has now created.
+  if (strstr(text, "State saved to slot "))
+    __atomic_store_n(&savestate_watch_result, 1, __ATOMIC_RELEASE);
+  else if (strstr(text, "Failed to save save state") ||
+           strstr(text, "Error saving state!"))
+    __atomic_store_n(&savestate_watch_result, -1, __ATOMIC_RELEASE);
+}
+
+static void observe_savestate_vlog(const char *tag, const char *fmt, va_list args) {
+  if (!__atomic_load_n(&savestate_watch_active, __ATOMIC_ACQUIRE))
+    return;
+  char text[768];
+  va_list copy;
+  va_copy(copy, args);
+  vsnprintf(text, sizeof(text), fmt ? fmt : "", copy);
+  va_end(copy);
+  observe_savestate_status(tag, text);
+}
+
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
-  (void)prio; (void)tag; (void)fmt;
+  va_list args;
+  va_start(args, fmt);
+  observe_savestate_vlog(tag, fmt, args);
+  corelog_vlog(prio, tag, fmt, args);
+  va_end(args);
   return 0;
 }
 
 static int __android_log_write_fake(int prio, const char *tag, const char *text) {
-  (void)prio; (void)tag; (void)text;
+  observe_savestate_status(tag, text);
+  corelog_text(prio, tag, text);
   return 0;
 }
 static int __android_log_vprint_fake(int prio, const char *tag, const char *fmt, va_list va) {
-  (void)prio; (void)tag; (void)fmt; (void)va;
+  observe_savestate_vlog(tag, fmt, va);
+  corelog_vlog(prio, tag, fmt, va);
   return 0;
+}
+
+// printf/puts are the secondary channel (bundled C libraries rather than PCSX2
+// itself). newlib's real stdout goes nowhere on Horizon, so capture these too.
+static int printf_fake(const char *fmt, ...) {
+  char line[1024];
+  va_list args;
+  va_start(args, fmt);
+  int n = vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+  if (n < 0)
+    return n;
+  corelog_text(CORELOG_INFO, "stdout", line);
+  return n;
+}
+
+static int puts_fake(const char *text) {
+  corelog_text(CORELOG_INFO, "stdout", text ? text : "");
+  return 1;
 }
 
 // sleeping/yielding is a GL-handover point (single-context: cheap)
@@ -181,7 +255,23 @@ static int clock_nanosleep_fake(clockid_t clk, int flags, const struct timespec 
 
 
 // Linux-only syscalls newlib/libnx doesn't provide -> benign stubs.
-static int prctl_fake(int option, ...) { (void)option; return 0; }
+// PR_SET_NAME is the exception worth acting on: the core names six of its
+// threads through it ("CPU Thread", "GS", "MTVU", "SPU2", "CDVD",
+// "ISO Decompress", "ImGuiFullscreen Texture Loader"), and those names are the
+// only way to tell them apart -- they all arrive through one pthread_create
+// trampoline otherwise. See pthr_pin_by_name().
+#define PR_SET_NAME_LINUX 15
+static int prctl_fake(int option, ...) {
+  if (option == PR_SET_NAME_LINUX) {
+    va_list ap;
+    va_start(ap, option);
+    const char *name = va_arg(ap, const char *);
+    va_end(ap);
+    if (name)
+      pthr_pin_by_name(name);
+  }
+  return 0;
+}
 static int fallocate_fake(int fd, int mode, off_t off, off_t len) {
   (void)mode; (void)off; // best-effort: just ensure the file is at least len
   return ftruncate(fd, off + len);
@@ -190,9 +280,22 @@ static int sched_setaffinity_fake(int pid, size_t sz, const void *mask) {
   (void)pid; (void)sz; (void)mask; return 0; // core pins its own threads via libnx
 }
 
+// Both of these end the process, and both used to do it silently -- which is
+// exactly why a failing GS looked like "the screen flashes once and we are back
+// in the launcher". Record why, and where the core called from, durably first.
+// __builtin_return_address(0) is the caller inside libemucore.so, which corelog
+// renders as core+0xOFFSET.
 static void abort_fake(void) {
   extern void NX_NORETURN __libnx_exit(int rc);
+  corelog_death("abort()", __builtin_return_address(0));
   __libnx_exit(134);
+}
+
+__attribute__((noreturn)) static void stack_chk_fail_fake(void) {
+  extern void NX_NORETURN __libnx_exit(int rc);
+  corelog_death("stack smashing detected (__stack_chk_fail)",
+                __builtin_return_address(0));
+  __libnx_exit(139);
 }
 
 static void zth_noop(void) {}
@@ -255,7 +358,7 @@ DynLibFunction dynlib_functions[] = {
   { "__read_chk", (uintptr_t)&__read_chk_fake },
   { "__register_atfork", (uintptr_t)&__register_atfork_fake },
   { "__sF", (uintptr_t)&fake_sF },
-  { "__stack_chk_fail", (uintptr_t)&__stack_chk_fail },
+  { "__stack_chk_fail", (uintptr_t)&stack_chk_fail_fake },
   { "__strcat_chk", (uintptr_t)&__strcat_chk_fake },
   { "__strchr_chk", (uintptr_t)&__strchr_chk_fake },
   { "__strcpy_chk", (uintptr_t)&__strcpy_chk_fake },
@@ -382,8 +485,8 @@ DynLibFunction dynlib_functions[] = {
   { "log", (uintptr_t)&log },
   { "log2", (uintptr_t)&log2 },
   { "longjmp", (uintptr_t)&longjmp },
-  { "lseek", (uintptr_t)&lseek },
-  { "lseek64", (uintptr_t)&lseek },
+  { "lseek", (uintptr_t)&lseek_fake },
+  { "lseek64", (uintptr_t)&lseek_fake },
   { "malloc", (uintptr_t)&malloc },
   { "mbrlen", (uintptr_t)&mbrlen },
   { "mbrtowc", (uintptr_t)&mbrtowc },
@@ -409,7 +512,7 @@ DynLibFunction dynlib_functions[] = {
   { "posix_memalign", (uintptr_t)&posix_memalign_fake },
   { "pow", (uintptr_t)&pow },
   { "prctl", (uintptr_t)&prctl_fake },
-  { "printf", (uintptr_t)&printf },
+  { "printf", (uintptr_t)&printf_fake },
   { "pthread_attr_init", (uintptr_t)&pthread_attr_init_soloader },
   { "pthread_attr_setstacksize", (uintptr_t)&pthread_attr_setstacksize_soloader },
   { "pthread_cond_broadcast", (uintptr_t)&pthread_cond_broadcast_soloader },
@@ -442,7 +545,7 @@ DynLibFunction dynlib_functions[] = {
   { "pthread_setschedparam", (uintptr_t)&ret0 },
   { "pthread_setspecific", (uintptr_t)&pthread_setspecific },
   { "putchar", (uintptr_t)&putchar },
-  { "puts", (uintptr_t)&puts },
+  { "puts", (uintptr_t)&puts_fake },
   { "qsort", (uintptr_t)&qsort },
   { "readdir", (uintptr_t)&readdir_fake },
   { "realloc", (uintptr_t)&realloc },
@@ -453,7 +556,9 @@ DynLibFunction dynlib_functions[] = {
   { "rmdir", (uintptr_t)&rmdir },
   { "sched_get_priority_max", (uintptr_t)&sched_get_priority_max_fake },
   { "sched_setaffinity", (uintptr_t)&sched_setaffinity_fake },
-  { "sched_yield", (uintptr_t)&sched_yield },
+  // Counted, not passed straight through: the ratio of sched_yield calls to
+  // elapsed time per named thread is what says whether MTVU is spinning idle.
+  { "sched_yield", (uintptr_t)&pthr_sched_yield },
   { "select", (uintptr_t)&net_select },
   { "sem_destroy", (uintptr_t)&sem_destroy_fake },
   { "sem_init", (uintptr_t)&sem_init_fake },

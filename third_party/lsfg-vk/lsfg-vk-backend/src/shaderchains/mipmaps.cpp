@@ -2,6 +2,7 @@
 
 #include "mipmaps.hpp"
 #include "../helpers/utils.hpp"
+#include "lsfg_extent.h"
 #include "lsfg-vk-common/helpers/pointers.hpp"
 #include "lsfg-vk-common/vulkan/command_buffer.hpp"
 #include "lsfg-vk-common/vulkan/image.hpp"
@@ -54,10 +55,13 @@ Mipmaps::Mipmaps(const Ctx& ctx,
     this->lumaDispatchExtent =
         backend::add_shift_extent(ctx.flowExtent, 7, 3);
     for (size_t i = 0; i < this->downsampleDispatchExtents.size(); ++i) {
-        const VkExtent2D outputExtent =
-            backend::shift_extent(ctx.flowExtent, static_cast<uint32_t>(i + 1));
-        this->downsampleDispatchExtents.at(i) =
-            backend::add_shift_extent(outputExtent, 7, 3);
+        const LsfgMipExtent dispatch = lsfg_mip_dispatch(
+            ctx.flowExtent.width, ctx.flowExtent.height,
+            static_cast<uint32_t>(i + 1), 7, 3);
+        this->downsampleDispatchExtents.at(i) = VkExtent2D{
+            .width = dispatch.width,
+            .height = dispatch.height
+        };
     }
 }
 

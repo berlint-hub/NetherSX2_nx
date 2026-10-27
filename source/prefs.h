@@ -22,6 +22,9 @@ void prefs_init(const char *ini_path);
 
 // flush the current map back to the ini file
 void prefs_save(void);
+// flush while substituting two temporary float values without mutating the live map
+void prefs_save_with_float_overrides(const char *key1, float value1,
+                                    const char *key2, float value2);
 
 // lookups: return the stored value, or `def` on miss. `key` is the flat
 // "Section/Key" string the SharedPreferences shim passes through.

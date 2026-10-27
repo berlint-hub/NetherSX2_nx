@@ -24,6 +24,9 @@
 #define GPU_RESERVE_MB 1024
 #endif
 
+// The selected TEST3 core uses the optional isb->yield spin-wait patch.
+#define CORE_VARIANT "spinrelax"
+
 // libemucore.so is self-contained (statically linked NDK r25b C++ runtime).
 #define SO_NAME "libemucore.so"
 

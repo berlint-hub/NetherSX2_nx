@@ -10,16 +10,29 @@ It loads the original Android emulator core `libemucore.so`,
 patches it, and runs it inside a minimal Android-like
 environment natively.
 
-Everything ships as a **single `NetherSX2.nro`**: it bundles both emulator cores
-(Patched `4248` + Classic `3668`), three renderer backends (native Deko3D, OpenGL, Vulkan/NVK)
-and each build's data files, and extracts the ones you pick to the SD card at
-launch. An SDL cover-art launcher chooses the game, the renderer, and per-game
-settings, then chainloads the emulator.
+Everything ships as a **single `NetherSX2.nro`**: it bundles one emulator core
+(NetherSX2 v2.2n-`4248` spin-relax core with the Tegra X1 patches), the Vulkan/NVK emulator and
+that build's data files, and extracts them to the SD card at launch. There is no
+core-version setting — the bundle carries exactly one core. An SDL cover-art
+launcher chooses the game and per-game settings, then chainloads the emulator.
+
+Vulkan (NVK) is the only graphics backend in the shipped bundle, so there is no
+renderer setting to choose. The native Deko3D and OpenGL targets are still in
+the tree and still build (`make RENDERER=DK` / `RENDERER=GL`), but they are not
+bundled and the launcher does not offer them.
 
 The launcher supports multiple library folders across SD, USB mass storage
-(FAT32, exFAT, NTFS), and SMB shares. The Recent, All games, and Favorites tabs
-organize the library; press **Y** for a game's menu and use the settings icon
-for global options.
+(FAT32, exFAT, NTFS), and SMB shares. The Recent, All games, Favorites, and
+Collections tabs organize the library. In Collections, press **−** (or focus the
+Collections tab and press **A**) to browse collections or manage them; create,
+rename, and delete collections there. Press **Y** on a game to open its menu,
+then choose **Collections** to add or remove it from one or more collections.
+Collection membership is saved with the launcher settings.
+Press **X** from the library to search game titles and filenames with the system
+keyboard; submit an empty query to clear the filter. Search works inside the
+current tab. Press **L3** on a selected game to toggle its favorite status. Press
+**+** to sort the library by title, filename, or most recently played; the Recent
+tab always stays newest-first. Use the settings icon for global options.
 
 The PS2 theme uses an animated background. Classic keeps the same menu colors
 and displays the selected game's artwork behind the library. SteamGridDB cover
@@ -54,6 +67,7 @@ The launcher creates the rest of the folder tree on first run:
   forwarders/   <- HOME shortcut launch records
   hidden.ini    <- hidden library entries
   launcher.ini  <- the launcher's saved config
+  nethersx2-core.log <- the core's own console; see Diagnostics
 ```
 
 ### Notes
@@ -61,6 +75,60 @@ The launcher creates the rest of the folder tree on first run:
 This will not run in applet/album mode — it needs the full memory of a game
 override. Launch it by holding **R** while opening an installed title, or use a
 forwarder.
+
+Threads are pinned by role. The core names its own threads through
+`prctl(PR_SET_NAME)` — `"CPU Thread"` (EE), `"GS"` (MTGS), `"MTVU"` (VU1),
+`"SPU2"`, `"CDVD"`, `"ISO Decompress"` and `"ImGuiFullscreen Texture Loader"` —
+and the wrapper turns those names into CPU affinity: EE alone on core 0, GS and
+MTVU each on their own core, and SPU2 together with the audio callback and input
+on core 3 at priority 44, between audio's 43 and input's 45, because Horizon
+never preempts between equal priorities. GS and MTVU are pinned *exclusively*
+only when four cores are granted, which means launching through a HOME Menu
+shortcut; launched from the album the grant is three cores, so they keep a
+migratable mask and a light thread can still move off a busy peer. **Settings >
+Thread pinning** turns this off (`Auto`), restoring the older round-robin that
+hands out cores in thread-creation order. Every decision is logged to
+`/switch/nethersx2/nethersx2-core.log` as
+`thread "GS" -> core 1, mask 0x2, priority 30`. The three emulation threads run
+at priority 30, above everything else in the process, because Horizon never
+preempts between equal priorities and libnx hands each thread its creator's.
+
+Core 3 carries the 48 kHz audio callback (priority 43) and input polling (45),
+which leaves it mostly idle, so the threads that `libnvk.a` and
+`libnvk_support.a` create for themselves — shader compilation, disk cache — are
+moved there at priority 47, below both. They are statically linked into the
+emulator, so they inherit the process default affinity, which is every granted
+core; without this a driver thread can land on core 0 and interrupt the EE
+mid-frame. That is done with `-Wl,--wrap=pthread_create`: our own four creation
+sites call `pthr_create_self()` (which goes straight to `__real_pthread_create`)
+so they keep the affinity they arrange themselves, and everything else arriving
+at `__wrap_pthread_create` is third-party. Each moved thread logs
+`driver thread -> core 3, mask 0x8, priority 47`, capped at eight lines. On a
+three-core grant there is no spare core, so nothing is moved.
+
+The diagnostic build also counts `sched_yield`, the only spin primitive the core
+imports. It reports per thread — `sched_yield: thread "MTVU" called it 10000x,
+process total 10000x` — at 100, 1000, 10000 calls and then every 100000, so
+the log timestamps give a rate. That is what separates "MTVU is computing" from
+"MTVU is spinning idle waiting for the EE to queue work", which the two look
+identical for as a core sitting at 100% and which call for opposite fixes. The
+per-thread count is in TLS and exact; the process total is a raced increment and
+can lose counts, which is fine for telling hundreds per second from hundreds of
+thousands and avoids a lock on the hottest path in the process.
+
+**Settings > VU cycle steal** is a binary patch for games whose VU1 thread runs
+flat out, such as Gran Turismo 3 distance views. It repurposes the
+`EECycleSkip` multiply inside `VU_Thread::ExecuteVU` — one instruction at
+`core+0x4b2500`, `MUL w8, w8, w10` — so the cycles VU1 burned are credited to
+the EE clock instead of being multiplied by the skip factor: level 1 credits
+half of them (`LSR w8, w8, #1`), level 2 all of them (`MOV w8, w8`). It needs
+MTVU on, replaces EE cycle skip (keep that Off), applies at core load so it
+needs a game restart, and only the 4248 core is supported. The site was found
+by instruction signature, not by copying an offset from another build: scanning
+this image for `MUL w8, w8, w10` gives 26 hits and exactly one has
+`MOVZ #3000` / `CMP #3000` / `LDRB [x21,#5]` within reach. `patch_game()`
+verifies the original word before writing and logs a warning instead of
+patching if it does not match, so a wrong core image is a no-op, not corruption.
 
 A PS2 BIOS dump is required and must come from your own console; the launcher
 warns at startup when `bios/` is empty.
@@ -71,20 +139,259 @@ Successful sign-in stores the returned account token in `launcher.ini`.
 Achievement progress and descriptions can be viewed during play from
 **L + R + Plus > Achievements**.
 
-Select **Settings > Graphics > Renderer > Deko3D (Native)** to use the native GS
-backend. It replaces the core's GPU device and display callbacks with Deko3D
-commands. The Deko emulator NRO is linked separately, without EGL, GLES, Vulkan,
-NVK, or Gallium driver archives. The SDL launcher uses its own graphics runtime
-and exits before the emulator starts.
+The emulator renders through NVK, the Mesa Vulkan driver for the Switch's
+Tegra X1 GPU, linked statically from the `nxvk` portlib package. Because
+Horizon has no Vulkan loader, that package exports a single entry point,
+`vk_icdGetInstanceProcAddr`; `source/vk_loader_shim.c` (generated by
+`tools/gen_nvk_loader_shim.py`) provides the entry points the wrapper calls by
+forwarding through it, and `source/nvk_libc_stubs.c` supplies the POSIX calls
+Mesa expects that newlib does not have. The SDL launcher uses its own graphics
+runtime and exits before the emulator starts. NVK's shader disk cache is
+configured at `/switch/nethersx2/cache/mesa` with an explicit 2 GiB cap.
 
-LSFG 2x Frame Generation is available for Vulkan and Deko3D in
-**Settings > Frame Generation**.
-You must provide your own `Lossless.dll` at `/switch/nethersx2/lsfg/Lossless.dll`.
-LSFG must be enabled before launching a game so its shader session can be
-prepared. Frame Generation starts **Off** in every game and must be enabled
-manually from **L + R + Plus > Frame Generation**. Skip Duplicate Frames is
-automatically enabled for prepared LSFG sessions so only unique game frames
-are interpolated.
+FPSLocker/NX-FPS telemetry is enabled by default when NetherSX2 finds its
+shared block. Set `Wrapper/AutoSyncFPSLocker = false` in `nethersx2.ini` to opt
+out. On Vulkan, NetherSX2 wraps its own `vkQueuePresentKHR` entry to measure
+source cadence and publishes the live `FPS`/`FPSavg` telemetry; this is separate
+from NX-FPS's import-replacement hook.
+
+**FPSLocker owns its max-FPS target.** NetherSX2 never writes `FPSlocked`,
+`FPSmode`, or `patchApplied`, and never restores an old value over the user's
+current target at shutdown. This matters because `FPSlocked` is FPSLocker's
+game-cap target, not a display-refresh mailbox. FPSLocker's increase/decrease
+actions remain authoritative and can make their own SaltySD refresh-rate
+request. The bridge only observes the target for diagnostics.
+
+Display-sync activation follows FPSLocker's shared `displaySync` toggle bits,
+not merely the presence of its shared block. NetherSX2 therefore requests
+FIFO/blocks the low-latency path only when FPSLocker has actually enabled
+handheld or docked display sync. NetherSX2 does not change the user's display
+sync toggle or select a panel rate itself. Deko3D follows the panel with swap
+interval 1.
+
+Vulkan low latency is a separate, explicit `EmuCore/GS/low_latency = 1`
+preference; AutoSyncFPSLocker never enables it. Low latency is not compatible
+with display sync: if both are requested, display sync takes precedence and
+NetherSX2 requests FIFO without its wall-clock submit pacer. When
+`EmuCore/GS/low_latency = 1` is active, `vkQueuePresentKHR_shim` returns through
+the native path before the LSFG bridge, so LSFG is not applied even if its UI
+setting or the earlier diagnostic entry line says it is enabled. For a clean A/B,
+set `Wrapper/AutoSyncFPSLocker = false` and manually set
+`EmuCore/GS/low_latency = 1`; AutoSync never enables low latency. When used on
+its own, NetherSX2 requests IMMEDIATE when the surface advertises it, falling
+back to FIFO, exports `NVK_LOW_LATENCY=1` before Vulkan initializes, and
+requests a 2-image swapchain. The pinned NXVK low-latency WSI preserves supported MAILBOX and IMMEDIATE
+requests; it converts a FIFO or unknown request to MAILBOX. The interval mapper
+uses FIFO→1, IMMEDIATE→0, and MAILBOX→0 in low-latency mode (MAILBOX→1 on the
+default path). NetherSX2 requests IMMEDIATE when advertised and falls back to
+FIFO, which the driver converts to MAILBOX at interval zero. Thus the low-latency
+path is source-derived to run at interval zero with two images; this has not
+yet been observed on device. Tearing is possible, and the reduced queue depth
+can expose hitches that a third image
+previously hid. This is opt-in only; the default three-image path and its
+MAILBOX interval behavior are unchanged.
+
+The pinned NXVK WSI chooses the image count itself: 3 in normal mode, 2 when
+`NVK_LOW_LATENCY=1`. It ignores the Vulkan `minImageCount` request, so FPSLocker's
+`SetBuffers` cannot change the count on this driver. NetherSX2 reads that request
+but leaves `SetBuffers` untouched, queries the actual created image count, and
+reports that value through FPSLocker's `Buffers` field. Low latency takes
+precedence over the buffer request.
+
+Three things about the Horizon environment need papering over for the core to
+work at all, all of them in the POSIX shim rather than in the emulator:
+
+- **Memory.** NVK sizes its `VkMemoryHeap` using
+  `sysconf(_SC_PHYS_PAGES)`, which newlib does not implement. The Switch shim
+  returns a Mesa-specific sizing hint of `2 * GPU_RESERVE_MB` (2048 MiB with
+  the unchanged 1024 MiB Vulkan reserve), not the console's actual physical-page
+  count. At the pinned NXVK revision, `heap_memory_percent` defaults to 0.75;
+  its 25/50/75% fallback is used only when that option is zero. Therefore the
+  source-derived heap expectation for this hint is 1536 MiB, not 1024 MiB. On
+  Horizon, NVK's initial budget calculation is approximately
+  `min(heap, 2048 * 0.9 * 0.75)` (about 1382 MiB with zero previously used
+  heap; NVK adds current used bytes before capping at heap size). The existing
+  memory-properties shim raises it to at least the heap size, so the
+  source-derived initial post-clamp expectation is 1536 MiB. Device diagnostics
+  confirmed heap0=1536 MiB, NVK budget=1382 MiB before the shim and 1536 MiB
+  after it. This creates an intentional nominal overcommit: the exposed heap
+  budget is 512 MiB above the 1024 MiB dedicated reserve. That is not another
+  512 MiB of guaranteed free memory; actual usage must be read from
+  `heapUsage[0]`, not inferred from budget. The diagnostic build logs its
+  per-window and all-time observed usage; `sysconf` itself logs only its sizing
+  hint. Do not treat it as total RAM or change the reserve based on the hint.
+  If measured heap use approaches the limit or OOM occurs, a one-step fallback
+  to a `GPU_RESERVE_MB * 4 / 3` hint (1366 MiB for a 1024 MiB reserve, implying
+  roughly a 1024 MiB NVK heap) can be tested. This fallback is documented only;
+  the current hint and heap percentage are unchanged.
+- **CPU topology.** The core links Facebook's `cpuinfo`, which reads
+  `/sys/devices/system/cpu/*` and `/proc/cpuinfo`. Horizon has neither, so
+  `source/libc_shim.c` serves both from a small synthetic-file table, sized
+  from the core mask Horizon actually granted. It is reachable from `open()`
+  *and* `fopen()`, because `cpuinfo` uses `open`/`__read_chk`/`close` while
+  other consumers use stdio.
+- **File I/O latency.** Every `write()` is an IPC round trip to the SD card,
+  costing around 0.8 ms. newlib's default 1 KiB stream buffer turned creating
+  an 8 MB memory card into thousands of them — 6.7 s per card. `fopen_fake()`
+  installs a 256 KiB buffer for reads and a 64 KiB one for writes; the smaller
+  write buffer bounds how much unflushed data a hard kill can lose.
+
+Frame Generation is available in **Settings > Frame Generation**. You must
+provide your own `Lossless.dll` at `/switch/nethersx2/lsfg/Lossless.dll`. LSFG
+must be enabled before launching a game so its shader session can be prepared.
+Frame Generation starts **Off** in every game and must be enabled manually from
+**L + R + Plus > Frame Generation**. Skip Duplicate Frames is automatically
+enabled for prepared LSFG sessions so only unique game frames are interpolated.
+
+**Mode** decides the schedule:
+
+- **Auto (2x below 33 FPS)** interpolates every frame, but only while the source
+  runs below ~33 FPS, and passes video through untouched above that — twice
+  50 FPS is 100 and the panel is 60 Hz, so there would be nothing to show.
+- **Fractional (target rate)** interpolates on only *some* frames so the output
+  approaches **Target output rate** instead of always doubling. The effective
+  target is capped at the refresh rate reported for the active panel (for
+  example, a 60 Hz request becomes 50 Hz on a 50 Hz display). Sources within 2%
+  of the target stay on native presentation to avoid paying capture overhead for
+  cadence noise. A game at 40 FPS aiming for 50 gets about one generated frame
+  every four; a game at 47 aiming for 50 gets about one every sixteen. Output
+  can never exceed twice the source rate, because one interpolation per source
+  frame is all the bridge produces. The cost is one frame of latency plus the
+  GPU work of each generated frame.
+
+Fractional first measures the source rate on native presents. While the source
+is at or above the target, it stays on that native path—there is no reason to pay
+the bridge's capture-copy and submit overhead when no interpolation can be
+scheduled. Once the source is stably below target, the bridge must see *every*
+source frame even when it does not interpolate: otherwise its previous-frame
+slot would be stale and the next interpolation would span the whole gap and land
+in the wrong place on the timeline. Those non-interpolated frames go through
+`lsfg_nx_present_capture()`, which copies the frame into the ping-pong slot and
+presents it unchanged. If a native present occurs after bridge activation, the
+scheduler forces one capture-only re-warm frame before it interpolates again.
+The source rate is frozen after 16 valid samples and before generation begins,
+because once the display saturates its FIFO back-pressure reads as a slower
+source, which would raise the ratio and generate more: positive feedback. While
+the bridge is active, the independent display-sync estimate is still checked for
+recovery: after 16 consecutive samples at least 2% above target, fractional mode
+returns to native presentation and measures again. This high-side hysteresis
+avoids flapping near the target and does not use intervals distorted by the
+bridge's FIFO blocking. It is a cadence safeguard, not a confirmed fix for visual
+flicker.
+
+**Flow resolution** offers Eighth (0.125), Quarter, Half, and Full (1.0). Full
+uses the output resolution for optical-flow analysis: at a fixed output size it
+processes four times as many flow pixels as Half and can significantly increase
+GPU cost. Treat it as an optional image-quality A/B test, not as a guaranteed
+fix for flicker or proof of available GPU headroom. The mip pyramid clamps each
+axis to at least one pixel, so small output sizes cannot create invalid
+zero-sized Vulkan images at Eighth resolution.
+
+### Diagnostics
+
+Logs go into `/switch/nethersx2/`.
+
+`nethersx2-core.log` is written by every build. It captures the core's own
+console: PCSX2 reports every initialisation failure through Bionic's logcat, and
+Horizon has nowhere to print it, so without this the emulator dies without ever
+saying why. It also records the reason and the calling address whenever the core
+calls `abort()` or trips the stack protector, rendering an address inside
+`libemucore.so` as `core+0xOFFSET`, and an address in memory this port mapped on
+the core's behalf — the recompiler's RX cache, the fastmem mirror, the ashmem
+PS2 RAM regions — by naming that region instead of printing a bare pointer.
+
+The file is line-buffered and capped (2 MiB soft chatter limit in the shipping
+build, 8 MiB in the diagnostic build, with bounded hard-cap headroom). In the
+shipping build, reaching the soft limit sends later INFO-and-below lines to a
+128 KiB in-memory recent-context buffer instead of writing them to the SD card.
+That buffer is appended before an explicit wrapper ERROR/FATAL message or the
+wrapper's death note, preserving the most recent context without unbounded log
+growth. PCSX2 can flatten its own console severities to INFO, so this preserves
+recent context, not every earlier core error. The lock-free CPU-exception marker
+is still written directly and does not flush this buffer. The diagnostic build
+keeps the core console enabled and removes the soft cutoff, while honoring the
+same hard file-size cap. Messages written as ERROR/FATAL are flushed and
+`fsync`ed as they are written.
+
+CI additionally publishes `NetherSX2-diag.nro` — the same launcher and the same
+cores, with the emulator built with `NETHERSX2_VK_DIAGNOSTIC=1`. Install it as
+`/switch/NetherSX2.nro` (keeping your `nethersx2/` folder) to also get:
+
+```
+nethersx2-vulkan.log     host and Vulkan lifecycle, timestamped
+nethersx2-mesa.log       NVK's own log (MESA_LOG_FILE, NVK_DEBUG=wsi,vm)
+nethersx2-exception.log  pc/far/esr/sp/fp/lr, only if a CPU exception fires
+```
+
+The diagnostic build also turns PCSX2's own logging back on
+(`Logging/EnableSystemConsole`, `EnableVerbose`, `EnableEEConsole`,
+`EnableIOPConsole`), which the shipping build forces off — verbose emulator
+output is megabytes per boot and real time on a Tegra X1. Expect
+`nethersx2-core.log` to be far larger and the boot to be slower as a result;
+that is the point, since the core's own message is usually the only thing that
+names a fault.
+
+The Vulkan log reports unresolved `vkGetInstanceProcAddr` lookups (successful
+lookups are omitted), how many physical devices NVK returned and what they are
+called, and the sysconf sizing hint used by NVK's heap heuristic. Routine
+successful queue submits and low-latency fence waits are not logged individually; they are
+aggregated into the periodic performance report. The diagnostic logger flushes
+lines for immediate reading but does not `fsync` each one, avoiding an SD-card
+sync on every Vulkan call. A run whose log ends without `host exiting normally`
+did not exit cleanly — the last line before the gap names the stage that died.
+
+Every 300 presented frames the diagnostic build writes a compact `perf:` block,
+which turns "it stutters" into a number. The first line also states the detected
+panel sync rate separately from the optional LSFG target; the sync line adds
+pacer wait totals/maxima, skipped refresh deadlines, late submits, and fence wait
+totals/maxima. A missed vblank deadline does not add another full refresh of sleep: the
+software pacer submits the late frame as soon as it can and counts the missed
+refresh. On the pinned NXVK build, MAILBOX uses interval 0 only in
+`NVK_LOW_LATENCY=1` mode; the default MAILBOX path remains interval 1. Interval
+zero is not vblank-locked or guaranteed tear-free. A hitch line includes the
+pacer and fence time for the worst frame.
+Routine per-submit/per-fence traces are intentionally suppressed:
+
+```
+perf: 300 presents / 5.981 s = 50 fps | worst 82.4 ms | 1% low 23 fps | stalls 0 | panel_hz=50 | lsfg off src=0 lsfg_target=60 gen=0
+perf: cpu EE 68% GS 58% MTVU 48% | fastmem lazy 0 faults/0 pages, limit 0, map-fail 0, ...
+perf: gpu blocked fence 300 x 8.1 ms (0%) + polls 0, queue-idle 0 x 0.0 ms (0%) | pipelines 5 x 3.1 ms (0%) | vk acquire 300 x 41.2 ms (1%) submit 300 x 96.0 ms (2%) present 300 x 12.4 ms (0%) | cmds barrier 130002 copy2buf 0 copyimg 13046 blit 0
+perf: pace_hz=50 calls=300 waits=300 total=5560.0 max=18.0 ms skipped=0 late=0 | fence waits=300 total=24.0 max=2.0 ms
+perf: hitch 82.4 ms (1 frame(s) over 40 ms this window) | vk acquire 0.1 submit 12.4 present 0.9 ms | sync pace 14.0 fence 0.2 ms | ... | cpu EE 51.0 GS 12.0 MTVU 8.4 ms | io read 3 x 96 KiB blocked 61.2 ms
+```
+
+The first three lines are per-window totals and answer what a stretch of play is
+limited by: CPU share per heavy thread, time actually blocked waiting on the GPU,
+pipelines compiled at runtime, how long the presenting thread sat inside the
+three calls that can block on the GPU without a fence (`acquire` on a FIFO
+swapchain with no free image, `submit`, `present` on a compositor that cannot
+take the frame), and how many copies and barriers the renderer issued. In the
+first line, `presents` counts emulator source presents; under fractional LSFG it
+does not include inserted outputs. `gen` counts generated frames whose present
+succeeded during that window, not merely frames the scheduler requested.
+Because the mode/source label is sampled when the report is emitted, toggling
+LSFG within a window can mix its counters. The
+fourth is the compact pacing summary; it explicitly distinguishes the shared
+panel rate from LSFG's own target and reports whether the pacer is sleeping,
+missing deadlines, or skipping refreshes. The fifth appears only when a single
+frame took 40 ms or more — two dropped PAL frames — and differences the same
+counters across that one frame. Per-window and per-frame views are both needed:
+82 ms is 1.4% of a 6 s window, so it hides inside every percentage there, and a
+Gran Turismo 3 log measured exactly that (worst frame 82.4 ms in a window
+reporting EE 68% and no GPU wait at all).
+
+At startup the same log prints the settings the run actually used
+(`settings upscale=2.00 crc=4 hwdl=3 ...` and a second line
+`settings-gpu blend=1 mipmap=1 preload=2 ...`), read back from the store the core
+reads. Without it a log can only be decoded from the core's own
+`[Unsafe Settings]` warnings, which name a setting when it differs from a default
+but never say to what, and never mention one the core does not consider unsafe.
+
+`tools/check_ini_keys.py` compares every key the launcher writes against the
+strings of the core it ships. A key spelled differently on the two sides is
+silent and total: the row appears in the menu, the value lands in the ini, the
+core never asks for it. FXAA was dead that way from the commit that added it --
+the launcher wrote `EmuCore/GS/FXAA` while the core binds `"fxaa"`.
 
 ### How to build
 
@@ -96,21 +403,72 @@ pacman -S devkitA64 switch-tools libnx switch-sdl2 switch-sdl2_ttf \
           switch-ntfs-3g switch-libpng deko3d
 ```
 
-Provide a compatible Mesa NVK package under `vulkan/include` and `vulkan/lib`.
-Extract the 4248 and 3668 APKs into sibling folders named
-`NetherSX2-v2.2n-4248` and `NetherSX2-v2.2n-3668`, or set `CORES_DIR` to the
-folder containing them. Alternatively, extract the supplied inputs without
-installing the Mesa SDK into the toolchain:
+Install the NVK driver as a portlib package, which is what the build looks for
+first (`pkg-config --exists nxvk`):
+
+```sh
+tar -xzf nxvk-vulkan-tegra-x1.tar.gz -C "$DEVKITPRO/portlibs/switch"
+```
+
+`nxvk.pc` carries the whole link line, including `--whole-archive` and
+`-u,vk_icdGetInstanceProcAddr`. Its `prefix` is baked to
+`/opt/devkitpro/portlibs/switch`, so extract it there rather than somewhere
+else. An older vendored tree under `vulkan/include` and `vulkan/lib` is still
+accepted as a fallback; it exports the public entry points itself, so the
+`NETHERSX2_NVK_ICD_ONLY` shim and loader stay off for it.
+
+`NXVK_EXPECTED_SHA256` in the Makefile pins the exact candidate tarball used by
+CI; CI fails if `berlint-hub/TEST3` serves anything else. The core is pinned in
+`source/deko3d/dk_profiles.h`. CI checks the selected bundle core hash and
+GSDevice/HostDisplay vtables against the profile; this is not a Vulkan device
+runtime check. The `dk_install_native_backend()` hash/vtable check is only used
+when installing Deko3D, which the shipped Vulkan build does not do. CI pins
+`berlint-hub/TEST3` at commit
+`0f5878e08cd37dd25b23ba5e090ae5c292560eca` from `arena/8b264db8-test3`, and
+uses `assets_4248/` plus
+`4248/arm64-v8a/libemucore_tegrax1_spinrelax.so` from that exact tree. The core
+SHA-256 is `b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01`;
+CI's `tools/check_deko3d_build.py` checks all GSDevice and HostDisplay vtable
+entries and the core hash. The Vulkan asset check verifies the required shader
+files are present and bundled. The selected core is the TEST3 `spinrelax` variant. TEST3
+produces it with the post-build command
+`tools/patch_tegra_x1.py --with-spin-relax`, which signature-matches 81 spin-wait
+sites and replaces each eight-instruction `isb` block with eight `yield`
+instructions. A binary comparison of the standard and spinrelax cores found
+both images are 12,162,984 bytes, with 648 changed words at those 81 locations;
+the checked `.rodata`, `.data.rel.ro`, GOT, relocation, and listed vtable regions
+were unchanged. This is a behavioral spin-wait change that can shift timing, not
+a verified performance gain or a prerequisite for P0 #1. No on-device timing
+comparison is available. The wrapper/core startup log identifies the selected
+variant as `spinrelax`. NXVK is pinned by its tarball SHA-256
+(`c7b551c8839040dd20c9bd462621ee672ee0e025a053d378737ea29a4f3e7f74`); its
+BUILDINFO identifies NXVK commit `d6dcd9fb860e398abb8081bc5d23c38d4162052e`,
+Mesa 26.2.2, and build run `40103062558`. This package includes the low-latency
+WSI interval fix. The combination still requires on-device runtime validation.
+
+The core is based on NetherSX2 v2.2n-4248 and includes five length-preserving
+Tegra X1 patches from
+[mininxd/NetherSX2-patch](https://github.com/mininxd/NetherSX2-patch).
+`patch_game()` applies those patches at load time.
+
+Extract the 4248 APK into a folder named `NetherSX2-v2.2n-4248`, or set
+`CORES_DIR` to the folder containing it. `--apk-3668` is still accepted for a
+two-core tree but is no longer required, and nothing bundles a 3668 image.
+Alternatively, extract the supplied inputs without installing the Mesa SDK into
+the toolchain:
 
 ```sh
 python3 tools/prepare_build_inputs.py --apk-4248 /path/to/NetherSX2-v2.2n-4248.apk \
-  --apk-3668 /path/to/NetherSX2-v2.2n-3668.apk --mesa-sdk /path/to/mesa-sdk.zip
+  --mesa-sdk /path/to/mesa-sdk.zip
 export MESA_SDK_ROOT="$PWD/out/mesa-sdk"
 ```
 
 CMake, Ninja, Git, Bison, Flex, Python, and Python Mako are required. The build
-downloads pinned libsmb2, libusbhsfs, UAM and SPIRV-Cross revisions. Deko3D is
-built as an independent emulator NRO and bundled alongside the existing backends.
+downloads pinned libsmb2 and libusbhsfs revisions for the launcher's storage
+support, and pinned UAM and SPIRV-Cross revisions for the native Deko3D shader
+compiler, which the shader-validation test uses. `build_all.sh` builds the
+Vulkan emulator and the launcher, bundles both cores and their resources, then
+verifies the result with `tools/check_deko3d_build.py`.
 
 ```sh
 ./build_all.sh

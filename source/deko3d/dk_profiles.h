@@ -22,12 +22,45 @@ inline constexpr uint32_t Host3668[]{
   0x7daba0,0x7daca0,0x7dad00,0x7dad80,0x7db170,0x7dad90,0x7dae60,0x7daee0,
   0x7daef0,0x7daf00,0x7daf10,0x7db1d0,0x7da800,0x7da9e0,0x7db370,0x7db430,
   0x7daaa0,0x7db270,0x7db2d0,0x7db360,0x2f3e70,0x7db6e0,0x7db890};
+// Profile4248 pins libemucore_tegrax1_spinrelax.so from TEST3: the NetherSX2
+// v2.2n-4248 Tegra X1 core with the spin-relax variant, plus five length-
+// preserving patches taken from mininxd/NetherSX2-patch:
+// scale-unclamp (drops the 0.5x GS multiplier floor), Full Texture Hash Cache
+// as the default in both the preferences and GSSettings::Load paths, and two
+// preset-reset sites turned into NOPs so applying a performance preset stops
+// wiping memory cards, achievements and control bindings.
+//
+// Unlike the BAKED blobs this profile used to pin, the sixteen sites in
+// g_patches_4248[] are PRISTINE here -- every one still holds the instruction
+// named in its .expect field -- so patch_game() is no longer a no-op: it
+// detects "v2.2n-4248" at the offset detect_core_version() looks for and
+// applies all of them at load time. That is the path this table was written
+// for; the baked cores merely had it applied ahead of time.
+//
+// CI verifies this image's SHA-256 and all GSDevice/HostDisplay vtable slots
+// against this profile; none of the five Tegra patch sites collides with a
+// profile offset or vtable slot. Its 338 dynamic imports are the same set the
+// baked core had, all resolved by source/imports.c, and it still imports AAudio
+// (20 symbols, no OpenSL ES), so source/aaudio.c is the audio path.
+//
+// dk_install_native_backend() uses this profile for its runtime hash/vtable
+// check only when the Deko3D backend is installed. The shipped Vulkan build
+// does not call that function: its selected-core hash/profile validation is a
+// CI check, not a Vulkan device-runtime check.
+//
+// Profile3668 is retained because dk_core.cpp selects between the two at
+// runtime, but no 3668 core ships: the product is Vulkan-only with a single
+// core. The XGKickSkip preference is 3668-only and therefore inert.
+//
+// Keep these comments OUTSIDE the CoreProfile{...} braces: verify_profiles() in
+// tools/check_deko3d_build.py reads the vtable addresses out of the brace body
+// and any hex literal in there would be parsed as an address.
 inline constexpr CoreProfile Profile4248{
-  "4248", "6f4473845483fa2e7be9d1e8aeac17cd12561d8153d51201037826b9c1b5ffde",
+  "4248", "b2dd3b6bf7c7a90fdfc80456b1b373d4b2152e74057b6b68bc03b801535c5f01",
   0xb78a20,0xb7ed58,0x6156b0,0x64ff20,0xc6cb5c0,0xa39200,0xa43400,
   0x78,0x75,2,Device4248,29,Host4248,0x271ce80,0xa38080};
 inline constexpr CoreProfile Profile3668{
-  "3668", "4e378da548984dc0208ff2240aae003942ae9c5a6eec3a36c838c65ac6a37a63",
+  "3668", "c99c2fede1f3a539326d16f46185986489d2153ec2c621d89e3704baa31170cb",
   0xb686c0,0xb6e280,0x625d00,0x678090,0xc6be458,0xa28c90,0xa32e90,
   0x98,0x95,3,Device3668,32,Host3668,0x270ce50,0xa27b10};
 }

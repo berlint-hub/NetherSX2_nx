@@ -100,25 +100,29 @@ static char *trim(char *s) {
   return s;
 }
 
-// Parse our flat ini: lines of "Section/Key = value", '#' (or ';') comments,
-// blank lines ignored. We deliberately do NOT honour [Section] headers -- the
-// keys the core uses are already the full "Section/Key" path, so storing them
-// flat keeps lookup a single strcmp.
+// Accept both the wrapper's historical flat keys ("Section/Key = value")
+// and ordinary INI sections ("[Section]" followed by "Key = value").
+// Keeping flat keys as-is preserves existing configs; sectioned keys are
+// flattened into the same map so JNI lookups still need only one strcmp.
 static void prefs_parse_file(const char *path) {
   FILE *f = fopen(path, "r");
-  if (!f) {
-
+  if (!f)
     return;
-  }
 
   char line[1024];
+  char section[PREFS_KEY_LEN] = "";
   while (fgets(line, sizeof(line), f)) {
     char *p = trim(line);
     if (p[0] == 0 || p[0] == '#' || p[0] == ';')
       continue;
-    // skip any [Section] header line defensively; we use flat keys.
-    if (p[0] == '[')
+    if (p[0] == '[') {
+      char *close = strchr(p + 1, ']');
+      if (!close)
+        continue;
+      *close = 0;
+      snprintf(section, sizeof(section), "%s", trim(p + 1));
       continue;
+    }
 
     char *eq = strchr(p, '=');
     if (!eq)
@@ -128,7 +132,23 @@ static void prefs_parse_file(const char *path) {
     char *val = trim(eq + 1);
     if (key[0] == 0)
       continue;
-    prefs_put(key, val);
+    if (section[0] && !strchr(key, '/')) {
+      char full_key[PREFS_KEY_LEN];
+      size_t section_len = strlen(section);
+      size_t key_len = strlen(key);
+      if (section_len > sizeof(full_key) - 3)
+        section_len = sizeof(full_key) - 3;
+      const size_t max_key_len = sizeof(full_key) - section_len - 2;
+      if (key_len > max_key_len)
+        key_len = max_key_len;
+      memcpy(full_key, section, section_len);
+      full_key[section_len] = '/';
+      memcpy(full_key + section_len + 1, key, key_len);
+      full_key[section_len + 1 + key_len] = 0;
+      prefs_put(full_key, val);
+    } else {
+      prefs_put(key, val);
+    }
   }
 
   fclose(f);
@@ -172,6 +192,14 @@ static void prefs_seed_defaults(void) {
   // "4:3", "16:9". Editable in nethersx2.ini.
   prefs_seed("EmuCore/GS/AspectRatio", "4:3");
   prefs_seed("EmuCore/GS/VsyncEnable", "0");
+  // Opt-in NVK low-latency presentation. Both EmuCore/GS/low_latency and
+  // [EmuCore/GS] low_latency are accepted; main.c exports it as
+  // NVK_LOW_LATENCY before Vulkan initializes.
+  prefs_seed("EmuCore/GS/low_latency", "0");
+  prefs_seed("Wrapper/SyncFrameLimitToDisplay", "false");
+  // Automatically use the SaltyNX/FPSLocker cadence bridge when its shared
+  // block is detected. This does not enable NVK low-latency presentation.
+  prefs_seed("Wrapper/AutoSyncFPSLocker", "true");
 #if GS_RENDERER == GS_RENDERER_VK
   // Keep presentation work off the GS thread by default. The two bundled cores
   // use opposite names for the same state.
@@ -262,27 +290,45 @@ void prefs_init(const char *ini_path) {
   prefs_seed_defaults();
   prefs_remove("Wrapper/LSFGDllPath");
   const float lsfg_flow = prefs_get_float("Wrapper/LSFGFlowScale", 0.25f);
-  if (lsfg_flow != 0.25f && lsfg_flow != 0.5f)
+  if (lsfg_flow != 0.125f && lsfg_flow != 0.25f && lsfg_flow != 0.5f &&
+      lsfg_flow != 1.0f)
     prefs_set_float("Wrapper/LSFGFlowScale", lsfg_flow > 0.375f ? 0.5f : 0.25f);
 }
 
-void prefs_save(void) {
+static void prefs_save_internal(const char *override_key1, const char *override_value1,
+                                const char *override_key2, const char *override_value2) {
   if (s_ini_path[0] == 0)
     return;
 
   FILE *f = fopen(s_ini_path, "w");
-  if (!f) {
-
+  if (!f)
     return;
-  }
 
   fputs("# NetherSX2 settings -- auto-written; edit with the emulator stopped\n",
         f);
   // Insertion order: stable and readable; the core never relies on ordering.
-  for (int i = 0; i < s_count; ++i)
-    fprintf(f, "%s = %s\n", s_map[i].key, s_map[i].val);
+  for (int i = 0; i < s_count; ++i) {
+    const char *value = s_map[i].val;
+    if (override_key1 && strcmp(s_map[i].key, override_key1) == 0)
+      value = override_value1;
+    else if (override_key2 && strcmp(s_map[i].key, override_key2) == 0)
+      value = override_value2;
+    fprintf(f, "%s = %s\n", s_map[i].key, value);
+  }
 
   fclose(f);
+}
+
+void prefs_save(void) {
+  prefs_save_internal(NULL, NULL, NULL, NULL);
+}
+
+void prefs_save_with_float_overrides(const char *key1, float value1,
+                                     const char *key2, float value2) {
+  char value1_text[64], value2_text[64];
+  snprintf(value1_text, sizeof(value1_text), "%g", value1);
+  snprintf(value2_text, sizeof(value2_text), "%g", value2);
+  prefs_save_internal(key1, value1_text, key2, value2_text);
 }
 
 bool prefs_contains(const char *key) {

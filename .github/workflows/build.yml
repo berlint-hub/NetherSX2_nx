@@ -1,0 +1,915 @@
+# Build NetherSX2_nx na GitHub Actions.
+#
+# Proc CI a ne lokalne: devkitA64, libnx.a, switch portlibs a Mesa NVK se nedaji
+# nainstalovat v omezenem sandboxu (pkg.devkitpro.org, apt.devkitpro.org,
+# downloads.devkitpro.org, deb.debian.org, release-assets.githubusercontent.com,
+# results-receiver.actions.githubusercontent.com, registry-1.docker.io a ghcr.io
+# jsou mimo allowlist). Runner ma plny internet.
+#
+#   devkitA64 + libnx + switch-tools + portlibs -> obraz devkitpro/devkita64
+#   bison, flex, cmake, ninja, lz4              -> apt-get v tom obraze
+#   libsmb2, libusbhsfs, UAM, SPIRV-Cross       -> FetchContent z GitHubu
+#   vulkan/lib/*.a (23 archivu Mesa NVK)        -> MUSI se dodat
+#   NetherSX2-v2.2n-4248 (APK core, Tegra X1)   -> MUSI se dodat
+#
+# Bez cores a NVK se postavi DK a GL emulator + launcher (compile-level).
+# S nimi projde cely build_all.sh a vznikne finalni NetherSX2.nro.
+#
+# Diagnostika: logy runu jsou ze sandboxu nedostupne, proto klicove kroky pisou
+# `::notice::` / `::error::`, ktere jde precist pres
+#   gh api repos/<owner>/<repo>/check-runs/<job_id>/annotations
+name: build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVKITPRO: /opt/devkitpro
+  PORTLIBS: /opt/devkitpro/portlibs/switch
+
+jobs:
+  # ---------------------------------------------------------------- host tests
+  # Nepotrebuje devkitA64. Rychla zpetna vazba na logiku overitelnou na hostiteli.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host zavislosti
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ libegl-dev libgles-dev
+          # tests/patches hleda EGL/egl.h; HINTS ukazuji na $DEVKITPRO, ale
+          # find_path prohleda i systemove cesty -> systemove EGL staci.
+          test -e /usr/include/EGL/egl.h || echo "::error::EGL/egl.h chybi i po libegl-dev"
+
+      - name: Hlavicky libnx a deko3d
+        run: |
+          set -e
+          root=/tmp/dkp
+          rm -rf "$root"; mkdir -p "$root/libnx" "$root/portlibs/switch/include"
+          curl -sSL --retry 3 -o /tmp/libnx.tgz \
+            https://codeload.github.com/switchbrew/libnx/tar.gz/refs/heads/master
+          curl -sSL --retry 3 -o /tmp/deko3d.tgz \
+            https://codeload.github.com/devkitPro/deko3d/tar.gz/refs/heads/master
+          mkdir -p /tmp/libnx /tmp/deko3d
+          tar xzf /tmp/libnx.tgz   -C /tmp/libnx   --strip-components=1
+          tar xzf /tmp/deko3d.tgz -C /tmp/deko3d --strip-components=1
+          cp -r /tmp/libnx/nx/include/. "$root/libnx/include/"
+          cp /tmp/libnx/nx/switch_rules /tmp/libnx/nx/switch.specs \
+             /tmp/libnx/nx/switch.ld "$root/libnx/"
+          cp /tmp/deko3d/include/deko3d.h /tmp/deko3d/include/deko3d.hpp \
+             "$root/libnx/include/"
+          echo "DEVKITPRO=$root" >> "$GITHUB_ENV"
+          n=$(find "$root/libnx/include" -name '*.h' | wc -l)
+          echo "::notice::libnx hlavicek: $n"
+          test "$n" -gt 100 || echo "::error::libnx hlavicky se nerozbalily ($n)"
+
+      - name: Validace prefs, patchu, site a LSFG (CMake + ctest)
+        run: |
+          for suite in prefs patches network lsfg; do
+            cmake -S tests/$suite -B /tmp/$suite -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              || { echo "::error::cmake configure selhal: tests/$suite"; exit 1; }
+            cmake --build /tmp/$suite || { echo "::error::build selhal: tests/$suite"; exit 1; }
+            ctest --test-dir /tmp/$suite --output-on-failure \
+              || { echo "::error::ctest selhal: tests/$suite"; exit 1; }
+          done
+
+      - name: Validace nativniho Deko3D backendu
+        run: |
+          # shader_validation preskoceno: linkuje `uam`, jehoz CMake vyzaduje
+          # bison+flex. V kontejnerovem jobu se UAM stavi jako soucast DK buildu.
+          fail=0
+          for t in transfer render_target vertex_format render_state presentation; do
+            src="tests/deko3d/${t}_validation.cpp"; extra=""
+            [ "$t" = presentation ] && extra="source/deko3d/dk_presentation.cpp"
+            if g++ -std=c++20 -O1 -Isource/deko3d -I"$DEVKITPRO/libnx/include" \
+                   $src $extra -o "/tmp/dk_$t"; then
+              out=$("/tmp/dk_$t") && echo "::notice::deko3d/$t: $out" \
+                || { echo "::error::deko3d/$t selhal za behu"; fail=1; }
+            else
+              echo "::error::deko3d/$t neslo zkompilovat"; fail=1
+            fi
+          done
+          exit $fail
+
+  # ------------------------------------------------------------- switch build
+  switch:
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/devkitpro/devkita64:latest
+      options: --user root
+    steps:
+      - name: Nastroje, ktere v obraze chybi
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq || echo "::warning::apt-get update selhal"
+          apt-get install -y --no-install-recommends \
+            git curl ca-certificates bison flex cmake ninja-build make g++ \
+            pkg-config python3 python3-pip liblz4-dev zlib1g-dev \
+            || echo "::warning::nektere apt balicky nejdou nainstalovat"
+          python3 -m pip install --break-system-packages --no-cache-dir mako 2>/dev/null \
+            || python3 -m pip install --no-cache-dir mako 2>/dev/null \
+            || echo "::warning::mako se nepodarilo nainstalovat"
+          echo "::notice::bison=$(bison --version 2>/dev/null | head -1) flex=$(flex --version 2>/dev/null) cmake=$(cmake --version 2>/dev/null | head -1)"
+          # switch_rules vola elf2nro/elf2nso/elf2kip/nacptool/npdmtool/build_pfs0
+          for t in elf2nro elf2nso elf2kip nacptool npdmtool build_pfs0; do
+            command -v "$t" >/dev/null || echo "::error::chybi switch-tool: $t"
+          done
+
+      - uses: actions/checkout@v4
+
+      - name: Inventar sysrootu
+        run: |
+          # Diagnostika misto logu, ktere ze sandboxu nejde stahnout.
+          say() { echo "::notice::$1"; }
+          say "DEVKITPRO=$DEVKITPRO existuje=$([ -d "$DEVKITPRO" ] && echo ano || echo ne)"
+          command -v pacman >/dev/null && say "pacman=$(pacman --version 2>/dev/null | head -1)" \
+            || say "pacman NENI v PATH"
+          command -v dkp-pacman >/dev/null && say "dkp-pacman dostupny" || true
+          [ -f "$DEVKITPRO/cmake/Switch.cmake" ] && say "cmake/Switch.cmake OK" \
+            || echo "::error::chybi $DEVKITPRO/cmake/Switch.cmake"
+          [ -f "$DEVKITPRO/libnx/lib/libnx.a" ] && say "libnx.a OK" \
+            || echo "::error::chybi libnx.a"
+          [ -f "$DEVKITPRO/devkitA64/base_rules" ] && say "base_rules OK" \
+            || echo "::error::chybi devkitA64/base_rules"
+          say "portlibs lib: $(ls "$PORTLIBS/lib" 2>/dev/null | grep -c '\.a$') archivu"
+          say "portlibs .pc: $(ls "$PORTLIBS/lib/pkgconfig" 2>/dev/null | wc -l) souboru"
+          for l in SDL2 SDL2_ttf SDL2_image curl z zstd png turbojpeg EGL GLESv2 \
+                   glapi drm_nouveau ntfs-3g deko3d nx; do
+            found=$(find "$DEVKITPRO" -name "lib$l.a" 2>/dev/null | head -1)
+            [ -n "$found" ] && say "lib$l.a -> $found" || echo "::error::lib$l.a CHYBI"
+          done
+
+      - name: Doplnit chybejici portlibs
+        run: |
+          # Nikdy nesmi shodit job: obraz uz cast portlibs ma a zbytek se jen
+          # zkusí doinstalovat. Rozhodujici je inventar vyse a build kroky nize.
+          PM=$(command -v pacman || command -v dkp-pacman || true)
+          if [ -z "$PM" ]; then echo "::warning::pacman neni, preskakuji doinstalaci"; exit 0; fi
+          # switch-zstd neexistuje jako balicek; zstd je v obraze uz od zacatku.
+          need="switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-curl switch-libpng \
+                switch-ntfs-3g switch-mesa switch-libdrm_nouveau deko3d switch-zlib \
+                switch-libjpeg-turbo"
+          for p in $need; do
+            if "$PM" -S --needed --noconfirm --disable-download-timeout "$p" >/tmp/pm.log 2>&1; then
+              echo "::notice::portlib OK: $p"
+            else
+              echo "::warning::portlib SELHAL: $p -- $(tail -2 /tmp/pm.log | tr '\n' ' ' | cut -c1-180)"
+            fi
+          done
+          exit 0
+
+      - name: Vstupy z TEST3 (cores + NXVK)
+        run: |
+          # Cores ani Mesa NVK nemohou zit v tomhle repu. berlint-hub/TEST3 je
+          # drzi jako binarni bloby a git clone pres github.com funguje; raw
+          # contents API a Actions artefakty nejsou potřeba.
+          rm -rf /tmp/TEST3
+          # Pin both the TEST3 ref and commit: its NXVK archive is a mutable
+          # uploaded blob, so cloning only the branch can silently select a
+          # newer driver whose SHA does not match this build's Makefile pin.
+          TEST3_REF="arena/8b264db8-test3"
+          TEST3_COMMIT="0f5878e08cd37dd25b23ba5e090ae5c292560eca"
+          git clone --depth 1 --branch "$TEST3_REF" \
+            https://github.com/berlint-hub/TEST3.git /tmp/TEST3 \
+            || { echo "::error::clone TEST3 selhal (ref $TEST3_REF)"; exit 1; }
+          git -C /tmp/TEST3 fetch --depth 1 origin "$TEST3_COMMIT" \
+            || { echo "::error::fetch pinned TEST3 commit $TEST3_COMMIT selhal"; exit 1; }
+          git -C /tmp/TEST3 checkout --detach "$TEST3_COMMIT" \
+            || { echo "::error::checkout pinned TEST3 commit $TEST3_COMMIT selhal"; exit 1; }
+          echo "::notice::TEST3 ref $TEST3_REF pinned commit $(git -C /tmp/TEST3 rev-parse HEAD)"
+
+          # 1) NXVK jako portlib balicek. switch/docs/bringing-an-application.md:
+          #    tar -xzf ... -C "$DEVKITPRO/portlibs/switch". prefix v nxvk.pc je
+          #    napevno /opt/devkitpro/portlibs/switch, proto se rozbaluje primo
+          #    tam a pkg-config ho pak najde bez nastavovani PKG_CONFIG_PATH.
+          tb=/tmp/TEST3/nxvk-vulkan-tegra-x1.tar.gz
+          if [ -f "$tb" ]; then
+            got=$(sha256sum "$tb" | cut -d' ' -f1)
+            # Pinovano v Makefile, stejne jako jsou jadra pinovana v dk_profiles.h.
+            # TEST3 drzi blob a klonuje se jeho main, takze bez tohle driver muze
+            # mezi dvema behy stejneho commitu repu potichu vymenit -- a jednou se
+            # to stalo: zmenila se vetev, commit i build run nxvk.
+            want=$(sed -n 's/^NXVK_EXPECTED_SHA256 ?= \([0-9a-f]\{64\}\).*/\1/p' Makefile)
+            echo "::notice::NXVK tarball $(stat -c%s "$tb") B, sha256 $got"
+            if [ -z "$want" ]; then
+              echo "::error::v Makefile se nepodarilo najit NXVK_EXPECTED_SHA256"; exit 1
+            fi
+            if [ "$got" != "$want" ]; then
+              echo "::error::NXVK tarball: sha256 neodpovida hodnote pripnute v Makefile"
+              echo "::error::  TEST3 ma  $got"
+              echo "::error::  repo ceka $want"
+              # Kdo to je zac: BUILDINFO primo z tarballu, bez rozbalovani.
+              tar -xzOf "$tb" --wildcards '*BUILDINFO.txt' 2>/dev/null \
+                | grep -E "^(Commit|Ref|Build run|Mesa version):" \
+                | sed 's/%/%25/g; s/^/::error::  BUILDINFO /' || true
+              echo "::error::  over novy driver na zarizeni, potom pin v Makefile aktualizuj"
+              exit 1
+            fi
+            tar -xzf "$tb" -C "$DEVKITPRO/portlibs/switch" \
+              || { echo "::error::NXVK tarball nejde rozbalit"; exit 1; }
+            # BUILDINFO.txt = atributovatelnost (commit, ref, build run, Mesa,
+            # toolchain). Zaloguje se po radcich a jde i do artefaktu.
+            # paste, ne tr: tr mapuje po znacich, takze by oddelovac zahodil.
+            grep -E "^(Source|Commit|Ref|Build run|Mesa version|Toolchain image):" \
+              "$DEVKITPRO/portlibs/switch/BUILDINFO.txt" | paste -sd '|' - \
+              | sed 's/%/%25/g; s/^/::notice::NXVK BUILDINFO /' || true
+            cp "$DEVKITPRO/portlibs/switch/BUILDINFO.txt" nxvk-BUILDINFO.txt
+          else
+            echo "::warning::TEST3 neobsahuje nxvk-vulkan-tegra-x1.tar.gz -> RENDERER=VK se preskoci"
+          fi
+
+          # 2) Core + APK assets: use the requested spinrelax 4248 core and
+          #    Vulkan resources from the same pinned TEST3 commit. Remap them
+          #    into the APK-like tree expected by build_all.sh and validators.
+          root="$(dirname "$PWD")"
+          so="/tmp/TEST3/4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"
+          assets="/tmp/TEST3/assets_4248"
+          [ -f "$so" ] || { echo "::error::TEST3 neobsahuje 4248/arm64-v8a/libemucore_tegrax1_spinrelax.so"; exit 1; }
+          [ -f "$assets/GameIndex.yaml" ] || { echo "::error::TEST3 assets_4248/GameIndex.yaml chybi"; exit 1; }
+          [ -s "$assets/shaders/vulkan/tfx.glsl" ] || { echo "::error::TEST3 assets_4248 Vulkan tfx.glsl chybi"; exit 1; }
+          mkdir -p "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a"
+          cp "$so" "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so"
+          cp -r "$assets" "$root/NetherSX2-v2.2n-4248/assets"
+          echo "::notice::core tegrax1 $(stat -c%s "$so") B sha256 $(sha256sum "$so" | cut -d' ' -f1)"
+          echo "::notice::assets_4248 from TEST3 commit $TEST3_COMMIT, Vulkan shaders $(find "$assets/shaders/vulkan" -maxdepth 1 -type f -name '*.glsl' | wc -l)"
+          # Po predchozich dvoujadrovych buildech muze zbyt strom pro 3668.
+          # Bundle by ho jinak nesl dal, i kdyz v nem zadne jadro neni.
+          rm -rf "$root/NetherSX2-v2.2n-3668"
+
+      - name: Vulkan (Mesa NVK) -- povinne
+        id: nvk
+        run: |
+          # Balicek je rozbaleny v $DEVKITPRO/portlibs/switch, ale cross
+          # pkg-config muze byt na nekolika mistech a jeho vychozi search path
+          # nemusi portlibs obsahovat. Vsechny kombinace se vyzkousi a kazdy
+          # pokus se zaloguje, aby detekce a Makefile nemohly nesouhlasit
+          # potichu (presne to se stalo v runu 38968866220).
+          lib="$DEVKITPRO/portlibs/switch/lib"
+          pcdir="$lib/pkgconfig"
+          nm="$DEVKITPRO/devkitA64/bin/aarch64-none-elf-nm"
+          echo "::notice::libnvk.a: $([ -f "$lib/libnvk.a" ] && stat -c%s "$lib/libnvk.a" || echo CHYBI) B"
+          echo "::notice::libnvk_support.a: $([ -f "$lib/libnvk_support.a" ] && stat -c%s "$lib/libnvk_support.a" || echo CHYBI) B"
+          echo "::notice::nxvk.pc: $([ -f "$pcdir/nxvk.pc" ] && echo nalezeno || echo CHYBI)"
+          if [ ! -f "$lib/libnvk.a" ] || [ ! -f "$pcdir/nxvk.pc" ]; then
+            echo "::error::portlib balicek nxvk je nekompletni: libnvk.a nebo nxvk.pc chybi"
+            exit 1
+          fi
+          win_pc=""; win_ld=""
+          for cand in "$DEVKITPRO/devkitA64/bin/aarch64-none-elf-pkg-config" \
+                      "$DEVKITPRO/portlibs/switch/bin/aarch64-none-elf-pkg-config" \
+                      "$(command -v aarch64-none-elf-pkg-config 2>/dev/null)" \
+                      "$(command -v pkg-config 2>/dev/null)"; do
+            [ -n "$cand" ] && [ -x "$cand" ] || continue
+            for ld in "" "$pcdir"; do
+              if [ -n "$ld" ]; then
+                out=$(PKG_CONFIG_LIBDIR="$ld" "$cand" --modversion nxvk 2>&1) && rc=0 || rc=1
+              else
+                out=$("$cand" --modversion nxvk 2>&1) && rc=0 || rc=1
+              fi
+              echo "::notice::probe: $cand [LIBDIR=${ld:-vychozi}] rc=$rc ${out}"
+              if [ "$rc" = 0 ]; then win_pc="$cand"; win_ld="$ld"; break 2; fi
+            done
+          done
+          if [ -z "$win_pc" ]; then
+            echo "::error::zadny pkg-config nenasel nxvk"
+            exit 1
+          fi
+          echo "present=1" >> "$GITHUB_OUTPUT"
+          # PKG_CONFIG_LIBDIR se NEexportuje globalne -- vyradil by launcheru
+          # hledani sdl2.pc. Putuje primo do promenne, kterou Makefile expanduje
+          # do shellu, takze plati jen pro nxvk.
+          if [ -n "$win_ld" ]; then
+            echo "NXVK_PKG_CONFIG=PKG_CONFIG_LIBDIR=$win_ld $win_pc" >> "$GITHUB_ENV"
+          else
+            echo "NXVK_PKG_CONFIG=$win_pc" >> "$GITHUB_ENV"
+          fi
+          echo "::notice::nxvk $(PKG_CONFIG_LIBDIR="${win_ld:-$pcdir}" "$win_pc" --modversion nxvk) nalezen pres $win_pc [LIBDIR=${win_ld:-vychozi}]"
+          # Makefile zapne -DNETHERSX2_NVK_ICD_ONLY prave proto, ze libnvk.a
+          # exportuje JEN vk_icdGetInstanceProcAddr (na Horizonu neni loader).
+          defined=$("$nm" --defined-only "$lib/libnvk.a" 2>/dev/null || true)
+          icd=$(printf '%s\n' "$defined" | grep -c ' T vk_icdGetInstanceProcAddr$' || true)
+          plain=$(printf '%s\n' "$defined" | grep -c ' T vkGetInstanceProcAddr$' || true)
+          echo "::notice::libnvk.a: vk_icdGetInstanceProcAddr=${icd}x, vkGetInstanceProcAddr=${plain}x"
+          if [ "$icd" = "0" ]; then
+            echo "::error::libnvk.a nedefinuje vk_icdGetInstanceProcAddr"; exit 1
+          fi
+          if [ "$plain" != "0" ]; then
+            echo "::warning::libnvk.a exportuje i vkGetInstanceProcAddr -> shim v source/hooks/vk.c by kolidoval"
+          fi
+          PKG_CONFIG_LIBDIR="${win_ld:-$pcdir}" "$win_pc" --libs nxvk | sed 's/^/::notice::nxvk.pc Libs: /'
+
+      - name: Core (NetherSX2 v2.2n-4248 Tegra X1) -- povinny
+        id: cores
+        run: |
+          root="$(dirname "$PWD")"
+          if [ -f "$root/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so" ]; then
+            echo "present=1" >> "$GITHUB_OUTPUT"; echo "CORES_DIR=$root" >> "$GITHUB_ENV"
+            echo "::notice::core nalezen v $root"
+            # Hash kazdeho jadra a krizova kontrola proti hodnote pripnute v
+            # source/deko3d/dk_profiles.h: kdyz se blob v TEST3 zmeni, spadne to
+            # tady s jasnou zpravou, ne az v check_deko3d_build.py o tri minuty
+            # pozdeji. Overuje se premapovany soubor, tedy presne to, co jde do
+            # bundle.
+            # Smycka je schvalne: telo je takove, ze navrat druheho jadra
+            # staci pridat do seznamu, a presence-driven nastroje
+            # (check_deko3d_build.py, bundle_resources.py) to zvladnou same.
+            for v in 4248; do
+              so="$root/NetherSX2-v2.2n-$v/lib/arm64-v8a/libemucore.so"
+              [ -f "$so" ] || continue
+              got=$(sha256sum "$so" | cut -d' ' -f1)
+              want=$(sed -n "s/.*\"$v\", \"\([0-9a-f]\{64\}\)\".*/\1/p" source/deko3d/dk_profiles.h)
+              echo "::notice::core $v $(stat -c%s "$so") B sha256 $got"
+              if [ -z "$want" ]; then
+                echo "::error::v dk_profiles.h se nepodarilo najit pripnuty hash pro $v"; exit 1
+              fi
+              if [ "$got" != "$want" ]; then
+                echo "::error::core $v: sha256 neodpovida hodnote v dk_profiles.h"
+                echo "::error::  TEST3 ma $got"
+                echo "::error::  repo ceka $want"
+                exit 1
+              fi
+            done
+          else
+            echo "::error::core v $root chybi -> bez nej nejde postavit bundle"
+            exit 1
+          fi
+
+      - name: Storage deps (libsmb2 + libusbhsfs)
+        run: |
+          cmake -S launcher/dependencies -B launcher/dependencies/build -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+                -DCMAKE_BUILD_TYPE=Release \
+            || { echo "::error::configure storage deps selhal (chybi switch-ntfs-3g?)"; exit 1; }
+          cmake --build launcher/dependencies/build --parallel "$(nproc)" \
+            || { echo "::error::build storage deps selhal"; exit 1; }
+
+      - name: Devaty test -- assets Vulkan shaderu z core 4248
+        run: |
+          set -eu
+          # Tento produkt bundluje Vulkan/NVK, ne Deko3D. TEST3 assets_4248
+          # z aktualniho pinu obsahuje Vulkan GLSL a zamerne nema OpenGL shader
+          # strom, ktery potrebuje deko3d_shader_validation/UAM.
+          assets="$CORES_DIR/NetherSX2-v2.2n-4248/assets"
+          shader_dir="$assets/shaders/vulkan"
+          [ -f "$assets/GameIndex.yaml" ] || { echo "::error::assets_4248/GameIndex.yaml chybi"; exit 1; }
+          [ -d "$shader_dir" ] || { echo "::error::assets_4248/shaders/vulkan chybi"; exit 1; }
+          count=0
+          for shader in cas convert interlace merge present shadeboost tfx; do
+            file="$shader_dir/$shader.glsl"
+            [ -s "$file" ] || { echo "::error::Vulkan shader chybi nebo je prazdny: $file"; exit 1; }
+            echo "::notice::Vulkan shader $shader.glsl $(stat -c%s "$file") B sha256 $(sha256sum "$file" | cut -d' ' -f1)"
+            count=$((count + 1))
+          done
+          echo "::notice::TEST3 assets_4248: $count povinnych Vulkan shaderu overeno"
+
+      - name: Emulator -- Vulkan (NVK)
+        run: |
+          echo "::notice::make pouzije NXVK_PKG_CONFIG=${NXVK_PKG_CONFIG:-<default>}"
+          # Logy jobu se odsud nedaji stahnout (blob storage mimo allowlist),
+          # proto se pri selhani vypise do anotaci -- GitHub jich na krok pusti
+          # max 10 na uroven, tak 8 chybovych radku + 1 slouceny tail.
+          log=/tmp/vk.log
+          set +e
+          # Build ID = commit + cislo behu, aby byl kazdy log ze zarizeni
+          # pripsatelny konkretnimu .nro (TEST3 diag-notes S5, item 2).
+          # GITHUB_SHA, ne "git rev-parse": v kontejneru devkita64 git vypsal
+          # prazdny retezec (repo patri runner uid, prikaz bezi pod root, a
+          # 2>/dev/null to skrylo), takze build ID vysel jako "-run<cislo>" bez
+          # commitu. Env promenna od Actions funguje bez gitu. cut -c1-7 je
+          # POSIX; ${GITHUB_SHA:0:7} by byl bashismus a kontejner pouziva dash.
+          BID="$(echo "$GITHUB_SHA" | cut -c1-7)-run${GITHUB_RUN_ID}"
+          case "$BID" in
+            -run*) echo "::error::GITHUB_SHA je prazdny, build ID by byl ${BID} -- log ze zarizeni by nesel pripsat commitu"; exit 1 ;;
+          esac
+          echo "::notice::build ID tohoto .nro: ${BID}"
+          make -j"$(nproc)" RENDERER=VK BUILD=build-vk TARGET=NetherSX2_nx_vk \
+            NETHERSX2_BUILD_ID="$BID" > "$log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" != 0 ]; then
+            echo "::error::make RENDERER=VK selhal (rc=$rc), $(wc -l < "$log") radku logu, $(grep -c 'error:' "$log" || true)x 'error:'"
+            # Kompletni deduplikovany seznam nedefinovanych symbolu do JEDNE
+            # anotace: head -8 v minule verzi usekl seznam prave tam, kde
+            # zacinala ta zajimava cast (run 38970571750).
+            grep -oE "undefined reference to .[A-Za-z0-9_.]+" "$log" | sed "s/.*to .//" \
+              | sort -u | tr '\n' ' ' | sed 's/%/%25/g; s/^/::error::VK nedefinovane symboly | /'
+            grep -E "error:|fatal error|No rule to make|cannot find" "$log" | grep -v "undefined reference" \
+              | head -6 | sed 's/%/%25/g; s/^/::error::VK | /'
+            tail -14 "$log" | tr '\n' '|' | sed 's/%/%25/g; s/^/::error::VK-tail | /'
+            exit "$rc"
+          fi
+          echo "::notice::VK nro: $(ls -la NetherSX2_nx_vk.nro 2>/dev/null)"
+          # Primy dukaz, ze -Wl,--wrap=pthread_create skutecne zasahl: mapa linku
+          # musi obsahovat oba symboly.
+          #
+          # Makefile rekurzi do $(BUILD) a linkuje odtamtud (viz pravidlo
+          # "$(BUILD): $(MAKE) -C $(BUILD)"), takze mapa je v build-vk/, ne
+          # v koreni. Run 39161401915 hledal NetherSX2_nx_vk.map v koreni, grep
+          # na neexistujici soubor vypsal nic, promenna zustala PRazdna a test
+          # [ "$wrapn" = "0" ] na prazdny retezec nesedl -- assertion prosla
+          # vakantne. Proto se tady cesta hleda a nenalezeni je error.
+          # (Samotny uspesny link je taky dukaz: pthr.c odkazuje
+          # __real_pthread_create, ktery bez --wrap neexistuje.)
+          mapf=
+          for cand in build-vk/NetherSX2_nx_vk.map NetherSX2_nx_vk.map; do
+            if [ -f "$cand" ]; then mapf="$cand"; break; fi
+          done
+          if [ -z "$mapf" ]; then
+            echo "::error::mapa linku VK targetu se nenasla (hledano build-vk/NetherSX2_nx_vk.map a NetherSX2_nx_vk.map)"
+            exit 1
+          fi
+          wrapn=$(grep -c '__wrap_pthread_create' "$mapf" || true); wrapn=${wrapn:-0}
+          echo "::notice::--wrap=pthread_create v $mapf: __wrap_pthread_create ${wrapn}x"
+          # __real_pthread_create vlastni zaznam v mape NEMA a mit ho nebude: ld
+          # ho resi jako alias na pthread_create. Run 39161853609 na tom spadl
+          # (__wrap_ 1x / __real_ 0x), ackoli wrap fungoval spravne. Dukaz, ze
+          # se alias resolvoval, je samotny uspesny link -- bez --wrap by pthr.c
+          # odkazoval nedefinovany symbol a link by spadl na undefined reference
+          # (overeno lokalne). Vypisuju tedy radky z mapy, ne pocet __real_.
+          grep -E 'pthread_create' "$mapf" | head -3 \
+            | sed 's/%/%25/g; s/^/::notice::  mapa: /' || true
+          if [ "$wrapn" = "0" ]; then
+            echo "::error::__wrap_pthread_create v $mapf chybi -- driver vlakna by zustala na vsech jadrech"
+            exit 1
+          fi
+
+      - name: Launcher (SDL2)
+        run: |
+          mkdir -p launcher/romfs/cores launcher/romfs/emu launcher/romfs/res
+          cp "$CORES_DIR/NetherSX2-v2.2n-4248/lib/arm64-v8a/libemucore.so" launcher/romfs/cores/emucore_4248.so
+          # Jedno jadro. Stale emucore_3668.so z drivejsiho dvoujadroveho
+          # buildu by jinak zustalo v romfs a zvetsilo bundle o 12 MB mrtve vahy.
+          rm -f launcher/romfs/cores/emucore_3668.so
+          cp NetherSX2_nx_vk.nro launcher/romfs/emu/
+          rm -f launcher/romfs/emu/NetherSX2_nx_dk.nro launcher/romfs/emu/NetherSX2_nx_gl.nro
+          python3 tools/bundle_resources.py --cores-dir "$CORES_DIR"
+          make -C launcher/fwd -j"$(nproc)" || { echo "::error::launcher/fwd selhal"; exit 1; }
+          make -C launcher -j"$(nproc)"     || { echo "::error::launcher selhal"; exit 1; }
+
+      - name: Kontrola bundle
+        run: |
+          # build_all.sh presouva finalni bundle do korene repa a pak ho overuje
+          mv -f launcher/NetherSX2.nro NetherSX2.nro
+          # Bez --map: Deko3D target se nestavi. verify_profiles (hashe jader +
+          # vtabulky) a verify_bundle (VK nro + cores + resources) bezi dal.
+          python3 tools/check_deko3d_build.py --cores-dir "$CORES_DIR" \
+            --bundle NetherSX2.nro \
+            || { echo "::error::check_deko3d_build.py selhal"; exit 1; }
+          # Kazdy klic, ktery launcher zapisuje do ini, musi byt presne ten
+          # retezec, na ktery se jadro pta. Jinak je radka v menu mrtva a nic to
+          # nehlasi: hodnota se zapise, jadro si ji nikdy neprecte a nastaveni
+          # nedela nic. Presne tak vypadal FXAA -- launcher psal EmuCore/GS/FXAA,
+          # jadro vaze SettingsWrapBitBoolEx(FXAA, "fxaa"), tedy malymi, a radka
+          # byla mrtva od commitu, ktery ji pridal. Dosavadni assertion dole
+          # kontroluje jen, ze launcher ten retezec OBSAHUJE, coz spravne obsahoval.
+          python3 tools/check_ini_keys.py \
+            --core launcher/romfs/cores/emucore_4248.so \
+            --strings "$DEVKITPRO/devkitA64/bin/aarch64-none-elf-strings" \
+            || { echo "::error::check_ini_keys.py selhal: launcher zapisuje klic, ktery jadro necte"; exit 1; }
+          echo "::notice::finalni bundle: $(ls -la NetherSX2.nro)"
+
+      - name: Diagnosticky bundle (VK log)
+        run: |
+          # Stejna jadra, stejny launcher, jen emulator postaveny s
+          # NETHERSX2_VK_DIAGNOSTIC=1. Ten pise do /switch/nethersx2/:
+          #   nethersx2-vulkan.log    zivotopis od main() po present, s casem
+          #   nethersx2-mesa.log      MESA_LOG_FILE + NVK_DEBUG=wsi,vm
+          #   nethersx2-exception.log pc/far/esr/sp/fp/lr pri CPU vyjimce
+          #   nethersx2-core.log      konzole jadra (Bionic logcat) + duvod
+          #                           abortu; pise se VZDY, i v produkci
+          # Vsechno line-buffered a fsync, takze log prezije i spad procesu.
+          # TARGET je jiny, aby se neprepsal produkci nro, ktery uz overila
+          # Kontrola bundle a ktery jde do artefaktu.
+          log=/tmp/diag.log
+          set +e
+          make -j"$(nproc)" RENDERER=VK BUILD=build-vk-diag TARGET=NetherSX2_nx_vk_diag \
+            NETHERSX2_VK_DIAGNOSTIC=1 \
+            NETHERSX2_BUILD_ID="$(echo "$GITHUB_SHA" | cut -c1-7)-run${GITHUB_RUN_ID}" > "$log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" != 0 ]; then
+            echo "::error::diag build selhal (rc=$rc)"
+            grep -nE "error:|undefined reference|No rule to make" "$log" \
+              | head -8 | sed 's/%/%25/g; s/^/::error::DIAG | /'
+            exit "$rc"
+          fi
+          echo "::notice::diag nro: $(ls -la NetherSX2_nx_vk_diag.nro)"
+          # Overit, ze se prepinac skutecne uplatnil. Retezec cesty k logu a
+          # format "host main entered" existuji JEN pod NETHERSX2_VK_DIAGNOSTIC,
+          # takze jejich pritomnost v binarce je dukaz. Bez tehle kontroly by
+          # diag bundle mohl byt potichu stejny jako produkce (rozdil 4096 B sam
+          # o sobe nic nedokazuje -- muze to byt i jen delsi nacp nazev targetu).
+          xstrings="$DEVKITPRO/devkitA64/bin/aarch64-none-elf-strings"
+          hits=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "nethersx2-vulkan.log" || true)
+          hits2=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "host main entered" || true)
+          prod=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "nethersx2-vulkan.log" || true)
+          # corelog (konzole jadra) je zapnuty VZDY, nezavisle na prepinaci, takze
+          # nethersx2-core.log musi byt v OBOU binarkach. Kdyby chybel, znamena to
+          # ze se source/corelog.c neskompiloval a core by opet mlcel.
+          cored=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "nethersx2-core.log" || true)
+          corep=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "nethersx2-core.log" || true)
+          # Diag-only sysconf line labels its value as a sizing hint, not total
+          # RAM or an NVK heap measurement. Only the diagnostic NRO has it.
+          scd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "sysconf(_SC_PHYS_PAGES): hint=" || true)
+          scp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sysconf(_SC_PHYS_PAGES): hint=" || true)
+          memd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "vkGetPhysicalDeviceMemoryProperties2: heaps=" || true)
+          memp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "vkGetPhysicalDeviceMemoryProperties2: heaps=" || true)
+          heapd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -F -c "perf: heap peak %llu MiB (all-time %llu MiB), heap size %llu MiB" || true)
+          heapp=$("$xstrings" NetherSX2_nx_vk.nro | grep -F -c "perf: heap peak %llu MiB (all-time %llu MiB), heap size %llu MiB" || true)
+          logd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core logging forced on" || true)
+          logp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core logging forced on" || true)
+          # Pocitadlo sched_yield je za #ifdef NETHERSX2_VK_DIAGNOSTIC, takze
+          # v produkci musi byt 0x -- stejny tvar kontroly jako sysconf-total.
+          # Odpovida na otázku, jestli MTVU na 100 % skutecne pocita, nebo
+          # spinuje naprazdno: jadro importuje sched_yield jako jedinou spin
+          # primitivu, a pocet volani za sekundu na pojmenovane vlakno to rozlisi.
+          yld=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "sched_yield: thread" || true); yld=${yld:-0}
+          ylp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "sched_yield: thread" || true); ylp=${ylp:-0}
+          # shim_describe_address() a novy text corelog_format_address() jsou v
+          # OBOU buildech (nejsou za #ifdef), takze musi byt v obou binarkach.
+          # Produkcni nro totiz po teto zmene ma naprosto stejnou velikost jako
+          # pred ni, coz je sice vysvetlitelne zarovnavanim segmentu NRO na
+          # stranku, ale velikost nic nedokazuje -- ani rozdil, ani jeho absence.
+          regd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "mmap RX (recompiler/JIT)" || true)
+          regp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "mmap RX (recompiler/JIT)" || true)
+          # Recent-context ring je naopak JEN v produkci (soft cutoff INFO je
+          # v diag buildu vypnuty), takze jeho pritomnost dokazuje, ze #ifndef
+          # zabral a ze produkce uchovava pozdni INFO kontext v RAM.
+          cutp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "128 KiB recent-context buffer" || true)
+          cutd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "128 KiB recent-context buffer" || true)
+          # Synteticke /sys a /proc soubory pro cpuinfo nejsou za zadnym
+          # #ifdef, takze musi byt v obou binarkach. "CPU implementer" je kus
+          # formatovaciho retezce /proc/cpuinfo; strings ho ukaze jako vlastni
+          # radek, protoze \n v tom retezci jsou opravdove konce radku.
+          cpud=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "CPU implementer" || true)
+          cpup=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "CPU implementer" || true)
+          # Pinovani vlaken podle role neni za zadnym #ifdef, takze musi byt
+          # v obou binarkach. Kontroluji se dva nezavisle retezce: klic
+          # preference a format logovaneho rozhodnuti. Produkcni nro ma po
+          # tehle zmene naprosto stejnou velikost jako pred ni (16 845 699 B),
+          # takze velikost tu opet nedokazuje nic -- ani rozdil, ani jeho
+          # absenci. Dokaz musi jit pres strings.
+          pind=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "Wrapper/ThreadPinning" || true)
+          pinp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/ThreadPinning" || true)
+          pfd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "core %d, mask" || true)
+          pfp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "core %d, mask" || true)
+          echo "::notice::pinovani vlaken v obou: ThreadPinning ${pind}x (diag) / ${pinp}x (produkce), log-format ${pfd}x (diag) / ${pfp}x (produkce)"
+          # Priorita EMU_THREAD_PRIO a presun driver vlaken na background jadro.
+          # "mask 0x%x, priority" je novy tvar logu pthr_pin_by_name (puvodni byl
+          # "mask 0x%x%s"), takze jeho pritomnost dokazuje i tu zmenu.
+          prid=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "driver thread -> core" || true)
+          prip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "driver thread -> core" || true)
+          emup=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "mask 0x%x, priority" || true)
+          echo "::notice::driver-pin ${prid}x (diag) / ${prip}x (produkce), priorita-v-logu ${emup}x (produkce)"
+          # Frakcni frame generation: klice preference cte vk.c, takze musi byt
+          # v oboji binarce. Bez nich by lsfg_fractional_schedule() nikdy nedostal
+          # cilovou frekvenci a rezim by se nedal zapnout.
+          fgmd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "Wrapper/LSFGMode" || true); fgmd=${fgmd:-0}
+          fgmp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/LSFGMode" || true); fgmp=${fgmp:-0}
+          fgt=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "Wrapper/LSFGTargetFPS" || true); fgt=${fgt:-0}
+          echo "::notice::frakcni frame gen: LSFGMode ${fgmd}x (diag) / ${fgmp}x (produkce), LSFGTargetFPS ${fgt}x (produkce)"
+          # Frame-timing souhrn je jen v diag buildu ( cele je to za #ifdef ),
+          # takze v produkci musi byt 0x -- stejny tvar jako sched_yield counter.
+          # TEST3 docs/logs/gt3-nvk-diag-notes.md §5 rika, ze bez frame time a
+          # FPS v logu nejde vyhodnotit zadny A/B test CPU knobu.
+          # ftd/ftp, NE pfd/pfp: ta jmena uz v tomhle kroku drzi pocty "core %d,
+          # mask" pro assertion pthr_pin_by_name(), ktera je CTE az na konci kroku.
+          # Prepsani hodnotami frame-timingu (produkce je tu zamerne 0) spustilo
+          # exit 1 v cizi kontrole -- a ::error:: anotaci pak spolkla kapacita.
+          ftd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "presents / " || true); ftd=${ftd:-0}
+          ftp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "presents / " || true); ftp=${ftp:-0}
+          # Stav VU cycle steal se loguje vzdy, i kdyz je vypnuty, aby v logu ze
+          # zarizeni nebylo "chybi radka" == "vypnuto, nebo site nesedl?".
+          vso=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "VU cycle steal: off" || true); vso=${vso:-0}
+          echo "::notice::frame timing ${ftd}x (diag, ma byt 1) / ${ftp}x (produkce, ma byt 0), VU-steal-off ${vso}x (produkce, ma byt 1)"
+          if [ "$ftd" = "0" ] || [ "$ftp" != "0" ] || [ "$vso" = "0" ]; then
+            echo "::error::frame-timing souhrn nebo log stavu VU steal neni spravne (timing diag ${ftd}x / prod ${ftp}x, VU-steal-off ${vso}x)"
+            exit 1
+          fi
+          # Build ID musi v binarce SKUTECNE byt -- jinak log ze zarizeni opet
+          # nelze pripsat commitu. Grep na "-run<cislo>" je silny test: dokazuje,
+          # ze hodnota prosla pres make az do .rodata, ne jen ze format existuje.
+          # Vlakna jadra prochazeji pres pthread_create_soloader -> thread_trampoline
+          # -> assign_work_core() PRED tim, nez maji jmeno. Bez tohohle logu nejde
+          # poznat, jestli nejake zustane anonymni na jadru 1/2 (tj. i na tom, kde
+          # je natvrdo MTVU). Neni to za #ifdef -> musi byt v obou.
+          wap=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "work pool core " || true); wap=${wap:-0}
+          wad=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "work pool core " || true); wad=${wad:-0}
+          echo "::notice::work-pool log pri vytvoreni vlakna: ${wap}x (produkce) / ${wad}x (diag), oboji ma byt aspon 1"
+          if [ "$wap" = "0" ] || [ "$wad" = "0" ]; then
+            echo "::error::log assign_work_core() chybi (prod ${wap}x / diag ${wad}x) -- anonymni vlakna jadra by opet nebyla videt"
+            exit 1
+          fi
+          # Role-less vlakna (CDVD, ISO Decompress, texture loader) se v logu
+          # drive vubec neobjevila, takze nebylo videt, ze jejich pool mask 0x6
+          # zahrnuje i core 2, kde je MTVU natvrdo. Neni to za #ifdef -> v obou.
+          rld=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "no dedicated role" || true); rld=${rld:-0}
+          rlp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "no dedicated role" || true); rlp=${rlp:-0}
+          echo "::notice::role-less vlakna v logu: ${rld}x (diag) / ${rlp}x (produkce), oboji ma byt aspon 1"
+          if [ "$rld" = "0" ] || [ "$rlp" = "0" ]; then
+            echo "::error::log pro role-less vlakna chybi (diag ${rld}x / prod ${rlp}x) -- z logu by opet neslo poznat, jestli neco sdili jadro s MTVU"
+            exit 1
+          fi
+          # Priorita role-less vlaken: dedi 30 po EE (stejne jako GS/MTVU na
+          # jadrech 1/2), pthr_pin_by_name() ji snizuje na LIGHT_THREAD_PRIO a
+          # loguje "pred -> po". Bez te hodnoty v .rodata by se z logu nedalo
+          # overit, ze se snizeni opravdu provedlo (a ne ze kernel odmitl).
+          # Neni to za #ifdef -> v obou.
+          rpd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "priority %d -> %d" || true); rpd=${rpd:-0}
+          rpp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "priority %d -> %d" || true); rpp=${rpp:-0}
+          ipd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "inherited priority %d" || true); ipd=${ipd:-0}
+          ipp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "inherited priority %d" || true); ipp=${ipp:-0}
+          echo "::notice::priorita v logu: role-less ${rpd}x/${rpp}x, anonymni (work pool) ${ipd}x/${ipp}x (diag/prod), vse ma byt aspon 1"
+          if [ "$rpd" = "0" ] || [ "$rpp" = "0" ] || [ "$ipd" = "0" ] || [ "$ipp" = "0" ]; then
+            echo "::error::readback priority vlaken chybi (role-less diag ${rpd}x / prod ${rpp}x, anonymni diag ${ipd}x / prod ${ipp}x)"
+            exit 1
+          fi
+          # Druhy radek perf okna (jen diag): CPU cas EE/GS/MTVU z
+          # svcGetInfo(ThreadTickCount) a fastmem fault citace. Bez nich radek
+          # "presents / ... fps" rika JAK pomalu, ne PROC.
+          pcd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "perf: cpu %s | fastmem lazy" || true); pcd=${pcd:-0}
+          pcp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "perf: cpu %s | fastmem lazy" || true); pcp=${pcp:-0}
+          echo "::notice::perf cpu/fastmem radek: ${pcd}x (diag, ma byt aspon 1) / ${pcp}x (produkce, ma byt 0)"
+          if [ "$pcd" = "0" ] || [ "$pcp" != "0" ]; then
+            echo "::error::perf cpu/fastmem radek: diag ${pcd}x / prod ${pcp}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
+            exit 1
+          fi
+          # Treti radek perf okna (jen diag): kam jde cas, ktery neni CPU cas.
+          # Log z GT3 ukazal 30.4 fps, kde zadny thread nebyl nad 55 % CPU --
+          # tedy cekani, ne pocitani. Bez techto citacu nejde rozlisit, jestli
+          # se ceka na GPU (fence / queue-idle), jestli se za behu kompiluji
+          # pipeliny, nebo jestli scena dela readbacky (copy2buf, ktere ridi
+          # EmuCore/GS/HWDownloadMode) a kopie misto texture barrier.
+          gbd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "perf: gpu blocked fence" || true); gbd=${gbd:-0}
+          gbp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "perf: gpu blocked fence" || true); gbp=${gbp:-0}
+          echo "::notice::perf gpu-blocked radek: ${gbd}x (diag, ma byt aspon 1) / ${gbp}x (produkce, ma byt 0)"
+          if [ "$gbd" = "0" ] || [ "$gbp" != "0" ]; then
+            echo "::error::perf gpu-blocked radek: diag ${gbd}x / prod ${gbp}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
+            exit 1
+          fi
+          # Cas vlakna, ktere prezentuje, uvnitr tri volani, ktera umi cekat na
+          # GPU, aniz by se dotkla fence: FIFO swapchain bez volneho obrazu
+          # zastavi volajiciho v vkAcquireNextImageKHR a kompozitor, ktery snimek
+          # nestiha prevzit, ho zastavi v vkQueuePresentKHR. Bez techto poli
+          # vypadal radek "cekani na GPU = 0 %" stejne v behu vazanem na CPU i v
+          # behu vazanem na GPU -- a presne tak dvakrat vznikla diagnoza, ktera
+          # pak merenim neobstala. Pri vyssim internim rozliseni (napr. 2x = 4x
+          # pixelu proti nativu) se zed muze presunout na stranu GPU, a tohle je
+          # jedine misto v logu, kde by se to ukazalo.
+          vad=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "vk acquire %llu x" || true); vad=${vad:-0}
+          vap=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "vk acquire %llu x" || true); vap=${vap:-0}
+          echo "::notice::perf pole acquire/submit/present: ${vad}x (diag, ma byt aspon 1) / ${vap}x (produkce, ma byt 0)"
+          if [ "$vad" = "0" ] || [ "$vap" != "0" ]; then
+            echo "::error::perf pole acquire/submit/present: diag ${vad}x / prod ${vap}x -- diag je musi mit, produkce nesmi"
+            exit 1
+          fi
+          # Adresni prostor, ve kterem proces skutecne nabootoval. Na otazku,
+          # jestli by pomohl sirsi (39bitovy) adresni prostor nebo forwarder
+          # s plnym application rezimem, musi odpovedet Horizon, ne predpoklad:
+          # 512 GiB je 39bitovy prostor aplikace, 64 GiB je 36bitovy a 2 GiB je
+          # 32bitovy prostor appletu, do ktereho by se ani nevesla jedina
+          # souvisla 4 GiB fastmem rezervace z libc_shim.c.
+          asd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "address space aslr=0x" || true); asd=${asd:-0}
+          asp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "address space aslr=0x" || true); asp=${asp:-0}
+          echo "::notice::log adresniho prostoru: ${asd}x (diag, ma byt aspon 1) / ${asp}x (produkce, ma byt 0)"
+          if [ "$asd" = "0" ] || [ "$asp" != "0" ]; then
+            echo "::error::log adresniho prostoru: diag ${asd}x / prod ${asp}x -- diag ho musi mit, produkce nesmi"
+            exit 1
+          fi
+          # Radek pro jeden dlouhy snimek. Soucty za okno (300 snimku / ~6 s)
+          # nedokazou rict, kam se podel jeden 82ms snimek: to je 1,4 % okna,
+          # takze zmizi v kazdem procentu i v kazdem citaci. Nejnebezpecnejsi
+          # na tom je, ze to vypada jako mereni -- log z GT3 (build e0e44b4)
+          # hlasil u okna s nejdelsim snimkem behu 82,4 ms jen EE 68 % / GS 58 %
+          # / pipeliny 3,1 ms / fence 8,1 ms, tedy nic, co by ten snimek
+          # vysvetlovalo. Tenhle radek differencuje tyz citace po jednom snimku
+          # a rika, jestli cas sel do volani Vulkanu, do cteni ze souboru, do
+          # CPU nejake ze tri roli, nebo do nicoho z toho.
+          hid=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "perf: hitch" || true); hid=${hid:-0}
+          hip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "perf: hitch" || true); hip=${hip:-0}
+          echo "::notice::perf hitch radek: ${hid}x (diag, ma byt aspon 1) / ${hip}x (produkce, ma byt 0)"
+          if [ "$hid" = "0" ] || [ "$hip" != "0" ]; then
+            echo "::error::perf hitch radek: diag ${hid}x / prod ${hip}x -- diag ho musi mit, produkce nesmi (je za NETHERSX2_VK_DIAGNOSTIC)"
+            exit 1
+          fi
+          # Nastaveni, ktera ten beh skutecne pouzil, z teze store, ze ktere je
+          # cte jadro. Bez toho se log musi dekodovat z varovani "[Unsafe
+          # Settings]", ktera setting jen pojmenuji, kdyz se lisi od vychoziho, a
+          # nikdy nereknou hodnotu: "CRC Fix Level is not set to default" nerozlisuje
+          # Minimum od Aggressive a setting, ktery jadro nepovazuje za nebezpecny,
+          # se neobjevi vubec. Teprve tohle dela dva logy porovnatelne.
+          sid=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "settings upscale=" || true); sid=${sid:-0}
+          sip=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "settings upscale=" || true); sip=${sip:-0}
+          echo "::notice::log aktivnich nastaveni: ${sid}x (diag, ma byt aspon 1) / ${sip}x (produkce, ma byt 0)"
+          if [ "$sid" = "0" ] || [ "$sip" != "0" ]; then
+            echo "::error::log aktivnich nastaveni: diag ${sid}x / prod ${sip}x -- diag ho musi mit, produkce nesmi"
+            exit 1
+          fi
+          # Druhy radek echa: per-pixel GPU knofliky (blending, mipmapping,
+          # preload, fxaa, cas, shade boost, skip duplicate frames, deinterlace,
+          # anizo, filtering). Beh pri 2x internim rozliseni ukázal GPU-bound usek
+          # (acquire 37-86 % okna pri EE 70-83 % a GS 55-75 %), a bez techto cisel
+          # z logu nevyplyne, kolik pixelove prace GPU vlastne dostavalo.
+          sgd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "settings-gpu blend=" || true); sgd=${sgd:-0}
+          sgp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "settings-gpu blend=" || true); sgp=${sgp:-0}
+          echo "::notice::log GPU nastaveni: ${sgd}x (diag, ma byt aspon 1) / ${sgp}x (produkce, ma byt 0)"
+          if [ "$sgd" = "0" ] || [ "$sgp" != "0" ]; then
+            echo "::error::log GPU nastaveni: diag ${sgd}x / prod ${sgp}x -- diag ho musi mit, produkce nesmi"
+            exit 1
+          fi
+          wbf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "wrapper build " || true); wbf=${wbf:-0}
+          # [0-9a-f]{7} pred -run: dokazuje ze tam je i commit, ne jen cislo behu.
+          # Holý grep na "-run<cislo>" by prosel i s prazdnou sha.
+          bidf=$("$xstrings" NetherSX2_nx_vk.nro | grep -cE "[0-9a-f]{7}-run$GITHUB_RUN_ID" || true); bidf=${bidf:-0}
+          bidd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -cE "[0-9a-f]{7}-run$GITHUB_RUN_ID" || true); bidd=${bidd:-0}
+          echo "::notice::build ID v binarce: run-tag ${bidf}x (produkce) / ${bidd}x (diag), format ${wbf}x"
+          if [ "$wbf" = "0" ] || [ "$bidf" = "0" ] || [ "$bidd" = "0" ]; then
+            echo "::error::build ID se do .nro nedostal (format ${wbf}x, run-tag prod ${bidf}x / diag ${bidd}x) -- log ze zarizeni by nebyl pripsatelny commitu"
+            exit 1
+          fi
+          if [ "$fgmd" = "0" ] || [ "$fgmp" = "0" ] || [ "$fgt" = "0" ]; then
+            echo "::error::frakcni frame generation se nedostala do binarky (LSFGMode diag ${fgmd}x / prod ${fgmp}x, LSFGTargetFPS ${fgt}x)"
+            exit 1
+          fi
+          if [ "$prid" = "0" ] || [ "$prip" = "0" ] || [ "$emup" = "0" ]; then
+            echo "::error::pthr_pin_driver_core() nebo EMU_THREAD_PRIO se nedostaly do binarky (driver-pin diag ${prid}x / prod ${prip}x, priorita ${emup}x)"
+            exit 1
+          fi
+          # Sbalovani opakovani v corelogu. Jadro behem hry loguje Timezone=-360
+          # a SummerTime=0 stridave ~110x za sekundu; v diag buildu to zaplnilo
+          # 8 MiB za mene nez dvacet minut a pak prestalo psat uplne vsechno,
+          # death note nevyjimaje. Neni to za zadnym #ifdef, takze musi byt
+          # v obou binarkach.
+          repd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "repeats suppressed" || true)
+          repp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "repeats suppressed" || true)
+          echo "::notice::corelog sbalovani opakovani: ${repd}x (diag) / ${repp}x (produkce)"
+          # VU cycle steal: klic preference v oboji binarce (cte ho wrapper) a
+          # format logu, ktery dokazuje, ze patch_vu_steal_4248() zustal
+          # zkompilovany a neni jen mrtvy kod za podminkou.
+          vsd=$("$xstrings" NetherSX2_nx_vk_diag.nro | grep -c "vuCycleSteal" || true)
+          vsp=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "vuCycleSteal" || true)
+          vsf=$("$xstrings" NetherSX2_nx_vk.nro | grep -c "VU cycle steal level" || true)
+          echo "::notice::VU cycle steal: pref ${vsd}x (diag) / ${vsp}x (produkce), log-format ${vsf}x (produkce)"
+          echo "::notice::corelog/libc_shim v obou: region ${regd}x (diag) / ${regp}x (produkce), cutoff-INFO ${cutp}x (produkce) / ${cutd}x (diag, ma byt 0), cpuinfo-sysfs ${cpud}x (diag) / ${cpup}x (produkce)"
+          echo "::notice::sched_yield counter: ${yld}x (diag, ma byt 1) / ${ylp}x (produkce, ma byt 0)"
+          echo "::notice::diag kontrola: vulkan.log ${hits}x + host main entered ${hits2}x (diag), ${prod}x (produkce, ma byt 0); core.log ${cored}x (diag) / ${corep}x (produkce), oboji ma byt aspon 1; sysconf-hint ${scd}x (diag) / ${scp}x (produkce); Vulkan memory heap/budget log ${memd}x (diag) / ${memp}x (produkce); actual heap peak format ${heapd}x (diag) / ${heapp}x (produkce, ma byt 0); logging-jadra ${logd}x (diag) / ${logp}x (produkce)"
+          if [ "$hits" = "0" ] || [ "$hits2" = "0" ]; then
+            echo "::error::NETHERSX2_VK_DIAGNOSTIC se v diag buildu neprojevilo -- binarka by nelogovala"
+            exit 1
+          fi
+          if [ "$cored" = "0" ] || [ "$corep" = "0" ]; then
+            echo "::error::source/corelog.c se nedostal do binarky -- konzole jadra by se zahazovala"
+            exit 1
+          fi
+          if [ "$scd" = "0" ] || [ "$memd" = "0" ] || [ "$heapd" = "0" ] || [ "$logd" = "0" ]; then
+            echo "::error::diag build neobsahuje sizing-hint sysconf (${scd}x), Vulkan heap/budget measurement (${memd}x), actual heap peak format (${heapd}x) nebo vynucene logovani jadra (${logd}x) -- chybi pozadovana diagnosticka cesta"
+            exit 1
+          fi
+          if [ "$regd" = "0" ] || [ "$regp" = "0" ]; then
+            echo "::error::shim_describe_address() chybi v binarce (diag ${regd}x / produkce ${regp}x) -- adresa abortu by zustala nececitelna"
+            exit 1
+          fi
+          if [ "$cutp" = "0" ] || [ "$cutd" != "0" ]; then
+            echo "::error::dvoustupnovy limit corelogu se neprojevil spravne: cutoff-INFO ma byt 1x v produkci a 0x v diag, je ${cutp}x/${cutd}x"
+            exit 1
+          fi
+          if [ "$cpud" = "0" ] || [ "$cpup" = "0" ]; then
+            echo "::error::synteticke soubory pro cpuinfo chybi v binarce (diag ${cpud}x / produkce ${cpup}x) -- /sys a /proc cesty by opet selhaly"
+            exit 1
+          fi
+          if [ "$vsp" = "0" ] || [ "$vsd" = "0" ] || [ "$vsf" = "0" ]; then
+            echo "::error::patch_vu_steal_4248() se nedostal do binarky (pref diag ${vsd}x / prod ${vsp}x, log-format ${vsf}x)"
+            exit 1
+          fi
+          if [ "$yld" = "0" ] || [ "$ylp" != "0" ]; then
+            echo "::error::sched_yield counter neni spravne za #ifdef: diag ${yld}x (ma byt aspon 1), produkce ${ylp}x (ma byt 0)"
+            exit 1
+          fi
+          if [ "$repd" = "0" ] || [ "$repp" = "0" ]; then
+            echo "::error::corelog nesbaluje opakovani (diag ${repd}x / produkce ${repp}x) -- zaplava Timezone/SummerTime by v diag buildu do dvaceti minut odrizla i death note"
+            exit 1
+          fi
+          if [ "$pind" = "0" ] || [ "$pinp" = "0" ] || [ "$pfd" = "0" ] || [ "$pfp" = "0" ]; then
+            echo "::error::pthr_pin_by_name() se nedostal do binarky (ThreadPinning diag ${pind}x / produkce ${pinp}x, log-format diag ${pfd}x / produkce ${pfp}x) -- prctl(PR_SET_NAME) by se opet zahazoval a GS s MTVU by sdilely jadro podle poradi vytvoreni"
+            exit 1
+          fi
+          if [ "$heapp" != "0" ]; then
+            echo "::error::produkce obsahuje diagnostic-only actual heap peak format (${heapp}x), musi byt 0"
+            exit 1
+          fi
+          if [ "$scp" != "0" ] || [ "$memp" != "0" ] || [ "$logp" != "0" ]; then
+            echo "::warning::produkce obsahuje diag-only sysconf/memory logging/core logging retezce (${scp}x/${memp}x/${logp}x), melo by byt 0"
+          fi
+          if [ "$prod" != "0" ]; then
+            echo "::warning::produkci nro obsahuje diagnostiku, melo by byt bez ni"
+          fi
+          cp NetherSX2_nx_vk_diag.nro launcher/romfs/emu/NetherSX2_nx_vk.nro
+          make -C launcher -j"$(nproc)" || { echo "::error::diag launcher selhal"; exit 1; }
+          mv -f launcher/NetherSX2.nro NetherSX2-diag.nro
+          # romfs vrat na produkci emulator, aby dalsi kroky (ani dalsi beh)
+          # nemohly omylem zabalit diagnostickou verzi.
+          cp NetherSX2_nx_vk.nro launcher/romfs/emu/NetherSX2_nx_vk.nro
+          echo "::notice::diag bundle: $(ls -la NetherSX2-diag.nro)"
+
+          # Vychozi adresar s ISO je na zaklade pozadavku sdmc:/roms/ps2. Musi byt
+          # v launcheru v obou bundlech. Co pres strings overit NEJDE a co je na
+          # tom nejrizikovejsi: DEF_GAMEDIR zaroven nesmi zpatky do pole
+          # "directories", protoze ensureDirectory() je jeden ne-rekurzivni mkdir
+          # a jeho selhani vraci startupFailure() -- na konzoli bez /roms by tedy
+          # launcher vubec nenabootoval. Proto se vytvari best-effort zvlast.
+          # FXAA je v jadre (shaders/common/fxaa.fx, "#define FXAA_GLSL_VK 1") a asset
+          # se bundli, ale launcher ho nikdy nevystavoval -- takze slo jen o jednu radku
+          # v menu. Kontrola klice, ne popisku: ten se muze prelozit.
+          # Malymi "fxaa": tak ten klic vaze jadro. Velka pismena by prosly tim,
+          # ze launcher retezec obsahuje, ale radka by byla mrtva -- viz
+          # check_ini_keys.py vyse, ktery porovnava obe strany.
+          fxp=$("$xstrings" NetherSX2.nro | grep -c "EmuCore/GS/fxaa" || true); fxp=${fxp:-0}
+          fxd=$("$xstrings" NetherSX2-diag.nro | grep -c "EmuCore/GS/fxaa" || true); fxd=${fxd:-0}
+          echo "::notice::FXAA v grafickem menu: ${fxp}x (produkce) / ${fxd}x (diag), oboji ma byt aspon 1"
+          if [ "$fxp" = "0" ] || [ "$fxd" = "0" ]; then
+            echo "::error::FXAA se nedostalo do menu launcheru (prod ${fxp}x / diag ${fxd}x) -- jadro ho umi a asset fxaa.fx je v bundle, jen nebylo jak ho zapnout"
+            exit 1
+          fi
+          gdp=$("$xstrings" NetherSX2.nro | grep -c "sdmc:/roms/ps2" || true); gdp=${gdp:-0}
+          gdd=$("$xstrings" NetherSX2-diag.nro | grep -c "sdmc:/roms/ps2" || true); gdd=${gdd:-0}
+          echo "::notice::vychozi adresar her sdmc:/roms/ps2: ${gdp}x (produkce) / ${gdd}x (diag)"
+          if [ "$gdp" = "0" ] || [ "$gdd" = "0" ]; then
+            echo "::error::vychozi adresar her sdmc:/roms/ps2 v launcheru chybi (prod ${gdp}x / diag ${gdd}x) -- hrac by musel pri kazde instalaci znovu hledat svoje ISO"
+            exit 1
+          fi
+          # GS hardwarove hacky v menu. Scena vazana na GPU (noc v GT3: vrstvy
+          # aditivne michanych svetel) nema zadnou opravu na strane CPU, takze
+          # jedine zbyvajici paky jsou presunout praci z GPU nebo renderer
+          # donutit necekat na readbacky. Kazdy klic byl pred vystavenim overen
+          # proti stringum pripnuteho standardniho 4248 jadra: jadro sedi mezi dvema
+          # upstream generacemi, takze napriklad UserHacks_AutoFlushLevel,
+          # UserHacks_CPUSpriteRenderLevel, UserHacks_DisableRenderFixes a
+          # UserHacks_DrawBuffering v nem nejsou a radka s takovym klicem by
+          # zapsala hodnotu, kterou jaderny getter nikdy necte.
+          # strings se pousti jednou na binarku, ne jednou na klic: .nro ma 47 MB
+          # a kazdy dalsi klic by jinak znamenal dva prubehy pres celou binarku
+          # (prod + diag), takze se dumpne jednou a grepuje se z textu.
+          "$xstrings" NetherSX2.nro > /tmp/nx_lprod.txt
+          "$xstrings" NetherSX2-diag.nro > /tmp/nx_ldiag.txt
+          hk_missing=""
+          for hk in EmuCore/GS/HWSpinCPUForReadbacks EmuCore/GS/HWSpinGPUForReadbacks \
+                    EmuCore/GS/UserHacks_CPUSpriteRenderBW EmuCore/GS/UserHacks_CPUCLUTRender \
+                    EmuCore/GS/UserHacks_CPU_FB_Conversion EmuCore/GS/UserHacks_Disable_Safe_Features \
+                    EmuCore/GS/UserHacks_DisableDepthSupport EmuCore/GS/UserHacks_DisablePartialInvalidation \
+                    EmuCore/GS/UserHacks_EstimateTextureRegion EmuCore/GS/UserHacks_SkipDraw_Start \
+                    EmuCore/GS/UserHacks_TextureInsideRt EmuCore/GS/UserHacks_GPUTargetCLUTMode \
+                    EmuCore/GS/UserHacks_SkipDraw_End EmuCore/GS/OverrideTextureBarriers; do
+            hkc=$(grep -c "$hk" /tmp/nx_lprod.txt || true); hkc=${hkc:-0}
+            hkk=$(grep -c "$hk" /tmp/nx_ldiag.txt || true); hkk=${hkk:-0}
+            if [ "$hkc" = "0" ] || [ "$hkk" = "0" ]; then hk_missing="$hk_missing $hk"; fi
+          done
+          # Vysvetleni nove vychozi hodnoty HW download mode musi byt v binarce
+          # spolu s ni: bez nej by prepnuti z Accurate vypadalo jako nahoda a
+          # cisla, o ktera se opira, by se ztratila.
+          dmp=$(grep -c "default here is Unsynchronized rather than Accurate" /tmp/nx_lprod.txt || true); dmp=${dmp:-0}
+          dmd=$(grep -c "default here is Unsynchronized rather than Accurate" /tmp/nx_ldiag.txt || true); dmd=${dmd:-0}
+          echo "::notice::GS hardwarove hacky v menu: chybejici='${hk_missing:-zadne}', duvod vychoziho download mode ${dmp}x (produkce) / ${dmd}x (diag)"
+          if [ -n "$hk_missing" ]; then
+            echo "::error::GS hardwarove hacky se nedostaly do menu launcheru:${hk_missing} -- GPU-bound scena by se dala ladit jen rucni upravou INI"
+            exit 1
+          fi
+          if [ "$dmp" = "0" ] || [ "$dmd" = "0" ]; then
+            echo "::error::vysvetleni vychoziho HW download mode v helpu chybi (prod ${dmp}x / diag ${dmd}x)"
+            exit 1
+          fi
+
+      # Preserve the exact diagnostic link map used by the tested NRO. The
+      # device exception gives an ASLR PC and a GIPA function pointer; this map
+      # is needed to relate their relative distance back to a linked symbol.
+      - name: VK diagnostic link map
+        uses: actions/upload-artifact@v4
+        with:
+          name: nethersx2-vk-link-map
+          path: build-vk-diag/NetherSX2_nx_vk_diag.map
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Artefakty
+        uses: actions/upload-artifact@v4
+        with:
+          name: nethersx2-switch
+          if-no-files-found: warn
+          path: |
+            NetherSX2.nro
+            NetherSX2-diag.nro
+            NetherSX2_nx_vk.nro
+            NetherSX2_nx_vk_diag.nro
+            nxvk-BUILDINFO.txt
