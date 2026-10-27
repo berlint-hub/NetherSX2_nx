@@ -32,7 +32,6 @@
 #define NX_FPS_API_OFFSET 14u
 #define NX_FPS_BUFFERS_OFFSET 55u
 #define NX_FPS_SET_BUFFERS_OFFSET 56u
-#define NX_FPS_DISPLAY_SYNC_OFFSET 59u
 #define NX_FPS_API_VULKAN 3u
 #define RESOURCE_LIMIT_SESSION_COUNT_MAX 4u
 #define RESOURCE_LIMIT_SESSION_COUNT_VALUE 32u
@@ -255,7 +254,7 @@ static volatile uint8_t *saltysd_find_shared_block(void) {
   if (!base)
     return NULL;
 
-  for (size_t offset = 0; offset + NX_FPS_DISPLAY_SYNC_OFFSET + 1 <=
+  for (size_t offset = 0; offset + NX_FPS_SET_BUFFERS_OFFSET + 1 <=
                            SALTYSD_SHARED_MEMORY_SIZE; offset += 4) {
     uint32_t magic;
     memcpy(&magic, base + offset, sizeof(magic));
@@ -558,19 +557,11 @@ void saltysd_display_sync_shutdown(void) {
 }
 
 bool saltysd_display_sync_active(void) {
-  /* A mapped FPSLocker block alone is not a display-sync request. Honor its
-   * own packed handheld/docked toggles so the user can control max-FPS and sync
-   * independently, and don't suppress the low-latency path while both are off. */
-  if (!__atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE) ||
-      !__atomic_load_n(&s_target_ready, __ATOMIC_ACQUIRE))
-    return false;
-  volatile uint8_t *block = __atomic_load_n(&s_fpslocker_block,
-                                             __ATOMIC_ACQUIRE);
-  if (!block)
-    return false;
-  const uint8_t flags = __atomic_load_n(block + NX_FPS_DISPLAY_SYNC_OFFSET,
-                                         __ATOMIC_ACQUIRE);
-  return saltysd_fpslocker_display_sync_enabled(flags) != 0;
+  /* Preserve the existing WSI/pacing gate: once the shared FPSLocker block is
+   * mapped, the display-sync path is considered present. Do not reinterpret its
+   * toggle bits here; FPSLocker remains responsible for those settings. */
+  return __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE) &&
+         __atomic_load_n(&s_target_ready, __ATOMIC_ACQUIRE);
 }
 
 float saltysd_display_sync_rate(void) {

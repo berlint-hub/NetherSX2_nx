@@ -5,11 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SALTYSD_FPSLOCKER_DISPLAY_SYNC_HANDHELD 0x01u
-#define SALTYSD_FPSLOCKER_DISPLAY_SYNC_DOCKED   0x02u
-#define SALTYSD_FPSLOCKER_DISPLAY_SYNC_MASK \
-  (SALTYSD_FPSLOCKER_DISPLAY_SYNC_HANDHELD | SALTYSD_FPSLOCKER_DISPLAY_SYNC_DOCKED)
-
 typedef struct {
   unsigned average_fps;
   unsigned p90_fps;
@@ -54,11 +49,5 @@ saltysd_estimate_fps(const uint64_t *intervals, size_t count,
   return result;
 }
 
-/* FPSLocker owns its FPS target and the display-sync toggles. This predicate is
- * deliberately separate from shared-memory availability so merely finding its
- * block cannot override the user's sync/low-latency choice. */
-static inline int saltysd_fpslocker_display_sync_enabled(uint8_t flags) {
-  return (flags & SALTYSD_FPSLOCKER_DISPLAY_SYNC_MASK) != 0;
-}
 
 #endif /* NETHERSX2_SALTYSD_FPS_POLICY_H */

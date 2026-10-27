@@ -162,12 +162,11 @@ game-cap target, not a display-refresh mailbox. FPSLocker's increase/decrease
 actions remain authoritative and can make their own SaltySD refresh-rate
 request. The bridge only observes the target for diagnostics.
 
-Display-sync activation follows FPSLocker's shared `displaySync` toggle bits,
-not merely the presence of its shared block. NetherSX2 therefore requests
-FIFO/blocks the low-latency path only when FPSLocker has actually enabled
-handheld or docked display sync. NetherSX2 does not change the user's display
-sync toggle or select a panel rate itself. Deko3D follows the panel with swap
-interval 1.
+FPSLocker owns its shared `displaySync`/`displaySyncDocked` toggles and sends its
+own SaltySD commands for display-rate changes. NetherSX2 does not write those
+toggle bits or use `FPSlocked` as a panel-rate setting. Its existing WSI/pacing
+selection is unchanged by this target-ownership fix. Deko3D follows the panel
+with swap interval 1.
 
 Vulkan low latency is a separate, explicit `EmuCore/GS/low_latency = 1`
 preference; AutoSyncFPSLocker never enables it. Low latency is not compatible
